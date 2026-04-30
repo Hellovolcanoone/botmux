@@ -34,33 +34,23 @@ mkdirSync(REGISTRY_DIR, { recursive: true });
 const registry = new DaemonRegistry(REGISTRY_DIR);
 const aggregator = new Aggregator();
 const subs = new Map<string, () => void>();
+const attaching = new Set<string>();   // dedup concurrent attaches per appId
 
-function syncSubscriptions(): void {
-  const online = new Set(registry.list().map(d => d.larkAppId));
-  // Open new subscriptions
-  for (const d of registry.list()) {
-    if (!subs.has(d.larkAppId)) {
-      subs.set(
-        d.larkAppId,
-        subscribeDaemon(d, aggregator, e =>
-          logger.warn(`[aggregator] ${d.larkAppId}: ${e.message}`),
-        ),
-      );
-    }
-  }
-  // Close subscriptions for offline daemons
-  for (const [id, off] of subs) {
-    if (!online.has(id)) { off(); subs.delete(id); }
-  }
-}
-
-await registry.start();
-registry.on(syncSubscriptions);
-syncSubscriptions();
-
-// Initial hydrate from each online daemon
-async function hydrate(): Promise<void> {
-  for (const d of registry.list()) {
+/**
+ * Attach to one daemon: hydrate its sessions/schedules into the aggregator,
+ * THEN open the SSE subscription. Order matters — hydrating after subscribe
+ * would let snapshot data clobber events that arrived between subscribe and
+ * the snapshot fetch.
+ *
+ * Idempotent: a second call for the same daemon while one is in flight is a
+ * no-op; a call after attach finished re-hydrates (useful when a daemon
+ * restarts and we want to refresh its slice of the cache).
+ */
+async function attachDaemon(d: import('./dashboard/registry.js').DaemonInfo): Promise<void> {
+  if (attaching.has(d.larkAppId)) return;
+  attaching.add(d.larkAppId);
+  try {
+    // 1. Hydrate snapshot (blocking — completes before we wire SSE)
     try {
       const [sRes, schRes] = await Promise.all([
         fetch(`http://127.0.0.1:${d.ipcPort}/api/sessions`),
@@ -73,9 +63,43 @@ async function hydrate(): Promise<void> {
     } catch (e: any) {
       logger.warn(`[dashboard] hydrate ${d.larkAppId}: ${e.message ?? e}`);
     }
+    // 2. Open SSE subscription if not already (idempotent)
+    if (!subs.has(d.larkAppId)) {
+      subs.set(
+        d.larkAppId,
+        subscribeDaemon(d, aggregator, e =>
+          logger.warn(`[aggregator] ${d.larkAppId}: ${e.message}`),
+        ),
+      );
+    }
+  } finally {
+    attaching.delete(d.larkAppId);
   }
 }
-await hydrate();
+
+function syncSubscriptions(): void {
+  const online = new Set(registry.list().map(d => d.larkAppId));
+  // Attach (hydrate + subscribe) any newly-online daemon. Fire-and-forget
+  // because the registry callback is sync and the attach is per-daemon
+  // independent.
+  for (const d of registry.list()) {
+    if (!subs.has(d.larkAppId)) {
+      void attachDaemon(d);
+    }
+  }
+  // Close subscriptions for daemons that went offline. Cache entries are
+  // intentionally retained — the user may still want to see the last-known
+  // state of those sessions/schedules in the dashboard.
+  for (const [id, off] of subs) {
+    if (!online.has(id)) { off(); subs.delete(id); }
+  }
+}
+
+await registry.start();
+registry.on(syncSubscriptions);
+// Initial attach for every daemon already known. Run in parallel so a slow
+// daemon doesn't block the others.
+await Promise.all(registry.list().map(attachDaemon));
 
 // ─── Static frontend ─────────────────────────────────────────────────────────
 

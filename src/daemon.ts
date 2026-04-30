@@ -809,14 +809,6 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     startedAt: Date.now(),
     lastHeartbeat: Date.now(),
   };
-  writeDaemonDescriptor(desc);
-  const descriptorHeartbeat = setInterval(() => {
-    desc.lastHeartbeat = Date.now();
-    try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
-  }, 30_000);
-  // Don't keep the event loop alive on this interval alone.
-  if (typeof descriptorHeartbeat.unref === 'function') descriptorHeartbeat.unref();
-
   // Initialise worker pool with daemon callbacks
   initWorkerPool({
     sessionReply,
@@ -834,15 +826,29 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // so dashboard IPC and other consumers can list/lookup live sessions.
   setActiveSessionsRegistry(activeSessions);
   // Seed dashboard IPC botName with the bot's config id; the friendly name from
-  // /bot/v3/info is wired into the registry descriptor (above) but the IPC server
+  // /bot/v3/info is wired into the registry descriptor (below) but the IPC server
   // also needs its own copy for SessionRow.botName.
   setBotName(cfg.larkAppId);
   setLarkAppId(cfg.larkAppId);
 
-  // Bind dashboard IPC HTTP server. Binds to 127.0.0.1 only — the dashboard
-  // sibling process is the sole consumer and runs on the same host.
+  // Bind dashboard IPC HTTP server BEFORE publishing the registry descriptor.
+  // Otherwise the dashboard process can race-fetch the IPC port from the
+  // descriptor and hit ECONNREFUSED before we're listening — that left every
+  // newly-started daemon's hydrate failing on dashboard startup. Binds to
+  // 127.0.0.1 only since the dashboard sibling runs on the same host.
   const ipcHandle = await startIpcServer({ port: ipcPort, host: '127.0.0.1' });
   logger.info(`[dashboard-ipc] listening on 127.0.0.1:${ipcHandle.port} (bot ${idx})`);
+
+  // Now that the IPC port is actually listening, publish the descriptor so
+  // the dashboard can discover us and successfully fetch /api/sessions etc.
+  desc.lastHeartbeat = Date.now();
+  writeDaemonDescriptor(desc);
+  const descriptorHeartbeat = setInterval(() => {
+    desc.lastHeartbeat = Date.now();
+    try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
+  }, 30_000);
+  // Don't keep the event loop alive on this interval alone.
+  if (typeof descriptorHeartbeat.unref === 'function') descriptorHeartbeat.unref();
 
   // Per-bot initialization
   for (const bot of getAllBots()) {
