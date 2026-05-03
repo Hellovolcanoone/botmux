@@ -332,22 +332,29 @@ export interface EventHandlers {
 }
 
 /** Compute the scope + anchor for an inbound message:
- *   - has root_id            → thread-scope, anchor = root_id
- *   - 话题群 + no root_id    → thread-scope, anchor = message_id (thread seed)
- *   - p2p + no root_id        → thread-scope, anchor = message_id (each DM
+ *   - root_id + thread_id     → thread-scope, anchor = root_id (real Lark 话题)
+ *   - 话题群 + no real thread → thread-scope, anchor = message_id (thread seed)
+ *   - p2p + no real thread    → thread-scope, anchor = message_id (each DM
  *                               top-level message starts a fresh topic; a
- *                               reply inside an existing thread carries a
- *                               root_id and threads into its session)
- *   - 普通群 + no root_id      → chat-scope, anchor = chat_id (entire group
- *                               is one session; user-initiated thread replies
- *                               still carry root_id and become thread-scope)
+ *                               reply inside an existing thread carries
+ *                               root_id+thread_id and threads into its session)
+ *   - 普通群 + no real thread  → chat-scope, anchor = chat_id (entire group
+ *                               is one session)
+ *
+ *  Why we gate on thread_id (not root_id alone): Lark 客户端的引用气泡 / 快速
+ *  回复 UI 有时会给"用户视角的顶层消息"塞 root_id 但**不会**塞 thread_id。
+ *  飞书官方文档：root_id/parent_id "仅在回复消息场景会有返回值"；thread_id
+ *  "不返回说明该消息非话题消息"。所以 thread_id 才是"是否真的处于话题里"的
+ *  权威信号。只看 root_id 会把 quote-bubble 错认为话题回复，把用户从 chat-scope
+ *  会话里拽走、又起一个孤立的 thread session。
  *  Exported for unit tests. */
 export async function decideRouting(
   larkAppId: string,
   message: any,
 ): Promise<{ scope: 'thread' | 'chat'; anchor: string }> {
   const rootId: string | undefined = message.root_id;
-  if (rootId) return { scope: 'thread', anchor: rootId };
+  const threadId: string | undefined = message.thread_id;
+  if (rootId && threadId) return { scope: 'thread', anchor: rootId };
 
   const chatType: string = message.chat_type ?? 'group';
   const messageId: string = message.message_id;
@@ -453,27 +460,22 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
 
         logger.debug('Received message:', message);
 
-        let routing = await decideRouting(larkAppId, message);
-        let ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
-
-        // 普通群 reflex: Lark sometimes attaches a `root_id` to what the user
-        // typed as a top-level message (quote/reply UI, fast-reply bubble,
-        // etc.). decideRouting honours root_id and routes thread-scope, which
-        // would spawn a fresh session and pop a repo-select card every time —
-        // even though the user clearly wants to keep talking in the existing
-        // chat-scope conversation. If we don't actually own a thread-scope
-        // session at this root but DO own a chat-scope session at this chat,
-        // continue the chat-scope session instead. Chat-scope sessions only
-        // get created in 普通群 (chat_mode='group'), so the presence of one is
-        // itself the "is 普通群" gate.
-        if (routing.scope === 'thread' && !ownsSession && chatType === 'group' && message.root_id) {
-          const ownsChatScope = handlers.isSessionOwner?.(chatId, larkAppId) ?? false;
-          if (ownsChatScope) {
-            logger.info(`Re-routing ${routing.anchor.substring(0, 12)} → chat-scope ${chatId.substring(0, 12)} (普通群 root_id w/o thread session, continuing chat-scope)`);
-            routing = { scope: 'chat', anchor: chatId };
-            ownsSession = true;
-          }
+        // Diagnostic: record the Lark quote-bubble UI quirk where root_id
+        // appears without thread_id. decideRouting now treats this as
+        // "no thread" (chat-scope / topic / new-topic depending on context),
+        // which is the authoritative behavior. Logging it here so we can spot
+        // any future surprise in the wild.
+        if (message.root_id && !message.thread_id) {
+          logger.info(
+            `[routing] root_id w/o thread_id (Lark UI quirk, treating as top-level): ` +
+            `msg=${messageId.substring(0, 12)} chat=${chatId.substring(0, 12)} ` +
+            `type=${chatType} root=${String(message.root_id).substring(0, 12)} ` +
+            `parent=${String(message.parent_id ?? '').substring(0, 12)}`,
+          );
         }
+
+        const routing = await decideRouting(larkAppId, message);
+        const ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
 
         // Permission gating — same shape as before, just keyed on
         // `ownsSession` (anchor-aware) instead of "rootId presence":

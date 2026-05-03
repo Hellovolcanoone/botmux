@@ -251,6 +251,51 @@ function getActiveCount(): number {
   return count;
 }
 
+/**
+ * Find a sibling session whose `workingDir` we can reuse to skip the repo card.
+ *
+ * Three layers, tried in order:
+ *   1. Same-anchor cross-bot peer (thread → root, chat → chatId): another bot
+ *      already pinned a workingDir at exactly this anchor, e.g. 同根 thread
+ *      reply or 同群 chat-scope reply.
+ *   2. New-thread-in-普通群 fallback: scope=thread + chatType=group + no
+ *      same-anchor peer → look for any chat-scope session in the same chat,
+ *      regardless of bot. Covers the user's "open a 话题 in 普通群 where
+ *      chat-scope sessions already exist" flow — the new thread is a child
+ *      context of the same chat, the workingDir is unambiguous, no need to
+ *      bounce through repo selection.
+ *   3. Otherwise: null (caller falls through to oncall pin or repo card).
+ *
+ * Same-bot is allowed in layer 2 only — the new thread anchors on a different
+ * id than the chat-scope session, so there's no anchor conflict and inheriting
+ * one's own pinned workingDir is the obvious default. Layer 1 keeps the
+ * cross-bot filter so two daemons don't ping-pong each other's anchors.
+ */
+function findInheritablePeer(opts: {
+  scope: 'thread' | 'chat';
+  anchor: string;
+  chatId: string;
+  chatType: 'group' | 'p2p';
+  selfAppId: string;
+}): { sessionId: string; larkAppId?: string; workingDir: string } | null {
+  const { scope, anchor, chatId, chatType, selfAppId } = opts;
+  const sameAnchorPeers = scope === 'thread'
+    ? sessionStore.findActiveSessionsByRoot(anchor)
+    : sessionStore.findActiveChatScopeSessionsByChat(chatId);
+  let peer = sameAnchorPeers.find(p => p.larkAppId !== selfAppId && !!p.workingDir);
+  if (peer && peer.workingDir) {
+    return { sessionId: peer.sessionId, larkAppId: peer.larkAppId, workingDir: peer.workingDir };
+  }
+  if (scope === 'thread' && chatType === 'group') {
+    const chatPeers = sessionStore.findActiveChatScopeSessionsByChat(chatId);
+    peer = chatPeers.find(p => !!p.workingDir);
+    if (peer && peer.workingDir) {
+      return { sessionId: peer.sessionId, larkAppId: peer.larkAppId, workingDir: peer.workingDir };
+    }
+  }
+  return null;
+}
+
 
 // Dependencies passed to command-handler
 const commandDeps: CommandHandlerDeps = {
@@ -302,7 +347,12 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
         await sessionReply(anchor, `⚠️ ${cmd} 仅 oncall owner 可执行。`, 'text', larkAppId);
         return;
       }
-      const session = sessionStore.createSession(chatId, messageId, cmdContent.substring(0, 50), chatType);
+      // Same rootMessageId reasoning as below in the main spawn path:
+      // thread-scope MUST anchor on the thread root or sessionAnchorId() will
+      // disagree with activeSessions's key and downstream card buttons silently
+      // break. Chat-scope keeps the inbound messageId as audit only.
+      const cmdRootIdForStore = scope === 'thread' ? anchor : messageId;
+      const session = sessionStore.createSession(chatId, cmdRootIdForStore, cmdContent.substring(0, 50), chatType);
       session.larkAppId = larkAppId;
       session.ownerOpenId = senderOpenId;
       session.lastCallerOpenId = senderOpenId;
@@ -341,10 +391,16 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   refreshCliVersion(botCfg.cliId, botCfg.cliPathOverride);
 
   // Create session in pending-repo state — don't spawn CLI yet.
-  // For thread-scope, rootMessageId == anchor (the thread root).
+  // For thread-scope, rootMessageId == anchor (the thread root). Critical
+  // because sessionAnchorId() uses rootMessageId for thread-scope, and the
+  // session card's button payload (value.root_id) flows from there back into
+  // activeSessions.get(sessionKey(rootId, larkAppId)) — if rootMessageId is
+  // the inbound message_id instead of the thread root, every restart/close/
+  // disconnect click silently no-ops.
   // For chat-scope, rootMessageId stores the seed message_id (audit only);
-  // routing keys off chatId via sessionAnchorId().
-  const session = sessionStore.createSession(chatId, messageId, parsed.content.substring(0, 50), chatType);
+  // routing keys off chatId via sessionAnchorId(), so any value works.
+  const rootIdForStore = scope === 'thread' ? anchor : messageId;
+  const session = sessionStore.createSession(chatId, rootIdForStore, parsed.content.substring(0, 50), chatType);
   session.larkAppId = larkAppId;
   session.ownerOpenId = senderOpenId;
   session.scope = scope;
@@ -355,22 +411,13 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   // Oncall group: pin working dir from binding, skip repo selection entirely.
   const oncallEntry = findOncallChat(larkAppId, chatId);
 
-  // Cross-bot inheritance: when a sibling bot already has an active session
-  // anchored here (typical: user @s a second Claude/Aiden in a thread or 普通群
-  // for review), reuse its workingDir and skip the repo card. The same block
-  // exists in handleThreadReply's auto-create branch — both handlers can land
-  // an unowned message after the 4fec43c routing change, so the inheritance
-  // probe has to run in both places.
-  let inheritedFrom: { sessionId: string; larkAppId?: string; workingDir: string } | null = null;
-  if (!oncallEntry) {
-    const peers = scope === 'thread'
-      ? sessionStore.findActiveSessionsByRoot(anchor)
-      : sessionStore.findActiveChatScopeSessionsByChat(chatId);
-    const peer = peers.find(p => p.larkAppId !== larkAppId && !!p.workingDir);
-    if (peer && peer.workingDir) {
-      inheritedFrom = { sessionId: peer.sessionId, larkAppId: peer.larkAppId, workingDir: peer.workingDir };
-    }
-  }
+  // Cross-bot / chat-scope inheritance: reuse a sibling session's workingDir
+  // and skip the repo card. Same block lives in handleThreadReply's auto-create
+  // branch — both handlers land unowned messages after the 4fec43c routing
+  // change. Helper is shared.
+  const inheritedFrom = !oncallEntry
+    ? findInheritablePeer({ scope, anchor, chatId, chatType, selfAppId: larkAppId })
+    : null;
 
   const pinnedWorkingDir = oncallEntry?.workingDir ?? inheritedFrom?.workingDir;
   const ds: DaemonSession = {
@@ -588,23 +635,16 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     // (mirrors handleNewTopic — auto-create was missing this check).
     const oncallEntry = findOncallChat(larkAppId, autoCreateChatId);
 
-    // Cross-bot inheritance: when another bot already pinned a working dir for
-    // this anchor (typical: Bot A is mid-task and @mentions Bot B for review),
-    // inherit it so we can spawn immediately with the @-content as the prompt
-    // — same shape as a human-initiated start, no repo selection round-trip.
-    // Thread-scope: peer lookup is by rootMessageId.
-    // Chat-scope (普通群): peer lookup is by chatId among other bots' chat-scope
-    //   sessions in the same chat — same intent, different anchor.
-    let inheritedFrom: { sessionId: string; larkAppId?: string; workingDir: string } | null = null;
-    if (!oncallEntry) {
-      const peers = scope === 'thread'
-        ? sessionStore.findActiveSessionsByRoot(anchor)
-        : sessionStore.findActiveChatScopeSessionsByChat(autoCreateChatId);
-      const peer = peers.find(p => p.larkAppId !== larkAppId && !!p.workingDir);
-      if (peer && peer.workingDir) {
-        inheritedFrom = { sessionId: peer.sessionId, larkAppId: peer.larkAppId, workingDir: peer.workingDir };
-      }
-    }
+    // Cross-bot / chat-scope inheritance — see findInheritablePeer comments.
+    const inheritedFrom = !oncallEntry
+      ? findInheritablePeer({
+          scope,
+          anchor,
+          chatId: autoCreateChatId,
+          chatType: autoCreateChatType,
+          selfAppId: larkAppId,
+        })
+      : null;
 
     const pinnedWorkingDir = oncallEntry?.workingDir ?? inheritedFrom?.workingDir;
     const newDs: DaemonSession = {

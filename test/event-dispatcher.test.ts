@@ -110,15 +110,22 @@ function makeBotMessageEvent(opts: {
   senderOpenId: string;
   content: string;
   rootId?: string;
+  /** Pass `null` to omit thread_id (model Lark quote-bubble quirk).
+   *  Otherwise defaults to rootId, matching real Lark threaded messages
+   *  where root_id and thread_id are co-present. */
+  threadId?: string | null;
   chatId?: string;
   chatType?: string;
   messageId?: string;
   mentions?: Array<{ key: string; name: string; id: { open_id: string } }>;
 }) {
+  const rootId = opts.rootId ?? 'root-001';
+  const threadId = opts.threadId === null ? undefined : (opts.threadId ?? rootId);
   return {
     message: {
       message_id: opts.messageId ?? 'msg-001',
-      root_id: opts.rootId ?? 'root-001',
+      root_id: rootId,
+      thread_id: threadId,
       chat_id: opts.chatId ?? 'chat-001',
       chat_type: opts.chatType ?? 'group',
       content: opts.content,
@@ -135,15 +142,23 @@ function makeUserMessageEvent(opts: {
   senderOpenId: string;
   content: string;
   rootId?: string;
+  /** Pass `null` to model Lark's quote-bubble quirk (root_id present without
+   *  thread_id). Otherwise defaults to rootId, matching real Lark threaded
+   *  messages where both fields are co-present. */
+  threadId?: string | null;
   chatId?: string;
   chatType?: string;
   messageId?: string;
   mentions?: Array<{ key: string; name: string; id: { open_id: string } }>;
 }) {
+  const threadId = opts.threadId === null
+    ? undefined
+    : (opts.threadId ?? opts.rootId);
   return {
     message: {
       message_id: opts.messageId ?? 'msg-001',
       root_id: opts.rootId,
+      thread_id: threadId,
       chat_id: opts.chatId ?? 'chat-001',
       chat_type: opts.chatType ?? 'group',
       content: opts.content,
@@ -436,20 +451,20 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     }));
   });
 
-  it('falls back to chat-scope when root_id is set in 普通群 but no thread session exists', async () => {
-    // User typed a top-level message in 普通群; Lark client attached root_id
-    // (quote/reply UI). decideRouting would say thread-scope, but we have no
-    // thread session at that root and DO have a chat-scope session at the chat
-    // → re-route to chat-scope so the user keeps talking in the existing convo
-    // instead of getting bounced into a fresh session + repo card.
+  it('treats 普通群 root_id WITHOUT thread_id as chat-scope (Lark quote-bubble quirk)', async () => {
+    // User typed a top-level message in 普通群; Lark UI attached root_id but
+    // NOT thread_id (引用气泡 / 快速回复 bubble). decideRouting now keys on
+    // thread_id, so this routes straight to chat-scope (no fallback needed).
     const event = makeUserMessageEvent({
       senderOpenId: USER_OPEN_ID,
       content: JSON.stringify({ text: '@BotA continue please' }),
       rootId: 'root-not-mine',
+      threadId: null, // explicit: simulate Lark quirk
       chatId: 'chat-fallback-1',
       chatType: 'group',
       mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
     });
+    mockGetChatMode.mockResolvedValueOnce('group'); // 普通群
     handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-fallback-1');
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
@@ -463,9 +478,37 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 
-  it('keeps thread-scope when root_id is set and a thread session DOES exist', async () => {
-    // Same shape as above but bot DOES own a thread-scope session at the root
-    // → no fallback, just continue the existing thread session.
+  it('honors a real Lark 话题 (root_id + thread_id) in 普通群 even when chat-scope session exists', async () => {
+    // User explicitly opened a 话题 on a message in 普通群 → message carries
+    // both root_id AND thread_id. The bot owns a chat-scope session at this
+    // chat, but the user's intent is a fresh thread, so we must NOT bounce
+    // them back into chat-scope. Routes thread-scope; since no thread session
+    // owns this root, handleNewTopic is invoked (fresh thread session).
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA new topic please' }),
+      rootId: 'real-topic-root',
+      threadId: 'omt_real_thread', // real Lark thread
+      chatId: 'chat-fallback-3',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    // Bot owns chat-scope at this chat — but we should NOT re-route into it.
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-fallback-3');
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'real-topic-root',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('keeps thread-scope when root_id+thread_id are set and a thread session DOES exist', async () => {
+    // Bot already owns a thread-scope session at this root → continue it.
     const event = makeUserMessageEvent({
       senderOpenId: USER_OPEN_ID,
       content: JSON.stringify({ text: '@BotA continue please' }),
