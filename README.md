@@ -152,6 +152,16 @@ CLI 进入 botmux 会话时自动获得 `~/.botmux/bin` 在 PATH 中，以及一
 
 这些能力通过 `--append-system-prompt` 注入和 Skill 描述自动引导 agent 使用。Skill + CLI 的组合相比 Anthropic 官方 Telegram channel 那套 MCP 方案：CLI 启动不用做 MCP 握手、不占用工具列表 token，且对 Claude Code / Codex / Gemini / OpenCode 通用 —— 只要 CLI 能读 system prompt 跑 shell 命令就行，不依赖任何 MCP 协议支持。
 
+### Dashboard 管控面
+
+> 命令行 `botmux dashboard` 出一次性 token URL，浏览器里跨所有 daemon/机器人管控
+
+- 一键定位回飞书话题 / 跳 Web 终端 / 多选批量关闭会话
+- 拉新群、自动转让群主、@ 提醒
+- 解散群聊、bot 退群（关联会话自动清理）
+
+<img src="docs/dashboard.png" alt="botmux dashboard" width="800" />
+
 ---
 
 ## 前置要求

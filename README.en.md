@@ -275,6 +275,16 @@ launch, doesn't burn tool-list tokens, and works across every CLI that
 can read a system prompt and shell out (Claude Code / Codex / Gemini /
 OpenCode), with no MCP protocol support required.
 
+### Dashboard
+
+> `botmux dashboard` issues a one-time-token URL — manage every daemon/bot from the browser.
+
+- One-click locate back to the Feishu thread / open Web Terminal / multi-select batch close
+- Create a new group with auto owner-transfer + @-mention notification
+- Disband or leave a chat (associated sessions auto-closed)
+
+<img src="docs/dashboard.png" alt="botmux dashboard" width="800" />
+
 ---
 
 ## Usage
