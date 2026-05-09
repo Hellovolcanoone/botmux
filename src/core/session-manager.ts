@@ -304,8 +304,16 @@ export function buildBridgeInputContent(
   }
 
   const isSelfMention = (m: LarkMention): boolean => {
-    if (selfMention?.openId && m.openId === selfMention.openId) return true;
-    return selfNames.has(m.name);
+    // openId is authoritative when both sides have it — avoids classifying
+    // a different bot as self in the (theoretical) case where two bots in
+    // the same chat share a display name.
+    if (selfMention?.openId && m.openId) {
+      return m.openId === selfMention.openId;
+    }
+    // At least one side is missing openId (cold-start window before
+    // probeBotOpenId returns, or a mention without openId): fall back to
+    // name match.
+    return !!selfMention?.name && selfNames.has(m.name);
   };
   const stripLeadingSelfMentions = (s: string): string => {
     if (selfNames.size === 0) return s;

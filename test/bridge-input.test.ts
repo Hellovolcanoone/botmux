@@ -67,6 +67,65 @@ describe('buildBridgeInputContent', () => {
     expect(out).toBe('@CodexFoo hello');
   });
 
+  it('strips multiple consecutive leading self mentions', () => {
+    const out = buildBridgeInputContent('@Codex @Codex hello', {
+      selfMention: { name: 'Codex', openId: 'ou_self' },
+    });
+    expect(out).toBe('hello');
+  });
+
+  it('preserves a self mention that is not at the leading position', () => {
+    const out = buildBridgeInputContent('please ask @Codex about this', {
+      selfMention: { name: 'Codex', openId: 'ou_self' },
+    });
+    expect(out).toBe('please ask @Codex about this');
+  });
+
+  it('treats newline after the bot name as a valid token boundary', () => {
+    const out = buildBridgeInputContent('@Codex\nhello', {
+      selfMention: { name: 'Codex', openId: 'ou_self' },
+    });
+    expect(out).toBe('hello');
+  });
+
+  it('strips alias name resolved via mention list when selfMention has only openId', () => {
+    // Cold-start scenario: bot's display name (probeBotOpenId) hasn't returned
+    // yet, but the inbound mention carries the openId — stripping should still
+    // pick up the alias from the mentions list.
+    const mentions: LarkMention[] = [
+      { key: '@_1', name: 'Codex 分身', openId: 'ou_self' },
+    ];
+    const out = buildBridgeInputContent('@Codex 分身 hello', {
+      mentions,
+      selfMention: { openId: 'ou_self' },
+    });
+    expect(out).toBe('hello');
+  });
+
+  it('does not classify a different bot as self when only display name matches', () => {
+    // Two bots happen to share a display name but have distinct openIds.
+    // openId is authoritative — the other bot's mention must survive in
+    // the [@提及] block.
+    const mentions: LarkMention[] = [
+      { key: '@_1', name: 'Claude', openId: 'ou_other' },
+    ];
+    const out = buildBridgeInputContent('hi team', {
+      mentions,
+      selfMention: { name: 'Claude', openId: 'ou_self' },
+    });
+    expect(out).toContain('[@提及]');
+    expect(out).toContain('@Claude');
+  });
+
+  it('does not crash when selfMention is omitted (regression: legacy callers)', () => {
+    const mentions: LarkMention[] = [{ key: '@_1', name: 'Codex', openId: 'ou_xxx' }];
+    const out = buildBridgeInputContent('@Codex hello', { mentions });
+    // Without selfMention we keep legacy behavior — leading @Codex stays,
+    // mention block stays.
+    expect(out).toContain('@Codex hello');
+    expect(out).toContain('[@提及]');
+  });
+
   it('contrast: buildFollowUpContent (non-bridge) DOES inject botmux_reminder', () => {
     const out = buildFollowUpContent('hi', 'sid-123', { isAdoptMode: false });
     // baseline: confirms the test for buildBridgeInputContent is meaningful
