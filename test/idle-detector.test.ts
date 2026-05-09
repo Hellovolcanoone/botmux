@@ -673,3 +673,47 @@ describe('IdleDetector: fireIdle()', () => {
     detector.dispose();
   });
 });
+
+// ─── CoCo readyPattern variants (regression: Trae CLI 0.120.31) ──────────
+
+describe('IdleDetector: CoCo readyPattern compatibility', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  // The actual coco adapter pattern. Keep test in sync with adapters/cli/coco.ts.
+  const COCO_READY = /⏵⏵|⬡/;
+
+  it('matches `⏵⏵` when CoCo runs with --yolo (bypass permissions)', () => {
+    const detector = new IdleDetector(makeCli({ readyPattern: COCO_READY }));
+    const cb = vi.fn();
+    detector.onIdle(cb);
+    detector.feed('⏵⏵ bypass permissions on');
+    vi.advanceTimersByTime(2500);
+    expect(cb).toHaveBeenCalledTimes(1);
+    detector.dispose();
+  });
+
+  it('matches `⬡` when CoCo runs without --yolo (adopted session)', () => {
+    // Pre-d289034 the readyPattern was just /⏵⏵/; an adopted CoCo (no --yolo)
+    // never matched, idle never fired, the transcript bridge never drained
+    // — and the user got radio silence on Lark.
+    const detector = new IdleDetector(makeCli({ readyPattern: COCO_READY }));
+    const cb = vi.fn();
+    detector.onIdle(cb);
+    detector.feed('⬡ openrouter-2o');
+    vi.advanceTimersByTime(2500);
+    expect(cb).toHaveBeenCalledTimes(1);
+    detector.dispose();
+  });
+
+  it('does not match unrelated decorative chars on CoCo screens', () => {
+    // Things like █ ◆ in the Trae announcements banner must not flip readySeen.
+    const detector = new IdleDetector(makeCli({ readyPattern: COCO_READY }));
+    const cb = vi.fn();
+    detector.onIdle(cb);
+    detector.feed('█ ◆ ◆ █  Try Codebase Copilot');
+    vi.advanceTimersByTime(2500);
+    expect(cb).toHaveBeenCalledTimes(0);
+    detector.dispose();
+  });
+});

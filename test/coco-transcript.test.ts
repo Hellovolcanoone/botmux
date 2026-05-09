@@ -122,3 +122,15 @@ describe('findCocoSessionByPid', () => {
     expect(findCocoSessionByPid(99999999)).toBeUndefined();
   });
 });
+
+describe('cocoEventsPathForSession', () => {
+  it('builds the events.jsonl path under ~/.cache/coco/sessions/<sid>/', async () => {
+    const { cocoEventsPathForSession } = await import('../src/services/coco-transcript.js');
+    const sid = '8db7d911-96f3-4764-a310-e42ae4cb626f';
+    const out = cocoEventsPathForSession(sid);
+    // Don't pin to a literal homedir — different test hosts. Just assert
+    // the structural shape every caller in the codebase relies on.
+    expect(out).toMatch(/\/\.cache\/coco\/sessions\/[0-9a-f-]{36}\/events\.jsonl$/);
+    expect(out).toContain(sid);
+  });
+});

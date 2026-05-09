@@ -26,12 +26,14 @@ vi.mock('node:os', () => ({
 }));
 
 import { execSync } from 'node:child_process';
-import { readFileSync, readlinkSync } from 'node:fs';
+import { readFileSync, readlinkSync, existsSync, readdirSync } from 'node:fs';
 import { discoverAdoptableSessions, validateAdoptTarget } from '../src/core/session-discovery.js';
 
 const mockExecSync = vi.mocked(execSync);
 const mockReadFileSync = vi.mocked(readFileSync);
 const mockReadlinkSync = vi.mocked(readlinkSync);
+const mockExistsSync = vi.mocked(existsSync);
+const mockReaddirSync = vi.mocked(readdirSync);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -52,8 +54,30 @@ function setupMocks(opts: {
   childMap?: Record<number, number[]>;
   dimsMap?: Record<string, string>;
   claudeMeta?: Record<number, string>;
+  /** pid → ordered list of /proc/<pid>/fd/<n> symlink target strings.
+   *  Used to test CoCo session discovery (and any future fd-walking logic).
+   *  Pass `'<path> (deleted)'` suffix to simulate procfs's deleted-inode marker. */
+  procFdMap?: Record<number, string[]>;
 }) {
-  const { paneLines, commMap = {}, cwdMap = {}, childMap = {}, dimsMap = {}, claudeMeta = {} } = opts;
+  const { paneLines, commMap = {}, cwdMap = {}, childMap = {}, dimsMap = {}, claudeMeta = {}, procFdMap = {} } = opts;
+
+  // Replace blanket existsSync / readdirSync mocks with procFdMap-aware ones.
+  mockExistsSync.mockImplementation((path: unknown) => {
+    const pathStr = String(path);
+    const fdMatch = pathStr.match(/^\/proc\/(\d+)\/fd$/);
+    if (fdMatch) return Number(fdMatch[1]) in procFdMap;
+    return false;
+  });
+  mockReaddirSync.mockImplementation(((path: unknown) => {
+    const pathStr = String(path);
+    const fdMatch = pathStr.match(/^\/proc\/(\d+)\/fd$/);
+    if (fdMatch) {
+      const pid = Number(fdMatch[1]);
+      const entries = procFdMap[pid];
+      if (entries) return entries.map((_, i) => String(i));
+    }
+    return [];
+  }) as any);
 
   mockExecSync.mockImplementation((cmd: unknown) => {
     const cmdStr = String(cmd);
@@ -127,6 +151,14 @@ function setupMocks(opts: {
     if (cwdMatch) {
       const pid = Number(cwdMatch[1]);
       if (pid in cwdMap) return cwdMap[pid];
+      throw new Error('ENOENT');
+    }
+    const fdMatch = pathStr.match(/^\/proc\/(\d+)\/fd\/(\d+)$/);
+    if (fdMatch) {
+      const pid = Number(fdMatch[1]);
+      const idx = Number(fdMatch[2]);
+      const entries = procFdMap[pid];
+      if (entries && idx >= 0 && idx < entries.length) return entries[idx];
       throw new Error('ENOENT');
     }
     throw new Error(`unexpected readlinkSync: ${pathStr}`);
@@ -325,6 +357,100 @@ describe('discoverAdoptableSessions', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]!.cliId).toBe('coco');
+  });
+
+  // ── CoCo /proc/<pid>/fd-based session discovery ─────────────────────────
+  // CoCo opens session.log + traces.jsonl with continuous fds (events.jsonl
+  // is opened per write, so unreliable). The discovery walks /proc/<pid>/fd
+  // looking for any open file under ~/.cache/coco/sessions/<sid>/...
+
+  it('captures CoCo sessionId from a live session.log fd', () => {
+    setupMocks({
+      paneLines: 'work:0.0 5000\n',
+      commMap: { 5000: 'bash', 5001: 'coco' },
+      childMap: { 5000: [5001] },
+      cwdMap: { 5001: '/workspace/proj' },
+      dimsMap: { 'work:0.0': '120 30' },
+      procFdMap: {
+        5001: [
+          '/dev/null',
+          '/home/testuser/.cache/coco/sessions/8db7d911-96f3-4764-a310-e42ae4cb626f/session.log',
+          '/home/testuser/.cache/coco/sessions/8db7d911-96f3-4764-a310-e42ae4cb626f/traces.jsonl',
+        ],
+      },
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('coco');
+    expect(results[0]!.sessionId).toBe('8db7d911-96f3-4764-a310-e42ae4cb626f');
+  });
+
+  it('skips CoCo handles flagged as deleted by procfs', () => {
+    // Real-world case from the field: an e2e test wiped the session dir
+    // while CoCo kept its fds open. procfs marks the targets " (deleted)".
+    // findCocoSessionByPid must NOT return that sid, otherwise adopt
+    // attaches a bridge that watches a path which will never gain content.
+    setupMocks({
+      paneLines: 'work:0.0 6000\n',
+      commMap: { 6000: 'bash', 6001: 'coco' },
+      childMap: { 6000: [6001] },
+      cwdMap: { 6001: '/workspace/proj' },
+      dimsMap: { 'work:0.0': '120 30' },
+      procFdMap: {
+        6001: [
+          '/home/testuser/.cache/coco/sessions/eb9da933-f82f-4a95-ac17-857f16daa318/session.log (deleted)',
+          '/home/testuser/.cache/coco/sessions/eb9da933-f82f-4a95-ac17-857f16daa318/traces.jsonl (deleted)',
+        ],
+      },
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('coco');
+    expect(results[0]!.sessionId).toBeUndefined();
+  });
+
+  it('returns coco discovery without sessionId when no fd points at a session dir', () => {
+    setupMocks({
+      paneLines: 'work:0.0 7000\n',
+      commMap: { 7000: 'bash', 7001: 'coco' },
+      childMap: { 7000: [7001] },
+      cwdMap: { 7001: '/workspace/proj' },
+      dimsMap: { 'work:0.0': '120 30' },
+      procFdMap: {
+        7001: ['/dev/null', '/dev/urandom', '/tmp/somefile.log'],
+      },
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('coco');
+    expect(results[0]!.sessionId).toBeUndefined();
+  });
+
+  it('rejects fd targets whose sid segment is not a valid uuid', () => {
+    setupMocks({
+      paneLines: 'work:0.0 8000\n',
+      commMap: { 8000: 'bash', 8001: 'coco' },
+      childMap: { 8000: [8001] },
+      cwdMap: { 8001: '/workspace/proj' },
+      dimsMap: { 'work:0.0': '120 30' },
+      procFdMap: {
+        // Looks like a valid path but the segment isn't uuid-shaped — could
+        // be an e2e fixture dir name (e.g. e2e-stream-text-1778316270608)
+        // and we don't want to bind adopt to that.
+        8001: ['/home/testuser/.cache/coco/sessions/e2e-stream-text-1778316270608/session.log'],
+      },
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.sessionId).toBeUndefined();
   });
 });
 
