@@ -9,6 +9,7 @@ import { getBot, getAllBots } from '../../bot-registry.js';
 import { canOperate } from './event-dispatcher.js';
 import { sendUserMessage, updateMessage, deleteMessage } from './client.js';
 import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, getCliDisplayName, truncateContent } from './card-builder.js';
+import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
@@ -133,9 +134,19 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     if (actionType === 'close' && ds) {
       const closedSessionId = ds.session.sessionId;
       const closedTitle = ds.session.title;
-      const closedCliId = ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
+      const botCfg = getBot(ds.larkAppId).config;
+      const closedCliId = ds.session.cliId ?? botCfg.cliId;
       const closedAnchor = sessionAnchorId(ds);
       const closedWorkingDir = ds.session.workingDir;
+      const cliResumeCommand = (() => {
+        try {
+          const adapter = createCliAdapterSync(closedCliId, botCfg.cliPathOverride);
+          return adapter.buildResumeCommand?.({
+            sessionId: closedSessionId,
+            cliSessionId: ds.session.cliSessionId,
+          }) ?? null;
+        } catch { return null; }
+      })();
       killWorker(ds);
       sessionStore.closeSession(closedSessionId);
       activeSessions.delete(sKey);
@@ -145,6 +156,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         closedTitle,
         closedCliId,
         closedWorkingDir,
+        cliResumeCommand,
       );
       await sessionReply(rootId, card, 'interactive');
       logger.info(`[${tag(ds)}] Closed via card button`);

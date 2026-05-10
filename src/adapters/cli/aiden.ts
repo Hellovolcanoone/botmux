@@ -22,6 +22,12 @@ export function createAidenAdapter(pathOverride?: string): CliAdapter {
       return args;
     },
 
+    buildResumeCommand({ sessionId }) {
+      // Aiden uses botmux's sessionId directly — no rotation, no separate
+      // CLI-native id, so cliSessionId isn't consulted.
+      return `aiden --resume ${sessionId}`;
+    },
+
     async writeInput(pty: PtyHandle, content: string) {
       if (pty.sendText && pty.sendSpecialKeys) {
         pty.sendText(content);

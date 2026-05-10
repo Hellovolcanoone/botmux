@@ -45,6 +45,26 @@ export interface CliAdapter {
    *  The worker skips queuing the prompt for stdin write. */
   readonly passesInitialPromptViaArgs?: boolean;
 
+  /** Build a shell command string the user can paste into a terminal to
+   *  resume this CLI session locally — independent of botmux. Used by the
+   *  "session closed" card so users have an obvious way to keep the
+   *  conversation outside the bot.
+   *
+   *  Returns `null` when the CLI doesn't support precise per-session resume
+   *  from CLI args (e.g. opencode, gemini's "latest only" mode), or when
+   *  the CLI-native session id can't be resolved (e.g. codex history file
+   *  is missing). The card falls back to a static note in those cases.
+   *
+   *  Implementations should print the *default* binary name (`claude`,
+   *  `codex`, etc.) rather than `cliPathOverride` — the override is a
+   *  server-side setting and users running the command on their own
+   *  laptop usually have the default binary on PATH. */
+  buildResumeCommand?(opts: {
+    sessionId: string;
+    /** CLI-native session id from session.cliSessionId, when available. */
+    cliSessionId?: string;
+  }): string | null;
+
   /** Write user input to PTY. May fire writes asynchronously (e.g. Aiden delayed Enter).
    *  Resolves when all writes are complete.
    *

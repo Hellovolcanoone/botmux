@@ -122,6 +122,16 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
       return ['resume', ...baseArgs, codexSessionId];
     },
 
+    buildResumeCommand({ sessionId, cliSessionId }) {
+      // Codex's `resume` is a subcommand (not a flag) and takes Codex's own
+      // UUID, not the botmux sessionId. Prefer the persisted cliSessionId;
+      // fall back to scanning ~/.codex/history.jsonl for the most recent
+      // codex session id that referenced this botmux session.
+      const sid = cliSessionId ?? latestCodexSessionForBotmuxSession(sessionId);
+      if (!sid) return null;
+      return `codex resume ${sid}`;
+    },
+
     async writeInput(pty: PtyHandle, content: string) {
       // Codex's TUI in --no-alt-screen mode does NOT handle bracketed paste:
       // wrapping content in \x1b[200~...\x1b[201~ via tmux paste-buffer

@@ -11,6 +11,7 @@ import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects } from '../services/project-scanner.js';
 import { buildRepoSelectCard, buildAdoptSelectCard, buildSessionClosedCard, getCliDisplayName } from '../im/lark/card-builder.js';
+import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { deleteMessage } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
 import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion } from './worker-pool.js';
@@ -276,9 +277,23 @@ export async function handleCommand(
         if (ds) {
           const closedSessionId = ds.session.sessionId;
           const closedTitle = ds.session.title;
-          const closedCliId = ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
+          const botCfg = getBot(ds.larkAppId).config;
+          const closedCliId = ds.session.cliId ?? botCfg.cliId;
           const closedAnchor = sessionAnchorId(ds);
           const closedWorkingDir = ds.session.workingDir;
+          // Resolve the CLI-native resume command BEFORE killing the worker
+          // — for codex this consults `~/.codex/history.jsonl` which is
+          // populated by the live worker; reading it post-kill still works
+          // (the file lives on disk) but capturing here keeps intent clear.
+          const cliResumeCommand = (() => {
+            try {
+              const adapter = createCliAdapterSync(closedCliId, botCfg.cliPathOverride);
+              return adapter.buildResumeCommand?.({
+                sessionId: closedSessionId,
+                cliSessionId: ds.session.cliSessionId,
+              }) ?? null;
+            } catch { return null; }
+          })();
           killWorker(ds);
           sessionStore.closeSession(closedSessionId);
           activeSessions.delete(sessionKey(rootId, larkAppId!));
@@ -288,6 +303,7 @@ export async function handleCommand(
             closedTitle,
             closedCliId,
             closedWorkingDir,
+            cliResumeCommand,
           );
           await sessionReply(rootId, card, 'interactive');
           logger.info(`[${t}] Session closed by /close command`);

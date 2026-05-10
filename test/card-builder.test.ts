@@ -11,6 +11,7 @@ import {
   buildSessionCard,
   buildStreamingCard,
   buildRepoSelectCard,
+  buildSessionClosedCard,
   getCliDisplayName,
 } from '../src/im/lark/card-builder.js';
 import type { ProjectInfo } from '../src/services/project-scanner.js';
@@ -593,5 +594,59 @@ describe('buildRepoSelectCard', () => {
       const selectStatic = actionEl.actions.find((a: any) => a.tag === 'select_static');
       expect(selectStatic.options).toHaveLength(0);
     });
+  });
+});
+
+// ─── buildSessionClosedCard ─────────────────────────────────────────────────
+
+describe('buildSessionClosedCard', () => {
+  function findMarkdownContent(card: any): string {
+    const md = card.elements.find((e: any) => e.tag === 'markdown');
+    return md?.content ?? '';
+  }
+
+  it('embeds the CLI-native resume command in a code block when provided', () => {
+    const card = parse(buildSessionClosedCard(
+      'sess-1', 'om_root', 'My topic', 'claude-code', '/srv/app',
+      'claude --resume cli-99',
+    ));
+    const md = findMarkdownContent(card);
+    expect(md).toContain('claude --resume cli-99');
+    // Code-fenced so users can long-press to copy in Lark
+    expect(md).toMatch(/```\nclaude --resume cli-99\n```/);
+    // Must NOT print the legacy `botmux resume <id>` text — that command
+    // re-enables the bridge in botmux but is not the CLI-native resume the
+    // user asked for.
+    expect(md).not.toContain('botmux resume');
+  });
+
+  it('renders the working dir line', () => {
+    const card = parse(buildSessionClosedCard(
+      'sess-2', 'om_root', '', 'codex', '/proj/x',
+      'codex resume cdx-uuid',
+    ));
+    expect(findMarkdownContent(card)).toContain('/proj/x');
+  });
+
+  it('shows a fallback note when the CLI cannot resume from CLI args (gemini/opencode)', () => {
+    const card = parse(buildSessionClosedCard(
+      'sess-3', 'om_root', 'topic', 'opencode', undefined, null,
+    ));
+    const md = findMarkdownContent(card);
+    expect(md).toContain('不支持');
+    expect(md).not.toMatch(/```/);
+  });
+
+  it('emits a Resume button targeting the closed sessionId', () => {
+    const card = parse(buildSessionClosedCard(
+      'sess-4', 'om_root_X', 'topic', 'claude-code', undefined,
+      'claude --resume sess-4',
+    ));
+    const action = card.elements.find((e: any) => e.tag === 'action');
+    const resumeBtn = action.actions.find((a: any) => a.value?.action === 'resume');
+    expect(resumeBtn).toBeDefined();
+    expect(resumeBtn.value.session_id).toBe('sess-4');
+    expect(resumeBtn.value.root_id).toBe('om_root_X');
+    expect(resumeBtn.type).toBe('primary');
   });
 });

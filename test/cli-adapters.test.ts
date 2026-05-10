@@ -358,3 +358,53 @@ describe('altScreen property', () => {
     expect(createCodexAdapter('/bin/codex').altScreen).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 7. buildResumeCommand — terminal copy-paste shown on the closed-session card
+// ---------------------------------------------------------------------------
+
+describe('buildResumeCommand', () => {
+  it('claude-code prefers cliSessionId (rotation) and falls back to sessionId', () => {
+    const a = createClaudeCodeAdapter('/usr/bin/claude');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-1', cliSessionId: 'cli-99' }))
+      .toBe('claude --resume cli-99');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-1' }))
+      .toBe('claude --resume bm-1');
+  });
+
+  it('aiden uses botmux sessionId directly (no separate cli id)', () => {
+    const a = createAidenAdapter('/bin/aiden');
+    expect(a.buildResumeCommand?.({ sessionId: 'sess-aiden', cliSessionId: 'ignored' }))
+      .toBe('aiden --resume sess-aiden');
+  });
+
+  it('coco uses botmux sessionId', () => {
+    const a = createCocoAdapter('/bin/coco');
+    expect(a.buildResumeCommand?.({ sessionId: 'sess-coco' }))
+      .toBe('coco --resume sess-coco');
+  });
+
+  it('codex returns null when neither cliSessionId nor history rollout is available', () => {
+    // Test environment has no ~/.codex/history.jsonl, so the fallback scan
+    // returns undefined and we expect null (caller renders the "unsupported"
+    // note instead of fabricating a fake command).
+    const a = createCodexAdapter('/bin/codex');
+    expect(a.buildResumeCommand?.({ sessionId: 'sess-codex' })).toBeNull();
+  });
+
+  it('codex emits `codex resume <cliSessionId>` when cliSessionId is known', () => {
+    const a = createCodexAdapter('/bin/codex');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-x', cliSessionId: 'cdx-uuid-1' }))
+      .toBe('codex resume cdx-uuid-1');
+  });
+
+  it('gemini does not implement buildResumeCommand (no precise resume)', () => {
+    const a = createGeminiAdapter('/bin/gemini');
+    expect(a.buildResumeCommand).toBeUndefined();
+  });
+
+  it('opencode does not implement buildResumeCommand', () => {
+    const a = createOpenCodeAdapter('/bin/opencode');
+    expect(a.buildResumeCommand).toBeUndefined();
+  });
+});

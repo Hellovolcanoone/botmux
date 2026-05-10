@@ -100,11 +100,18 @@ export function buildSessionCard(
 
 /**
  * Build the "session closed" card shown after `/close` (or the close button).
- * Surfaces a Resume button + a copyable `botmux resume <id>` command so the
- * user has an obvious path back instead of just a dead-end status text.
+ * Surfaces a Resume button + a copyable terminal command so the user has an
+ * obvious path back instead of just a dead-end status text.
  *
- * `resumeShortId` is rendered as a 12-char prefix — long enough to be unique
- * across a user's sessions but still nice to retype/paste.
+ * The terminal command is the *CLI's own* resume invocation (e.g.
+ * `claude --resume <id>`), built by the per-CLI adapter's
+ * `buildResumeCommand`. That keeps the conversation portable: users can
+ * pick it up locally without going through botmux. CLIs that can't resume
+ * a specific session from CLI args (gemini's "latest only", opencode)
+ * surface a fallback note instead of a fake command.
+ *
+ * The "▶️ 恢复会话" button still goes through botmux — it re-enables the
+ * Lark bridge so future replies route back into this topic.
  */
 export function buildSessionClosedCard(
   sessionId: string,
@@ -112,15 +119,16 @@ export function buildSessionClosedCard(
   title: string,
   cliId?: CliId,
   workingDir?: string,
+  cliResumeCommand?: string | null,
 ): string {
   const cliName = getCliDisplayName(cliId ?? 'claude-code');
-  const shortId = sessionId.substring(0, 12);
-  const resumeCmd = `botmux resume ${shortId}`;
   const dirLine = workingDir ? `\n📁 工作目录：\`${escapeMd(workingDir)}\`` : '';
+  const cmdBlock = cliResumeCommand
+    ? `点击「恢复会话」继续，或在终端执行：\n\`\`\`\n${cliResumeCommand}\n\`\`\``
+    : `点击「恢复会话」继续。\n_${cliName} 不支持从命令行精确恢复指定会话，可在飞书内 resume。_`;
   const body =
     `**${escapeMd(title || cliName)}**\n` +
-    `${cliName} 进程已终止。点击「恢复会话」继续，或在终端执行：\n` +
-    `\`\`\`\n${resumeCmd}\n\`\`\`` +
+    `${cliName} 进程已终止。${cmdBlock}` +
     dirLine;
   const card = {
     config: { wide_screen_mode: true },

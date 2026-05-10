@@ -200,6 +200,13 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
     resolvedBin: bin,
     supportsTypeAhead: true,
 
+    buildResumeCommand({ sessionId, cliSessionId }) {
+      // Claude resumes by reading <id>.jsonl, so we need the most recently
+      // observed CLI-native id (rotation can happen mid-run); fall back to the
+      // botmux sessionId for the first-turn case where they coincide.
+      return `claude --resume ${cliSessionId ?? sessionId}`;
+    },
+
     buildArgs({ sessionId, resume, resumeSessionId, botName, botOpenId }) {
       const args: string[] = [];
       if (resume) {

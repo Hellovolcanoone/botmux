@@ -24,6 +24,10 @@ export function createCocoAdapter(pathOverride?: string): CliAdapter {
       return args;
     },
 
+    buildResumeCommand({ sessionId }) {
+      return `coco --resume ${sessionId}`;
+    },
+
     async writeInput(pty: PtyHandle, content: string) {
       if (pty.sendText && pty.sendSpecialKeys) {
         pty.sendText(content);
