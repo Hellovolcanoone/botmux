@@ -7,6 +7,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as groupsStore from '../services/groups-store.js';
 import * as oncallStore from '../services/oncall-store.js';
+import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry } from './worker-pool.js';
 import { replyMessage, sendMessage } from '../im/lark/client.js';
@@ -281,11 +282,15 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   try {
     const chats = await groupsStore.listChats(cachedLarkAppId);
+    // Stamp a firstSeenAt timestamp for every chat (preserve existing values,
+    // backfill new ones with Date.now()). Lark doesn't expose chat create_time
+    // anywhere, so the dashboard sorts by this client-side proxy instead.
+    const seenMap = chatFirstSeenStore.markSeenBulk(chats.map(c => c.chatId));
     // Annotate each chat with its oncall binding (if any) so the dashboard
     // matrix can show toggle state without a second round-trip.
     const enriched = chats.map(c => {
       const oncall = oncallStore.getOncallStatus(cachedLarkAppId, c.chatId);
-      return { ...c, oncallChat: oncall ?? null };
+      return { ...c, oncallChat: oncall ?? null, firstSeenAt: seenMap.get(c.chatId) ?? null };
     });
     jsonRes(res, 200, { chats: enriched });
   } catch (e) {

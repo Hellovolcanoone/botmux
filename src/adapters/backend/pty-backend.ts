@@ -3,6 +3,7 @@ import { chmodSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import type { SessionBackend, SpawnOpts } from './types.js';
+import { logger } from '../../utils/logger.js';
 
 // npx may strip execute bits from prebuilt binaries — fix before first spawn.
 try {
@@ -27,6 +28,10 @@ export class PtyBackend implements SessionBackend {
   cliCwd?: string;
 
   spawn(bin: string, args: string[], opts: SpawnOpts): void {
+    logger.debug(
+      `[pty] spawn bin=${bin} args=${JSON.stringify(args)} ` +
+      `cwd=${opts.cwd} ${opts.cols}x${opts.rows}`,
+    );
     this.process = pty.spawn(bin, args, {
       name: 'xterm-256color',
       cols: opts.cols,
@@ -34,6 +39,7 @@ export class PtyBackend implements SessionBackend {
       cwd: opts.cwd,
       env: opts.env,
     });
+    logger.debug(`[pty] spawned pid=${this.process.pid}`);
   }
 
   write(data: string): void {

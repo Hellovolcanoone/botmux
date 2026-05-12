@@ -6,7 +6,7 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { getBot, getAllBots, findOncallChat } from '../../bot-registry.js';
+import { getBot, getAllBots, isChatOncallBoundForAnyBot } from '../../bot-registry.js';
 import { config } from '../../config.js';
 import { getChatInfo, getChatMode, listChatBotMembers, replyMessage } from './client.js';
 import { logger } from '../../utils/logger.js';
@@ -113,7 +113,9 @@ export async function getGroupStats(larkAppId: string, chatId: string): Promise<
     chatStatsCache.set(cacheKey, { userCount: info.userCount, botCount: info.botCount, fetchedAt: Date.now() });
     return info;
   } catch (err) {
-    logger.warn(`Failed to get chat stats for ${chatId}: ${err}`);
+    // Soft failure — the fallback below assumes worst case (multi-user,
+    // multi-bot → require @mention). No user-visible regression, so debug.
+    logger.debug(`Failed to get chat stats for ${chatId}, using safe fallback: ${err}`);
     if (cached) return { userCount: cached.userCount, botCount: cached.botCount };
     // Fallback: assume multi-person, multi-bot → require @mention to be safe.
     return { userCount: 999, botCount: 999 };
@@ -214,7 +216,10 @@ export function updateBotOpenIdCrossRef(
 export function isBotMentioned(larkAppId: string, message: any, _senderOpenId: string | undefined): boolean {
   const botOpenId = getBot(larkAppId).botOpenId;
   if (!botOpenId) {
-    logger.warn('Bot open_id unknown, cannot check @mentions');
+    // Startup race: events can arrive before probeBotOpenId() resolves the
+    // per-bot open_id. Subsequent events succeed once the probe completes,
+    // so this is not a real warning — drop to debug to keep error.log clean.
+    logger.debug(`[${larkAppId}] Bot open_id not yet known, skipping @mention check`);
     return false;
   }
 
@@ -252,10 +257,15 @@ export function isBotMentioned(larkAppId: string, message: any, _senderOpenId: s
 // Non-oncall chats: both fall back to the bot's allowedUsers.
 // Oncall-bound chats: talking is open to everyone in the group; operating
 // still requires allowedUsers (single source of truth — no per-chat owners).
+//
+// Oncall is a chat-level concept: `isChatOncallBoundForAnyBot` returns true
+// when ANY bot (this one or a sibling in another daemon) has the chat bound,
+// so an unbound sibling doesn't fall back to allowedUsers and reply
+// "⚠️ 无操作权限" when @-mentioned in a shared oncall workspace.
 
 export function canTalk(larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined): boolean {
-  const oncall = chatId ? findOncallChat(larkAppId, chatId) : undefined;
-  if (oncall) return true;
+  if (chatId && isChatOncallBoundForAnyBot(chatId)) return true;
+  if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return true;
   const allowedUsers = getBot(larkAppId).resolvedAllowedUsers;
   if (allowedUsers.length === 0) return true;
   return !!senderOpenId && allowedUsers.includes(senderOpenId);
@@ -611,7 +621,10 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
   const wsClient = new Lark.WSClient({
     appId: larkAppId,
     appSecret: larkAppSecret,
-    loggerLevel: Lark.LoggerLevel.info,
+    // Default to warn — the SDK is chatty at info ("client ready", reconnect
+    // heartbeats, etc.) and floods pm2 error.log when stderr is the only sink.
+    // DEBUG=1 widens the level back to info for troubleshooting.
+    loggerLevel: process.env.DEBUG ? Lark.LoggerLevel.info : Lark.LoggerLevel.warn,
   });
 
   wsClient.start({ eventDispatcher });

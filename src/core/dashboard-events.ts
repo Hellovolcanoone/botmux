@@ -1,4 +1,5 @@
 // src/core/dashboard-events.ts
+import { logger } from '../utils/logger.js';
 
 /** Event union — every payload is JSON-serialisable. */
 export type DashboardEvent =
@@ -25,8 +26,7 @@ export class DashboardEventBus {
     for (const fn of this.subs) {
       try { fn(event); } catch (err) {
         // Subscriber errors must not break publishing.
-        // eslint-disable-next-line no-console
-        console.error('[dashboard-events] subscriber threw', err);
+        logger.error(`[dashboard-events] subscriber threw: ${err}`);
       }
     }
   }

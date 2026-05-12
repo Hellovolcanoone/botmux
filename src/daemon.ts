@@ -8,8 +8,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config } from './config.js';
 import { replyMessage, resolveAllowedUsers, sendMessage } from './im/lark/client.js';
-import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChat } from './bot-registry.js';
+import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, isChatOncallBoundForAnyBot } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
+import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import * as scheduleStore from './services/schedule-store.js';
 import * as messageQueue from './services/message-queue.js';
 import { parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type MessageResource } from './im/lark/message-parser.js';
@@ -330,8 +331,11 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     }
     if (DAEMON_COMMANDS.has(cmd)) {
       // Oncall groups: anyone can chat with the bot, but daemon commands
-      // (including /oncall itself) require allowedUsers.
-      if (findOncallChat(larkAppId, chatId) && !canOperate(larkAppId, chatId, senderOpenId)) {
+      // (including /oncall itself) require allowedUsers. Treat the chat as
+      // oncall when ANY bot has it bound — sibling bots in multi-bot
+      // deployments inherit the same gate so /cd /restart /close don't slip
+      // past allowedUsers just because this bot wasn't the one that bound.
+      if (isChatOncallBoundForAnyBot(chatId) && !canOperate(larkAppId, chatId, senderOpenId)) {
         await sessionReply(anchor, `⚠️ ${cmd} 仅 allowedUsers 可执行。`, 'text', larkAppId);
         return;
       }
@@ -400,8 +404,9 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   messageQueue.ensureQueue(anchor);
   messageQueue.appendMessage(anchor, parsed);
 
-  // Oncall group: pin working dir from binding, skip repo selection entirely.
-  const oncallEntry = findOncallChat(larkAppId, chatId);
+  // Oncall group: pin working dir from the chat-level binding, even if a
+  // sibling bot (running in another daemon) is the one that persisted it.
+  const oncallEntry = findOncallChatForAnyBot(chatId);
 
   // Cross-bot / chat-scope inheritance: reuse a sibling session's workingDir
   // and skip the repo card. Same block lives in handleThreadReply's auto-create
@@ -520,7 +525,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       const existingDs = activeSessions.get(sessionKey(anchor, larkAppId));
       const threadChatId = existingDs?.chatId ?? ctxChatId ?? data?.message?.chat_id;
       const threadSenderOpenId = parsed.senderId || data?.sender?.sender_id?.open_id;
-      if (threadChatId && findOncallChat(larkAppId, threadChatId) && !canOperate(larkAppId, threadChatId, threadSenderOpenId)) {
+      if (threadChatId && isChatOncallBoundForAnyBot(threadChatId) && !canOperate(larkAppId, threadChatId, threadSenderOpenId)) {
         sessionReply(anchor, `⚠️ ${cmd} 仅 allowedUsers 可执行。`, 'text', larkAppId);
         return;
       }
@@ -625,9 +630,9 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     session.scope = scope;
     sessionStore.updateSession(session);
 
-    // Oncall group: pin working dir from binding, skip repo selection entirely
-    // (mirrors handleNewTopic — auto-create was missing this check).
-    const oncallEntry = findOncallChat(larkAppId, autoCreateChatId);
+    // Oncall group: pin working dir from the chat-level binding, even if a
+    // sibling bot (running in another daemon) is the one that persisted it.
+    const oncallEntry = findOncallChatForAnyBot(autoCreateChatId);
 
     // Cross-bot / chat-scope inheritance — see findInheritablePeer comments.
     const inheritedFrom = !oncallEntry
@@ -937,6 +942,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   const cfg = botConfigs[idx];
   registerBot(cfg);
   sessionStore.init(cfg.larkAppId);
+  chatFirstSeenStore.init(cfg.larkAppId);
   // Watch schedules.json for external writes (e.g. `botmux schedule add`
   // running in a separate node process) so dashboard event bus stays in sync.
   scheduleStore.startExternalWriteWatcher();
@@ -1038,7 +1044,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
       }
     }).catch(err => {
-      logger.warn(`[${cfg.larkAppId}] Bot open_id probe failed: ${err.message}`);
+      // Probe runs in background and is retried by the periodic heartbeat;
+      // a single failure here is not actionable. Surface as debug only.
+      logger.debug(`[${cfg.larkAppId}] Bot open_id probe failed (will retry): ${err.message}`);
     });
 
     // Start event dispatcher for this bot

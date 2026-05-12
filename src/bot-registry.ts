@@ -1,8 +1,9 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { CliId } from './adapters/cli/types.js';
+import { logger } from './utils/logger.js';
 
 export interface OncallChat {
   /** Lark chat_id (oc_xxx) the bot was pulled into. */
@@ -41,25 +42,33 @@ export function getLoadedConfigPath(): string | undefined {
   return loadedConfigPath;
 }
 
-// Provide a custom logger that writes to stderr — the default Lark SDK
-// logger uses console.log, which would mix into stdout consumers.
+// Route Lark SDK output through our logger so it inherits the same sink
+// rules (info/debug → daemon.log in daemon mode, → stderr in CLI mode,
+// dropped when CLI is silent). The default SDK logger calls console.log,
+// which would corrupt CLI stdout consumers.
+//
+// Volume control: the SDK is chatty at info/debug ("client ready", request
+// traces, etc.); without DEBUG=1 those become no-ops in the CLI path and
+// stay in daemon.log on the daemon path — pm2's error.log no longer sees
+// "[lark:info] client ready" floods.
 function safeStringify(v: unknown): string {
   if (typeof v === 'string') return v;
   try { return JSON.stringify(v); } catch { return String(v); }
 }
-const stderrLogger = {
-  error: (...msg: any[]) => { process.stderr.write(`[lark:error] ${msg.map(safeStringify).join(' ')}\n`); },
-  warn:  (...msg: any[]) => { process.stderr.write(`[lark:warn] ${msg.map(safeStringify).join(' ')}\n`); },
-  info:  (...msg: any[]) => { process.stderr.write(`[lark:info] ${msg.map(safeStringify).join(' ')}\n`); },
-  debug: (...msg: any[]) => { process.stderr.write(`[lark:debug] ${msg.map(safeStringify).join(' ')}\n`); },
-  trace: (...msg: any[]) => { process.stderr.write(`[lark:trace] ${msg.map(safeStringify).join(' ')}\n`); },
+const fmtLark = (msg: any[]) => msg.map(safeStringify).join(' ');
+const larkLogger = {
+  error: (...msg: any[]) => logger.error(`[lark] ${fmtLark(msg)}`),
+  warn:  (...msg: any[]) => logger.warn(`[lark] ${fmtLark(msg)}`),
+  info:  (...msg: any[]) => logger.info(`[lark] ${fmtLark(msg)}`),
+  debug: (...msg: any[]) => logger.debug(`[lark] ${fmtLark(msg)}`),
+  trace: (..._msg: any[]) => { /* SDK trace dropped entirely — uninteresting per-byte WS frames */ },
 };
 
 export function registerBot(cfg: BotConfig): BotState {
   const client = new Lark.Client({
     appId: cfg.larkAppId,
     appSecret: cfg.larkAppSecret,
-    logger: stderrLogger,
+    logger: larkLogger,
   });
   const state: BotState = {
     config: cfg,
@@ -90,6 +99,56 @@ export function getAllBots(): BotState[] {
 export function findOncallChat(larkAppId: string, chatId: string): OncallChat | undefined {
   const bot = bots.get(larkAppId);
   return bot?.config.oncallChats?.find(c => c.chatId === chatId);
+}
+
+// Cross-bot oncall chat check — cached by config-file mtime.
+//
+// /oncall bind is per-bot, but oncall is meant to be a chat-level property:
+// once any bot in a multi-bot deployment binds the chat, every sibling bot
+// should treat that chat as an oncall workspace too (otherwise unbound bots
+// fall back to allowedUsers and reply "⚠️ 无操作权限" when @-mentioned).
+//
+// Multi-daemon deployments run one bot per process, so the in-memory `bots`
+// map only sees this daemon's own bot — sibling bots' bindings live only on
+// disk in the shared bots.json. Re-read that file lazily, keyed by mtime,
+// so the hot path is a single stat() once the cache is warm.
+let oncallChatCache: { mtimeMs: number; chats: Map<string, OncallChat> } | null = null;
+
+export function findOncallChatForAnyBot(chatId: string): OncallChat | undefined {
+  // Fast path: this daemon's own bot(s). Covers single-daemon setups and any
+  // case where the receiving bot itself is bound.
+  for (const bot of bots.values()) {
+    const entry = bot.config.oncallChats?.find(c => c.chatId === chatId);
+    if (entry) return entry;
+  }
+  // Slow path: scan the shared bots.json for sibling bots' bindings.
+  const path = loadedConfigPath;
+  if (!path) return undefined;
+  try {
+    const stat = statSync(path);
+    if (!oncallChatCache || oncallChatCache.mtimeMs !== stat.mtimeMs) {
+      const raw = JSON.parse(readFileSync(path, 'utf-8'));
+      const chats = new Map<string, OncallChat>();
+      if (Array.isArray(raw)) {
+        for (const entry of raw) {
+          if (!Array.isArray(entry?.oncallChats)) continue;
+          for (const c of entry.oncallChats) {
+            if (c && typeof c.chatId === 'string' && typeof c.workingDir === 'string') {
+              chats.set(c.chatId, { chatId: c.chatId, workingDir: c.workingDir });
+            }
+          }
+        }
+      }
+      oncallChatCache = { mtimeMs: stat.mtimeMs, chats };
+    }
+    return oncallChatCache.chats.get(chatId);
+  } catch {
+    return undefined;
+  }
+}
+
+export function isChatOncallBoundForAnyBot(chatId: string): boolean {
+  return !!findOncallChatForAnyBot(chatId);
 }
 
 /**

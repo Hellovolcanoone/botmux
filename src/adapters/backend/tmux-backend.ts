@@ -2,6 +2,7 @@ import * as pty from 'node-pty';
 import { execSync, execFileSync } from 'node:child_process';
 import type { SessionBackend, SpawnOpts } from './types.js';
 import { probeTmuxFunctional, tmuxEnv } from '../../setup/ensure-tmux.js';
+import { logger } from '../../utils/logger.js';
 
 /**
  * TmuxBackend — session backend using tmux for process persistence.
@@ -88,6 +89,10 @@ export class TmuxBackend implements SessionBackend {
 
   spawn(bin: string, args: string[], opts: SpawnOpts): void {
     this.reattaching = TmuxBackend.hasSession(this.sessionName);
+    logger.debug(
+      `[tmux:${this.sessionName}] spawn ${this.reattaching ? 'reattach' : 'new'} ` +
+      `bin=${bin} args=${JSON.stringify(args)} cwd=${opts.cwd} ${opts.cols}x${opts.rows}`,
+    );
     // Strip TMUX/TMUX_PANE from caller env before handing to pty.spawn — if
     // the daemon was started inside a tmux session, leaving TMUX set would
     // make this `tmux attach-session`/`new-session` target that parent
@@ -106,16 +111,15 @@ export class TmuxBackend implements SessionBackend {
         env: childEnv,
       });
     } else {
-      // Build -e flags for env vars that the tmux session command needs.
-      // tmux new-session runs the command in the tmux server's environment,
-      // which may differ from the spawning process (e.g. per-bot credentials).
-      const envFlags: string[] = [];
-      for (const key of TMUX_PASSTHROUGH_VARS) {
-        const val = opts.env?.[key];
-        if (val !== undefined) {
-          envFlags.push('-e', `${key}=${val}`);
-        }
-      }
+      // tmux server inherits env from its first session's creator; subsequent
+      // sessions share that server env, which is frozen at first-spawn time
+      // and may be missing PATH/NVM_BIN/PNPM_HOME entries the daemon's caller
+      // added via .zshrc. To make tmux-backend behave like PtyBackend (which
+      // forwards daemon process.env directly via pty.spawn's env option), we
+      // pass every var in opts.env through `-e KEY=VAL`, except a small
+      // blacklist of vars that would actively confuse tmux or that are
+      // process-local (TMUX, _, OLDPWD, PWD, SHLVL).
+      const envFlags = buildTmuxSessionEnvFlags(opts.env);
 
       // Create new tmux session running the CLI command
       const tmuxArgs = [
@@ -354,33 +358,54 @@ export class TmuxBackend implements SessionBackend {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Env vars that must be explicitly passed to the tmux session command via -e.
- * The tmux server inherits env from the first session's creator; subsequent
- * sessions share that env. Per-bot vars (LARK credentials) would be wrong
- * for non-first bots without explicit passthrough.
+ * Vars NOT to forward via `-e` to a new tmux session.
+ *
+ *   - TMUX / TMUX_PANE: tmuxEnv() already strips these from the tmux client's
+ *     own env; keep them out of the spawned CLI's env too so any tmux child
+ *     the CLI itself spawns can't sneak through and target a dead socket.
+ *   - PWD / OLDPWD: tmux uses the `cwd` we pass via pty.spawn options;
+ *     forwarding PWD verbatim would override that with the daemon's cwd.
+ *   - SHLVL / `_`: shell-local bookkeeping that's meaningless in the child
+ *     and confusing if a user runs `env` inside the CLI.
  */
-const TMUX_PASSTHROUGH_VARS = [
-  'BOTMUX',
-  'LARK_APP_ID',
-  'LARK_APP_SECRET',
-  '__OWNER_OPEN_ID',
-  'SESSION_DATA_DIR',
-  // Proxy settings: tmux new-session runs commands with the tmux server's
-  // environment, which can be older/different from the botmux worker env.
-  // Pass these explicitly so CLI agents (Codex, Gemini, etc.) inherit the
-  // same network proxy config that botmux was started with.
-  'HTTP_PROXY',
-  'HTTPS_PROXY',
-  'http_proxy',
-  'https_proxy',
-  'ALL_PROXY',
-  'all_proxy',
-  'NO_PROXY',
-  'no_proxy',
-  // Claude Code 的 root/sudo 逃生舱：worker.ts 检测到 root 时会注入 IS_SANDBOX=1，
-  // tmux 不透传这个变量的话，--dangerously-skip-permissions 会被拦截立即退出。
-  'IS_SANDBOX',
-];
+const TMUX_PASSTHROUGH_BLACKLIST: ReadonlySet<string> = new Set([
+  'TMUX',
+  'TMUX_PANE',
+  'PWD',
+  'OLDPWD',
+  'SHLVL',
+  '_',
+]);
+
+/** Valid POSIX-ish env var name. `-e KEY=VAL` would silently misbehave with
+ *  keys that contain `=` or unusual characters; clamp here so a malformed
+ *  parent env can't desync tmux's argv. */
+const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Build `-e KEY=VAL ...` argv flags for `tmux new-session`. Forwards every
+ * defined entry in `env` (so the CLI inherits PATH / NVM_* / PNPM_HOME /
+ * LARK_APP_*, etc.) except the blacklist above and entries whose key isn't
+ * a valid env-var name. Pure function so it can be unit-tested without
+ * spawning tmux.
+ *
+ * Background: tmux `new-session ... -- cmd` runs cmd with the tmux **server's**
+ * env, not the env we pass to `pty.spawn('tmux', ...)`. Whatever isn't
+ * forwarded via `-e` gets dropped on the floor — that's how CoCo (and any
+ * other `#!/usr/bin/env node` script installed under nvm/pnpm) used to land
+ * in a tmux session with a PATH that doesn't see `node`.
+ */
+export function buildTmuxSessionEnvFlags(env: NodeJS.ProcessEnv | undefined): string[] {
+  if (!env) return [];
+  const flags: string[] = [];
+  for (const [key, val] of Object.entries(env)) {
+    if (val === undefined) continue;
+    if (TMUX_PASSTHROUGH_BLACKLIST.has(key)) continue;
+    if (!ENV_VAR_NAME_RE.test(key)) continue;
+    flags.push('-e', `${key}=${val}`);
+  }
+  return flags;
+}
 
 /** Minimal shell-escape for tmux session names (alphanumeric + dash). */
 function shellescape(s: string): string {

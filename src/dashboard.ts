@@ -286,15 +286,22 @@ const server = createServer(async (req, res) => {
           if (!r.ok) return;
           const j = await r.json() as { chats?: any[] };
           for (const c of j.chats ?? []) {
-            // Strip oncallChat from chat-level — it's per-bot, surface inside memberBots only
-            const { oncallChat, ...chatBase } = c;
-            const cur = out.get(c.chatId) ?? { ...chatBase, memberBots: [] as any[] };
+            // Strip per-bot fields from chat-level so the merged record stays
+            // bot-agnostic. oncallChat lives inside memberBots; firstSeenAt is
+            // accumulated as the earliest observation across all bots.
+            const { oncallChat, firstSeenAt, ...chatBase } = c;
+            const cur = out.get(c.chatId) ?? { ...chatBase, memberBots: [] as any[], _firstSeenAt: null as number | null };
             cur.memberBots.push({
               larkAppId: d.larkAppId,
               botName: d.botName,
               inChat: true,
               oncallChat: oncallChat ?? null,
             });
+            if (typeof firstSeenAt === 'number') {
+              cur._firstSeenAt = cur._firstSeenAt === null
+                ? firstSeenAt
+                : Math.min(cur._firstSeenAt, firstSeenAt);
+            }
             out.set(c.chatId, cur);
           }
         } catch { /* skip offline daemons silently — best-effort */ }
@@ -308,8 +315,20 @@ const server = createServer(async (req, res) => {
           }
         }
       }
+      // Sort newest-first by client-side firstSeenAt (Lark exposes no chat
+      // create_time, so daemon stamps timestamps the first time it lists each
+      // chat). Tie-break by name asc so chats backfilled in the same listChats
+      // pass — typically every chat on first deploy — get a stable order.
+      const sorted = [...out.values()]
+        .sort((a, b) => {
+          const ta = a._firstSeenAt ?? 0;
+          const tb = b._firstSeenAt ?? 0;
+          if (tb !== ta) return tb - ta;
+          return (a.name ?? a.chatId).localeCompare(b.name ?? b.chatId);
+        })
+        .map(({ _firstSeenAt, ...rest }) => rest);
       return jsonRes(res, 200, {
-        chats: [...out.values()].sort((a, b) => (a.name ?? a.chatId).localeCompare(b.name ?? b.chatId)),
+        chats: sorted,
         bots: onlineBots.map(b => ({ larkAppId: b.larkAppId, botName: b.botName })),
       });
     }

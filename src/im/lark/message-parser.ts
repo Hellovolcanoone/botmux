@@ -216,9 +216,13 @@ export function extractResources(msgType: string, rawContent: string, numberer?:
 export function parseEventMessage(data: RawEventData): { parsed: LarkMessage; resources: MessageResource[] } {
   const { sender, message } = data;
 
-  // Debug: log raw message for non-text types
-  if (message.message_type !== 'text') {
-    logger.info(`[parser] type=${message.message_type} content=${message.content} keys=${Object.keys(message).join(',')}`);
+  // Trace non-text messages at debug only (DEBUG=1 gated). The raw card/post
+  // content can be many KB and may include attachment metadata that's
+  // noisy or sensitive — truncate to ~500 chars so DEBUG logs stay scannable.
+  if (message.message_type !== 'text' && logger.isDebug()) {
+    const raw = message.content ?? '';
+    const trimmed = raw.length > 500 ? raw.slice(0, 500) + `…(+${raw.length - 500}b)` : raw;
+    logger.debug(`[parser] type=${message.message_type} content=${trimmed} keys=${Object.keys(message).join(',')}`);
   }
 
   // Share numberer so in-body [图片 N] placeholders use the same numbers as

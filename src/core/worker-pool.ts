@@ -458,7 +458,12 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
     },
   });
 
-  // Pipe worker stdout/stderr to daemon logger
+  // Pipe worker stdout/stderr to daemon logger.
+  // Both go through logger.info → daemon.log (not error.log). Worker stderr
+  // is NOT necessarily an error: CLI adapters (claude, codex, etc.) write
+  // progress, version banners, deprecation warnings, etc. there. The line
+  // is still visible (tagged `:err`) for triage. Real worker faults arrive
+  // separately via the IPC `Worker error` branch and stay as logger.error.
   worker.stdout?.on('data', (data: Buffer) => {
     for (const line of data.toString().split('\n')) {
       const trimmed = line.trim();
@@ -468,7 +473,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
   worker.stderr?.on('data', (data: Buffer) => {
     for (const line of data.toString().split('\n')) {
       const trimmed = line.trim();
-      if (trimmed) logger.error(`[${t}:worker] ${trimmed}`);
+      if (trimmed) logger.info(`[${t}:err] ${trimmed}`);
     }
   });
 
@@ -1116,7 +1121,8 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     },
   });
 
-  // Pipe worker stdout/stderr
+  // Pipe worker stdout/stderr — both go through logger.info (→ daemon.log,
+  // not error.log). See forkWorker for the rationale.
   worker.stdout?.on('data', (data: Buffer) => {
     for (const line of data.toString().split('\n')) {
       const trimmed = line.trim();
@@ -1126,7 +1132,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   worker.stderr?.on('data', (data: Buffer) => {
     for (const line of data.toString().split('\n')) {
       const trimmed = line.trim();
-      if (trimmed) logger.error(`[${t}:worker] ${trimmed}`);
+      if (trimmed) logger.info(`[${t}:err] ${trimmed}`);
     }
   });
 

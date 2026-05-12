@@ -25,7 +25,15 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
+import { loadOncallChatsByApp, pickBotEntryByName } from './utils/bot-routing.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
+import { logger } from './utils/logger.js';
+
+// CLI subcommands (send/thread/bots/list/etc) print JSON to stdout for
+// callers to parse. Transitive logger.info calls from shared modules would
+// corrupt that stream, so the CLI process runs silent by default. DEBUG=1
+// re-enables logging end-to-end for CLI troubleshooting.
+logger.setSilent(true);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -876,6 +884,7 @@ function loadBotConfigsForDisplay(): Array<{ larkAppId: string; cliId?: string }
   }
   return [];
 }
+
 
 /** Format a single session row for display (used by both plain table and TUI). */
 function formatSessionRow(
@@ -1878,7 +1887,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
 
   // Register bots so Lark client works
-  const { registerBot, loadBotConfigs, findOncallChat } = await import('./bot-registry.js');
+  const { registerBot, loadBotConfigs, findOncallChatForAnyBot } = await import('./bot-registry.js');
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
 
   const { sendMessage, replyMessage, uploadImage, uploadFile } = await import('./im/lark/client.js');
@@ -1889,10 +1898,13 @@ async function cmdSend(rest: string[]): Promise<void> {
   // reply_in_thread, otherwise Lark would force every reply into a fresh
   // topic — defeating the whole point of chat-scope routing.
   const isChatScope = s.scope === 'chat';
-  // Oncall addressing only meaningful for thread replies inside the session's
-  // own chat — skip when publishing top-level or to a different chat.
+  // Oncall addressing only meaningful for replies inside the session's own
+  // chat — skip when publishing top-level or to a different chat. Treat
+  // oncall as chat-level: in multi-daemon setups this session's bot may not
+  // be the one that persisted the binding, but users still expect footer
+  // addressing to go to the last caller in the shared oncall workspace.
   const oncallEntry = !sendTopLevel && !overrideChatId && s.chatId
-    ? findOncallChat(appId, s.chatId) : undefined;
+    ? findOncallChatForAnyBot(s.chatId) : undefined;
   // Dispatch helper: top-level / chat-scope send vs reply-in-thread, single decision point
   const dispatch = (content: string, msgType: string): Promise<string> =>
     (sendTopLevel || isChatScope)
@@ -2135,6 +2147,12 @@ async function cmdSend(rest: string[]): Promise<void> {
     type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; cliId: string };
     let botEntries: BotInfoEntry[] = [];
     try { if (existsSync(botInfoPath)) botEntries = JSON.parse(readFileSync(botInfoPath, 'utf-8')); } catch { /* */ }
+    // Disambiguate same-named bots by oncall binding to the outbound chat.
+    // Without this, Array.find on botName silently routes to whichever
+    // bots-info.json entry sorts first — typically the wrong one when a
+    // deployment runs two apps under the same display name (e.g. two CoCo
+    // bots, only one bound to this chat).
+    const oncallChatsByApp = loadOncallChatsByApp();
 
     const openIdToAppId = new Map<string, string>();
     for (const e of botEntries) if (e.botOpenId) openIdToAppId.set(e.botOpenId, e.larkAppId);
@@ -2144,7 +2162,7 @@ async function cmdSend(rest: string[]): Promise<void> {
         try {
           const crossRef: Record<string, string> = JSON.parse(readFileSync(join(dataDir, file), 'utf-8'));
           for (const [botName, crossOpenId] of Object.entries(crossRef)) {
-            const entry = botEntries.find(e => e.botName?.toLowerCase() === botName.toLowerCase());
+            const entry = pickBotEntryByName(botEntries, botName, targetChatId, oncallChatsByApp);
             if (entry) openIdToAppId.set(crossOpenId, entry.larkAppId);
           }
         } catch { /* */ }

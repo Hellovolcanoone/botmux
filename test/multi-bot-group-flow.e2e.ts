@@ -205,7 +205,7 @@ describe('Bug 1: userCount=1 (bots excluded) → all bots respond without @menti
     }
 
     // Lark user_count excludes bots. 1 human + 3 bots → user_count=1
-    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 1 });
+    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 1, botCount: 3 });
 
     // User sends message WITHOUT @mention
     const event = makeEvent(MSG_TOPIC_A, { senderOpenId: 'irrelevant' });
@@ -228,7 +228,7 @@ describe('Bug 1: userCount=1 (bots excluded) → all bots respond without @menti
     setBotOpenId(BOT1.appId, BOT1.openId);
     state.resolvedAllowedUsers = [BOT1.userOpenId];
 
-    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 1 });
+    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 1, botCount: 1 });
 
     const event = makeEvent(MSG_TOPIC_A, { senderOpenId: BOT1.userOpenId });
     const result = await checkGroupMessageAccess(BOT1.appId, event.message, CHAT_ID, BOT1.userOpenId);
@@ -248,7 +248,7 @@ describe('Bug 1: userCount=1 (bots excluded) → all bots respond without @menti
       state.resolvedAllowedUsers = [bot.userOpenId];
     }
 
-    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 4 });
+    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 4, botCount: 3 });
 
     const event = makeEvent(MSG_TOPIC_A, { senderOpenId: 'irrelevant' });
     const results = await routeForAllBots(event.message, checkGroupMessageAccess, BOTS);
@@ -273,7 +273,7 @@ describe('Fix B: Owning bot responds to thread replies without @mention', () => 
       state.resolvedAllowedUsers = [bot.userOpenId];
     }
 
-    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 4 });
+    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 4, botCount: 3 });
 
     // Bot1 owns the session
     const sessions = new Map<string, { larkAppId: string }>();
@@ -303,7 +303,7 @@ describe('Fix B: Owning bot responds to thread replies without @mention', () => 
       state.resolvedAllowedUsers = [bot.userOpenId];
     }
 
-    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 4 });
+    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 4, botCount: 3 });
 
     const sessions = new Map<string, { larkAppId: string }>();
     sessions.set(MSG_TOPIC_A, { larkAppId: BOT1.appId });
@@ -339,7 +339,7 @@ describe('Fix C: @mention Bot2 in Bot1 thread → takeover', () => {
       state.resolvedAllowedUsers = [bot.userOpenId];
     }
 
-    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 4 });
+    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 4, botCount: 3 });
 
     // Bot1 owns the session
     const sessions = new Map<string, { larkAppId: string }>();
@@ -387,7 +387,7 @@ describe('Full scenario: reproducing user-reported bug end-to-end', () => {
       state.resolvedAllowedUsers = [bot.userOpenId];
     }
 
-    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 1 });
+    vi.mocked(clientModule.getChatInfo).mockResolvedValue({ userCount: 1, botCount: 3 });
 
     const sessions = new Map<string, { larkAppId: string }>();
 

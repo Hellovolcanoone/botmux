@@ -55,6 +55,13 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   const value = action?.value;
   const cardMessageId = data?.context?.open_message_id ?? data?.open_message_id;
 
+  if (logger.isDebug()) {
+    logger.debug(
+      `[card] app=${larkAppId ?? '?'} op=${data?.operator?.open_id ?? '?'} ` +
+      `action=${value?.action ?? action?.option ?? '?'} root=${value?.root_id ?? '?'}`,
+    );
+  }
+
   // Check ALLOWED_USERS for sensitive actions.
   // Use the receiving bot's allowedUsers — the operator open_id in card actions
   // is scoped to the app that received the callback.

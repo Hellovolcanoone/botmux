@@ -30,11 +30,11 @@ vi.mock('node:fs', async (importOriginal) => {
 
 const mockGetBot = vi.fn();
 const mockGetAllBots = vi.fn(() => []);
-const mockFindOncallChat = vi.fn(() => undefined);
+const mockIsChatOncallBoundForAnyBot = vi.fn<(chatId: string) => boolean>(() => false);
 vi.mock('../src/bot-registry.js', () => ({
   getBot: (...args: any[]) => mockGetBot(...args),
   getAllBots: () => mockGetAllBots(),
-  findOncallChat: (...args: any[]) => mockFindOncallChat(...args),
+  isChatOncallBoundForAnyBot: (...args: any[]) => mockIsChatOncallBoundForAnyBot(...(args as [string])),
 }));
 
 const mockListChatBotMembers = vi.fn(async () => [] as Array<{ openId: string; name: string }>);
@@ -227,6 +227,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     setupBotState();
     handlers = makeHandlers();
     _resetBotMentionDedup();
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
     startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
   });
 
@@ -335,6 +336,70 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       anchor: 'chat-001',
       larkAppId: MY_APP_ID,
     }));
+  });
+
+  it('treats oncall as chat-level: relaxes canTalk even when THIS bot is not the one bound', async () => {
+    // Regression: /oncall bind is per-bot, but oncall is meant to be a
+    // chat-level concept. In multi-bot deployments the user often only binds
+    // one bot — sibling bots used to fall back to allowedUsers and reply
+    // "⚠️ 无操作权限" when @-mentioned by anyone outside the allowlist.
+    // isChatOncallBoundForAnyBot now answers true if ANY bot has the chat
+    // bound, so unbound siblings join the relaxed talking gate too.
+    mockGetChatMode.mockResolvedValueOnce('topic');
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(true);
+    mockGetBot.mockReturnValue({
+      config: { larkAppId: MY_APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' },
+      botOpenId: MY_OPEN_ID,
+      resolvedAllowedUsers: ['ou_some_other_human'],
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID, // NOT in allowedUsers
+      content: JSON.stringify({ text: '@BotA 召集判断一下' }),
+      messageId: 'msg-oncall-sibling',
+      chatId: 'chat-oncall-sibling',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      anchor: 'msg-oncall-sibling',
+      scope: 'thread',
+      larkAppId: MY_APP_ID,
+    }));
+  });
+
+  it('allows known botmux peers to @mention in non-oncall chats even when allowedUsers is restricted', async () => {
+    // Regression: bot-to-bot handoff in the same group used canTalk(), whose
+    // non-oncall branch only checked human allowedUsers. A peer bot's app-
+    // scoped open_id is never in that list, so a valid @mention fell through
+    // to "⚠️ 无操作权限" instead of routing to the target bot.
+    mockGetChatMode.mockResolvedValueOnce('group');
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
+    mockReadFileSync.mockReturnValue(JSON.stringify({ 'BotB': OTHER_BOT_OPEN_ID }));
+    mockGetBot.mockReturnValue({
+      config: { larkAppId: MY_APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' },
+      botOpenId: MY_OPEN_ID,
+      resolvedAllowedUsers: ['ou_allowed_human_only'],
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA please review' }),
+      messageId: 'msg-known-peer-allowedusers',
+      chatId: 'chat-known-peer',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-known-peer',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
   it('dedups bot-to-bot @mention if signal-file path already handled this messageId', async () => {

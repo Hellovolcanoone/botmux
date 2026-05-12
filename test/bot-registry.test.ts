@@ -26,6 +26,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...orig,
     existsSync: vi.fn(() => false),
     readFileSync: vi.fn(() => ''),
+    statSync: vi.fn(() => ({ mtimeMs: 0 })),
   };
 });
 
@@ -156,11 +157,76 @@ describe('getAllBots', () => {
   });
 });
 
+
+// ─── isChatOncallBoundForAnyBot ───────────────────────────────────────────
+
+describe('isChatOncallBoundForAnyBot', () => {
+  let mod: Awaited<ReturnType<typeof freshImport>>;
+  let fsMock: { existsSync: ReturnType<typeof vi.fn>; readFileSync: ReturnType<typeof vi.fn>; statSync: ReturnType<typeof vi.fn> };
+
+  beforeEach(async () => {
+    mod = await freshImport();
+    const fs = await import('node:fs');
+    fsMock = {
+      existsSync: fs.existsSync as unknown as ReturnType<typeof vi.fn>,
+      readFileSync: fs.readFileSync as unknown as ReturnType<typeof vi.fn>,
+      statSync: fs.statSync as unknown as ReturnType<typeof vi.fn>,
+    };
+    fsMock.existsSync.mockReset();
+    fsMock.readFileSync.mockReset();
+    fsMock.statSync.mockReset();
+    delete process.env.BOTS_CONFIG;
+  });
+
+  it('sees oncall chats bound to a sibling bot in the shared config file', () => {
+    process.env.BOTS_CONFIG = '/tmp/bots.json';
+    fsMock.existsSync.mockReturnValue(true);
+    fsMock.statSync.mockReturnValue({ mtimeMs: 100 });
+    fsMock.readFileSync.mockReturnValue(JSON.stringify([
+      { larkAppId: 'app_a', larkAppSecret: 'sa' },
+      { larkAppId: 'app_b', larkAppSecret: 'sb', oncallChats: [{ chatId: 'oc_oncall', workingDir: '/repo' }] },
+    ]));
+
+    const configs = mod.loadBotConfigs();
+    mod.registerBot(configs[0]);
+
+    expect(mod.findOncallChat('app_a', 'oc_oncall')).toBeUndefined();
+    expect(mod.isChatOncallBoundForAnyBot('oc_oncall')).toBe(true);
+    expect(mod.findOncallChatForAnyBot('oc_oncall')).toEqual({ chatId: 'oc_oncall', workingDir: '/repo' });
+    expect(mod.isChatOncallBoundForAnyBot('oc_other')).toBe(false);
+  });
+
+  it('refreshes the sibling oncall cache when bots.json mtime changes', () => {
+    process.env.BOTS_CONFIG = '/tmp/bots.json';
+    fsMock.existsSync.mockReturnValue(true);
+    fsMock.statSync
+      .mockReturnValueOnce({ mtimeMs: 1 })
+      .mockReturnValueOnce({ mtimeMs: 2 })
+      .mockReturnValueOnce({ mtimeMs: 2 });
+    fsMock.readFileSync.mockReturnValueOnce(JSON.stringify([{ larkAppId: 'app_a', larkAppSecret: 'sa' }]));
+
+    const configs = mod.loadBotConfigs();
+    mod.registerBot(configs[0]);
+
+    // First lookup builds a negative cache from the original file content.
+    fsMock.readFileSync.mockReturnValueOnce(JSON.stringify([{ larkAppId: 'app_a', larkAppSecret: 'sa' }]));
+    expect(mod.isChatOncallBoundForAnyBot('oc_new')).toBe(false);
+
+    // A later mtime causes the cache to refresh and pick up sibling bindings.
+    fsMock.readFileSync.mockReturnValueOnce(JSON.stringify([
+      { larkAppId: 'app_a', larkAppSecret: 'sa' },
+      { larkAppId: 'app_b', larkAppSecret: 'sb', oncallChats: [{ chatId: 'oc_new', workingDir: '/repo' }] },
+    ]));
+    expect(mod.isChatOncallBoundForAnyBot('oc_new')).toBe(true);
+    expect(mod.findOncallChatForAnyBot('oc_new')?.workingDir).toBe('/repo');
+  });
+});
+
 // ─── loadBotConfigs ───────────────────────────────────────────────────────
 
 describe('loadBotConfigs', () => {
   let mod: Awaited<ReturnType<typeof freshImport>>;
-  let fsMock: { existsSync: ReturnType<typeof vi.fn>; readFileSync: ReturnType<typeof vi.fn> };
+  let fsMock: { existsSync: ReturnType<typeof vi.fn>; readFileSync: ReturnType<typeof vi.fn>; statSync: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     mod = await freshImport();
@@ -169,9 +235,12 @@ describe('loadBotConfigs', () => {
     fsMock = {
       existsSync: fs.existsSync as unknown as ReturnType<typeof vi.fn>,
       readFileSync: fs.readFileSync as unknown as ReturnType<typeof vi.fn>,
+      statSync: fs.statSync as unknown as ReturnType<typeof vi.fn>,
     };
     fsMock.existsSync.mockReset();
     fsMock.readFileSync.mockReset();
+    fsMock.statSync.mockReset();
+    fsMock.statSync.mockReturnValue({ mtimeMs: 0 });
     // Clean env
     delete process.env.BOTS_CONFIG;
   });

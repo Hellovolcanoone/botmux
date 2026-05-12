@@ -157,7 +157,11 @@ describe('GET /api/groups (Phase B)', () => {
     // so the dashboard matrix can render toggle state without a second
     // round-trip. With no bot registered for 'test-app' the lookup falls
     // back to undefined → null in the response.
-    expect(body.chats).toEqual([{ chatId: 'oc_1', name: 'team', oncallChat: null }]);
+    // `firstSeenAt` is the per-bot creation-order proxy added so the
+    // dashboard can sort newly-added chats to the top. In this test the
+    // store hasn't been init()'d (no daemon), so the value degrades to
+    // null instead of failing the request — see chat-first-seen-store.
+    expect(body.chats).toEqual([{ chatId: 'oc_1', name: 'team', oncallChat: null, firstSeenAt: null }]);
     spy.mockRestore();
   });
 });

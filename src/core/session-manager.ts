@@ -106,7 +106,10 @@ export async function downloadResources(larkAppId: string, messageId: string, re
       await downloadMessageResource(larkAppId, resMessageId, res.key, res.type, savePath);
       attachments.push({ type: res.type, path: savePath, name: res.name });
     } catch (err: any) {
-      logger.warn(`Failed to download ${res.type} ${res.key}: ${err.message}`);
+      // Download failure usually means missing User Token scope or a
+      // legitimately revoked attachment — the caller surfaces `needLogin`
+      // to the user. Per-failure log stays at info to aid retries.
+      logger.info(`Failed to download ${res.type} ${res.key}: ${err.message}`);
       if (err.message?.includes('User Token')) needLogin = true;
     }
   }
@@ -661,7 +664,12 @@ export async function executeScheduledTask(
   // Resolve which bot to use — prefer the task's original bot so replies come from
   // the same account the user set up the schedule with.
   const allBots = getAllBots();
-  if (allBots.length === 0) { logger.warn('No bots configured, skipping scheduled task'); return; }
+  if (allBots.length === 0) {
+    // Expected at startup before bot configs finish loading; scheduler will
+    // re-fire on the next cron tick. Not actionable.
+    logger.debug('No bots configured, skipping scheduled task');
+    return;
+  }
   const bot =
     (task.larkAppId && allBots.find(b => b.config.larkAppId === task.larkAppId)) ||
     allBots[0];

@@ -87,13 +87,19 @@ vi.mock('../src/core/worker-pool.js', async (importOriginal) => {
 vi.mock('../src/core/session-manager.js', () => ({
   getSessionWorkingDir: vi.fn(() => '/tmp'),
   buildNewTopicPrompt: vi.fn(() => 'mock-prompt'),
+  getAvailableBots: vi.fn(() => []),
+  // card-handler's toggle path calls persistStreamCardState after flipping
+  // displayMode — without a stub here the test crashes with "No export …"
+  // before exercising the PATCH serialization we're actually testing.
+  persistStreamCardState: vi.fn(),
+  resumeSession: vi.fn(),
 }));
 
 vi.mock('@larksuiteoapi/node-sdk', () => ({
   Client: class { constructor() {} },
   WSClient: class { start() {} },
   EventDispatcher: class { register() {} },
-  LoggerLevel: { info: 2 },
+  LoggerLevel: { info: 2, warn: 3 },
 }));
 
 // ─── Imports & helpers ───────────────────────────────────────────────────────
