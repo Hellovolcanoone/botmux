@@ -405,6 +405,13 @@ export async function handleCommand(
             sessionStore.closeSession(ds.session.sessionId);
             const session = sessionStore.createSession(ds.chatId, rootId, displayName, ds.chatType);
             ds.session = session;
+            // Pin workingDir + larkAppId onto the freshly-created record before
+            // forkWorker — otherwise a daemon restart restores the session with
+            // an empty workingDir and falls back to the bot's default cwd,
+            // making `claude --resume` look in the wrong .claude/projects/ dir.
+            ds.session.workingDir = selectedPath;
+            ds.session.larkAppId = ds.larkAppId;
+            sessionStore.updateSession(ds.session);
             ds.hasHistory = false;
             forkWorker(ds, '', false);
             await sessionReply(rootId, `🔄 已切换到 ${displayName}`);

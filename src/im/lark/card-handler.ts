@@ -636,6 +636,14 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     sessionStore.closeSession(targetDs.session.sessionId);
     const session = sessionStore.createSession(targetDs.chatId, rootId, displayName, targetDs.chatType);
     targetDs.session = session;
+    // Pin workingDir + larkAppId onto the new session before forkWorker.
+    // Without this, a daemon restart restores the session with an empty
+    // workingDir and the worker spawns in the bot's default cwd, so
+    // `claude --resume` looks in the wrong .claude/projects/<hash>/ dir and
+    // exits code 0 immediately, crash-looping until the rate-limiter trips.
+    targetDs.session.workingDir = selectedPath;
+    targetDs.session.larkAppId = targetDs.larkAppId;
+    sessionStore.updateSession(targetDs.session);
     targetDs.hasHistory = false;
     // Re-persist the parked card under the NEW sessionId so a daemon crash
     // before the next POST doesn't strand it. closeSession() above wiped

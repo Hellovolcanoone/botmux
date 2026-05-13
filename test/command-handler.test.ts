@@ -677,6 +677,30 @@ describe('handleCommand', () => {
       expect(forkWorker).toHaveBeenCalledWith(ds, '', false);
     });
 
+    it('mid-session switch should persist workingDir + larkAppId on the new session', async () => {
+      // Regression for the daemon-restart crash: when /repo N switches repos
+      // mid-session, the NEW session record (returned by createSession) must
+      // carry workingDir so a later restore() doesn't fall back to the bot's
+      // default cwd and break `claude --resume`.
+      const ds = makeDaemonSession({ pendingRepo: false });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, [
+        { name: 'project-a', path: '/home/testuser/project-a', branch: 'main' },
+      ]);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo 1'), deps, LARK_APP_ID);
+
+      expect(ds.session.workingDir).toBe('/home/testuser/project-a');
+      expect(ds.session.larkAppId).toBe(LARK_APP_ID);
+      // updateSession must be called AFTER createSession with workingDir set.
+      const updateCalls = vi.mocked(sessionStore.updateSession).mock.calls;
+      const newSessionUpdate = updateCalls.find(
+        ([s]) => s.sessionId === 'new-session-123',
+      );
+      expect(newSessionUpdate, 'updateSession was never called with the new session').toBeDefined();
+      expect(newSessionUpdate![0].workingDir).toBe('/home/testuser/project-a');
+    });
+
     it('should show project list card when called without argument', async () => {
       vi.mocked(existsSync).mockReturnValue(true);
       vi.mocked(scanMultipleProjects).mockReturnValue([
