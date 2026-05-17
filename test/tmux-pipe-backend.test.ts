@@ -239,8 +239,93 @@ describe('normaliseCaptureLineEndings', () => {
   });
 });
 
+describe('TmuxPipeBackend managed session', () => {
+  it('creates detached session and applies botmux tmux options', () => {
+    const be = new TmuxPipeBackend('bmx-owned', { createSession: true, ownsSession: true });
+    be.spawn('/bin/echo', ['hello'], spawnOpts());
+
+    const newSessionCall = mockedExecFileSync.mock.calls.find(call => {
+      const args = call[1] as string[];
+      return args.includes('new-session');
+    });
+    expect(newSessionCall).toBeDefined();
+    expect(newSessionCall![1]).toContain('-d');
+    expect(newSessionCall![1]).toContain('bmx-owned');
+
+    const optionCalls = mockedExecSync.mock.calls.map(c => String(c[0]));
+    expect(optionCalls.some(c => c.includes('set-option') && c.includes('status off'))).toBe(true);
+    expect(optionCalls.some(c => c.includes('set-option') && c.includes('mouse on'))).toBe(true);
+    expect(optionCalls.some(c => c.includes('set-option') && c.includes('history-limit 50000'))).toBe(true);
+    expect(optionCalls.some(c => c.includes('set-option') && c.includes('window-size largest'))).toBe(true);
+    expect(optionCalls.some(c => c.includes('set-option -s set-clipboard on'))).toBe(true);
+  });
+
+  it('resizes owned tmux sessions and only records adopted pane resize', () => {
+    const owned = new TmuxPipeBackend('bmx-owned', { ownsSession: true });
+    owned.resize(120, 40);
+    expect(mockedExecFileSync).toHaveBeenCalledWith('tmux', ['resize-window', '-t', 'bmx-owned', '-x', '120', '-y', '40'], expect.any(Object));
+
+    mockedExecFileSync.mockClear();
+    const adopted = new TmuxPipeBackend('0:2.0');
+    adopted.resize(100, 30);
+    expect(mockedExecFileSync).not.toHaveBeenCalled();
+  });
+});
+
+describe('TmuxPipeBackend lifecycle watcher', () => {
+  it('fires exit when the tmux pane disappears', () => {
+    vi.useFakeTimers();
+    try {
+      mockedExecSync.mockImplementation((cmd: any) => {
+        if (String(cmd).includes("display-message") && String(cmd).includes("#{pane_id}")) return '%1\n' as any;
+        return '' as any;
+      });
+      const be = new TmuxPipeBackend('bmx-owned', { ownsSession: true });
+      const exits: Array<[number | null, string | null]> = [];
+      be.onExit((code, signal) => exits.push([code, signal]));
+      be.spawn('', [], spawnOpts());
+      mockedExecSync.mockImplementation((cmd: any) => {
+        if (String(cmd).includes("display-message") && String(cmd).includes("#{pane_id}")) {
+          throw new Error('no pane');
+        }
+        return '' as any;
+      });
+
+      vi.advanceTimersByTime(2_000);
+
+      expect(exits).toEqual([[1, null]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fires exit when tmux display-message succeeds with empty pane id', () => {
+    vi.useFakeTimers();
+    try {
+      mockedExecSync.mockImplementation((cmd: any) => {
+        if (String(cmd).includes("display-message") && String(cmd).includes("#{pane_id}")) return '%1\n' as any;
+        return '' as any;
+      });
+      const be = new TmuxPipeBackend('bmx-owned', { ownsSession: true });
+      const exits: Array<[number | null, string | null]> = [];
+      be.onExit((code, signal) => exits.push([code, signal]));
+      be.spawn('', [], spawnOpts());
+      mockedExecSync.mockImplementation((cmd: any) => {
+        if (String(cmd).includes("display-message") && String(cmd).includes("#{pane_id}")) return '\n' as any;
+        return '' as any;
+      });
+
+      vi.advanceTimersByTime(2_000);
+
+      expect(exits).toEqual([[1, null]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('TmuxPipeBackend.kill', () => {
-  it('cancels pipe-pane subscription, unlinks the fifo, fires onExit', () => {
+  it('cancels pipe-pane subscription and unlinks the fifo without firing onExit', () => {
     const be = new TmuxPipeBackend('0:2.0');
     be.spawn('', [], spawnOpts());
     let exitFired = false;
@@ -258,7 +343,7 @@ describe('TmuxPipeBackend.kill', () => {
     expect(pipeCall).toContain("'0:2.0'");
 
     expect(mockedUnlinkSync).toHaveBeenCalledWith(expect.stringMatching(/botmux-pipe-.*\.fifo/));
-    expect(exitFired).toBe(true);
+    expect(exitFired).toBe(false);
   });
 
   it('is idempotent (second kill is a no-op)', () => {
