@@ -55,6 +55,8 @@ export interface BotConfig {
    * Codex flagged in review.
    */
   defaultOncallAutoboundChats?: string[];
+  /** Per-chat per-user grants: chat_id → 被授权的 open_id 列表。仅放行 canTalk，不给管理命令权。 */
+  chatGrants?: { [chatId: string]: string[] };
 }
 
 export interface BotState {
@@ -63,6 +65,8 @@ export interface BotState {
   botOpenId?: string;
   botName?: string;       // Lark app display name (from /bot/v3/info)
   resolvedAllowedUsers: string[];
+  /** raw allowedUsers 条目 → 解析后的 open_id。供 /revoke 反查并删除 email 形式的 raw 条目。 */
+  rawAllowedUserResolution: Map<string, string>;
 }
 
 const bots = new Map<string, BotState>();
@@ -109,6 +113,7 @@ export function registerBot(cfg: BotConfig): BotState {
     config: cfg,
     client,
     resolvedAllowedUsers: [...(cfg.allowedUsers ?? [])],
+    rawAllowedUserResolution: new Map(),
   };
   bots.set(cfg.larkAppId, state);
   return state;
@@ -124,6 +129,16 @@ export function getBot(larkAppId: string): BotState {
 
 export function getBotClient(larkAppId: string): Lark.Client {
   return getBot(larkAppId).client;
+}
+
+/** Owner = bot 首个已授权 open_id，与「缺权限警告私信对象」同口径（见 admin 解析）。 */
+export function getOwnerOpenId(larkAppId: string): string | undefined {
+  return bots.get(larkAppId)?.resolvedAllowedUsers.find(u => u.startsWith('ou_'));
+}
+
+/** Bot 自身的 open_id（用于在 mention 解析时排除自己）。 */
+export function getBotOpenId(larkAppId: string): string | undefined {
+  return bots.get(larkAppId)?.botOpenId;
 }
 
 export function getAllBots(): BotState[] {
@@ -217,15 +232,25 @@ export function loadBotConfigs(): BotConfig[] {
 
 function parseBotConfigFile(filePath: string): BotConfig[] {
   const raw = readFileSync(filePath, 'utf-8');
+  try {
+    return parseBotConfigsFromText(raw);
+  } catch (err: any) {
+    // Preserve the file path in JSON-parse / shape errors for easier debugging.
+    throw new Error(`${err?.message ?? err} (file: ${filePath})`);
+  }
+}
+
+/** Pure parser: bots.json text → BotConfig[]. Exported for testing & reuse. */
+export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(jsonText);
   } catch {
-    throw new Error(`Invalid JSON in bot config file: ${filePath}`);
+    throw new Error(`Invalid JSON in bot config file`);
   }
 
   if (!Array.isArray(parsed)) {
-    throw new Error(`Bot config file must contain a JSON array: ${filePath}`);
+    throw new Error(`Bot config file must contain a JSON array`);
   }
 
   const configs: BotConfig[] = [];
@@ -275,6 +300,19 @@ function parseBotConfigFile(filePath: string): BotConfig[] {
         .filter((x: any): x is string => typeof x === 'string');
     }
 
+    // chatGrants：只保留 { [chatId:string]: string[] }，逐项校验 typeof === 'string'，
+    // 丢弃空列表。未配置或全部非法 → undefined。
+    let chatGrants: { [chatId: string]: string[] } | undefined;
+    if (entry.chatGrants && typeof entry.chatGrants === 'object' && !Array.isArray(entry.chatGrants)) {
+      const out: { [chatId: string]: string[] } = {};
+      for (const [cid, arr] of Object.entries(entry.chatGrants)) {
+        if (!Array.isArray(arr)) continue;
+        const ids = (arr as any[]).filter((x): x is string => typeof x === 'string');
+        if (ids.length > 0) out[cid] = ids;
+      }
+      if (Object.keys(out).length > 0) chatGrants = out;
+    }
+
     configs.push({
       larkAppId: entry.larkAppId,
       larkAppSecret: entry.larkAppSecret,
@@ -288,6 +326,7 @@ function parseBotConfigFile(filePath: string): BotConfig[] {
       oncallChats,
       defaultOncall,
       defaultOncallAutoboundChats,
+      chatGrants,
       lang: isLocale(entry.lang) ? entry.lang : undefined,
     });
   }
