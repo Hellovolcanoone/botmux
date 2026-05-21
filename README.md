@@ -505,7 +505,7 @@ botmux setup
 | `cliId` | 否 | CLI 适配器，默认 `claude-code`（可选：`aiden`、`coco`、`codex`、`cursor`、`gemini`、`opencode`、`antigravity`） |
 | `cliPathOverride` | 否 | CLI 入口的绝对路径，用于套 wrapper / router；典型场景：ccr、claude-w、aiden-x-claude 等自定义入口 |
 | `backendType` | 否 | 会话后端：`pty` 或 `tmux`（默认自动检测） |
-| `workingDir` | 否 | 默认工作目录，支持逗号分隔多个目录 |
+| `workingDir` | 否 | 默认工作目录，支持逗号分隔多个目录。新话题的 repo 选择卡片会**从该目录自身向下**递归查找 git 仓库（最多 3 层），不再向上扫父目录：指向仓库集合根目录（如 `~/projects`）即列出其下所有仓库，指向单个仓库则只列该仓库 |
 | `defaultWorkingDir` | 否 | 单仓库默认目录：新话题在无 oncall 绑定 / 无同群兄弟 session 时直接进入该目录，跳过 repo 选择卡片。`/cd <path>` 仍可临时切换；下一个新话题回到该默认值。**与 `defaultOncall` 的区别**：不写 `oncallChats`、不修改 `canTalk`/`canOperate` 权限模型 |
 | `allowedUsers` | 否 | 允许的用户列表（邮箱前缀或 open_id） |
 | `oncallChats` | 否 | oncall 绑定（`/oncall bind` 写入），形如 `[{ "chatId": "oc_xxx", "workingDir": "~/projects/foo" }]`，群内任何成员可 @ 提问 |
