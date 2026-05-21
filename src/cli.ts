@@ -2324,7 +2324,7 @@ async function cmdHistory(rest: string[]): Promise<void> {
   }
 
   const { getMessageDetail, listAmbientChatMessages, listThreadMessages, listChatMessages } = await import('./im/lark/client.js');
-  const { parseApiMessage } = await import('./im/lark/message-parser.js');
+  const { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent } = await import('./im/lark/message-parser.js');
   const { expandMergeForward } = await import('./im/lark/merge-forward.js');
   try {
     // Chat-scope sessions (普通群整群一会话) have no thread to walk — list the
@@ -2372,7 +2372,17 @@ async function cmdHistory(rest: string[]): Promise<void> {
     // path in daemon.ts. Each merge_forward gets its own numberer (we don't
     // download resources here — only [图片 N] placeholders matter).
     const messages = await Promise.all(raw.map(async (m: any) => {
-      const parsed = parseApiMessage(m);
+      let parsed = parseApiMessage(m);
+      // `im.v1.message.list` returns Lark's simplified "请升级客户端" fallback for
+      // complex cards — the whole body (user-forwarded) or nested sub-cards
+      // buried mid-body (Argos alarms). Those are the cards where the list view
+      // alone is incomplete, so resolve them by unioning both `im.message.get`
+      // representations (server-rendered + full structured). Failures keep the
+      // list text. Simple cards (no fallback) already render fully here.
+      if (parsed.msgType === 'interactive' && cardContentHasUpgradeFallback(parsed.content)) {
+        const merged = await resolveMergedCardContent(appId, parsed.messageId).catch(() => null);
+        if (merged) parsed.content = merged.text;
+      }
       if (parsed.msgType === 'merge_forward') {
         await expandMergeForward(appId, parsed.messageId, parsed);
       }
@@ -2419,6 +2429,7 @@ async function cmdQuoted(rest: string[]): Promise<void> {
   const { getMessageDetail } = await import('./im/lark/client.js');
   const { expandMergeForward } = await import('./im/lark/merge-forward.js');
   const { renderQuotedMessage } = await import('./cli/quoted-render.js');
+  const { resolveMergedCardContent } = await import('./im/lark/message-parser.js');
   try {
     const detail = await getMessageDetail(appId, messageId);
     const msg = detail?.items?.[0];
@@ -2427,6 +2438,15 @@ async function cmdQuoted(rest: string[]): Promise<void> {
       process.exit(1);
     }
     const rendered = await renderQuotedMessage(appId, msg, expandMergeForward);
+    // Interactive cards: union both im.message.get representations so the quoted
+    // view matches history/live (recovers names + sub-card content + options).
+    // This single-message path always merges — unlike history (which starts
+    // from the hole-bearing list view), the quoted base is the hole-free B view
+    // so there's no cheap local signal that a merge would add anything.
+    if (rendered.msgType === 'interactive') {
+      const merged = await resolveMergedCardContent(appId, messageId).catch(() => null);
+      if (merged) rendered.content = merged.text;
+    }
     console.log(JSON.stringify(rendered, null, 2));
   } catch (err: any) {
     console.error(`获取被引用消息失败: ${err.message}`);
