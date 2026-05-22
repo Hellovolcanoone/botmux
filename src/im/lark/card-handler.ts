@@ -219,13 +219,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         return;
       }
     } else {
-      // No resolvable bot context — fall back to union of all allowedUsers
-      const allowedUsers = getAllBots().flatMap(b => b.resolvedAllowedUsers);
-      if (allowedUsers.length > 0) {
-        if (!operatorOpenId || !allowedUsers.includes(operatorOpenId)) {
-          logger.info(`Card action "${value.action}" blocked for non-allowed user: ${operatorOpenId}`);
-          return;
-        }
+      const bots = getAllBots();
+      const allowedUsers = bots.flatMap(b => b.resolvedAllowedUsers);
+      const hasAllowlist = allowedUsers.length > 0 || bots.some(b => (b.config.allowedChatGroups?.length ?? 0) > 0);
+      if (hasAllowlist && (!operatorOpenId || !allowedUsers.includes(operatorOpenId))) {
+        logger.info(`Card action "${value.action}" blocked for non-allowed user: ${operatorOpenId}`);
+        return;
       }
     }
   }

@@ -560,6 +560,32 @@ describe('Card integration: full event flow', () => {
       );
     });
 
+    it('sensitive fallback should reject when only allowedChatGroups is configured', async () => {
+      const botRegMod = await import('../src/bot-registry.js');
+      vi.mocked(botRegMod.getAllBots).mockReturnValueOnce([{
+        config: { larkAppId: APP_ID, larkAppSecret: 'secret', cliId: 'claude-code', allowedChatGroups: ['oc_team'] } as any,
+        resolvedAllowedUsers: [],
+        resolvedAllowedChatGroupUsers: ['ou_user'],
+        botOpenId: 'ou_bot',
+      } as any]);
+
+      const sessionId = 'closed-uuid-fallback';
+      const sessions = new Map<string, DaemonSession>();
+      const deps = makeDeps(sessions);
+
+      const sessionStoreMod = await import('../src/services/session-store.js');
+      vi.mocked(sessionStoreMod.getSession).mockReturnValue({
+        sessionId, chatId: 'oc_chat', rootMessageId: ROOT_ID,
+        title: 'closed', status: 'closed', createdAt: '2026-01-01T00:00:00.000Z',
+        scope: 'thread',
+      } as any);
+      const sm = await import('../src/core/session-manager.js');
+
+      await handleCardAction(makeResumeEvent(ROOT_ID, sessionId, 'ou_user'), deps, undefined);
+
+      expect(sm.resumeSession).not.toHaveBeenCalled();
+    });
+
     it('resume should reject when operator is not in allowedUsers', async () => {
       // canOperate is gated through bot-registry.getBot(...).resolvedAllowedUsers
       // — switch the mock to a bot with a non-empty allowlist that excludes the
