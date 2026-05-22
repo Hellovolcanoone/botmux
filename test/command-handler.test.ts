@@ -11,12 +11,23 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // ─── Mock external modules ──────────────────────────────────────────────────
 
 // Mock node builtins that command-handler imports directly
+// Global bot registry as seen via bots-info.json (the deployment-wide source the
+// /group election reads). Two bots, distinct names — the realistic chat shape.
+const BOTS_INFO = [
+  { larkAppId: 'app-1', botOpenId: 'ou_claude', botName: 'Claude', cliId: 'claude-code' },
+  { larkAppId: 'app-2', botOpenId: 'ou_codex', botName: 'Codex', cliId: 'codex' },
+];
+
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
     existsSync: vi.fn(() => true),
     statSync: vi.fn(() => ({ isDirectory: () => true })),
+    readFileSync: vi.fn((p: any, ...rest: any[]) => {
+      if (typeof p === 'string' && p.includes('bots-info.json')) return JSON.stringify(BOTS_INFO);
+      return (actual.readFileSync as any)(p, ...rest);
+    }),
   };
 });
 
@@ -29,6 +40,7 @@ vi.mock('../src/config.js', () => ({
   config: {
     web: { externalHost: 'localhost' },
     daemon: { workingDir: '~' },
+    session: { dataDir: '/fake/data' },
   },
 }));
 
@@ -43,8 +55,12 @@ vi.mock('../src/bot-registry.js', () => ({
       workingDirs: ['~/projects'],
     },
   })),
+  // Production runs ONE daemon per bot, so getAllBots() sees only this process's
+  // own bot. Default to the Claude process; the split-brain test overrides this
+  // to prove the /group election does NOT depend on getAllBots().
   getAllBots: vi.fn(() => [
     {
+      botName: 'Claude',
       config: {
         larkAppId: 'app-1',
         larkAppSecret: 'secret-1',
@@ -53,6 +69,7 @@ vi.mock('../src/bot-registry.js', () => ({
       },
     },
   ]),
+  getBotOpenId: vi.fn((id: string = 'app-1') => (id === 'app-2' ? 'ou_codex' : 'ou_claude')),
 }));
 
 vi.mock('../src/services/session-store.js', () => ({
@@ -182,9 +199,10 @@ import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
 import { deleteMessage, sendMessage, listChatBotMembers } from '../src/im/lark/client.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
+import { getAllBots } from '../src/bot-registry.js';
 import { generateAuthUrl, getTokenStatus } from '../src/utils/user-token.js';
 import { bindOncall } from '../src/services/oncall-store.js';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, statSync, readFileSync } from 'node:fs';
 import { scanMultipleProjects } from '../src/services/project-scanner.js';
 import { discoverAdoptableSessions } from '../src/core/session-discovery.js';
 
@@ -1195,10 +1213,6 @@ describe('handleCommand', () => {
     });
 
     it('defers silently when we are not the first mentioned bot', async () => {
-      mockedListBots.mockResolvedValueOnce([
-        { larkAppId: 'app-1', openId: 'ou_claude', name: 'claude-code', displayName: 'Claude', source: 'configured' },
-        { larkAppId: 'app-2', openId: 'ou_codex', name: 'codex', displayName: 'Codex', source: 'configured' },
-      ]);
       const ds = makeDaemonSession();
       const deps = makeDeps(ds);
       // Codex is mentioned first → app-2 is the designated creator; app-1 (us) defers.
@@ -1213,6 +1227,95 @@ describe('handleCommand', () => {
 
       expect(mockedCreate).not.toHaveBeenCalled();
       expect(deps.sessionReply).not.toHaveBeenCalled();
+      // Election uses the global bot-name registry + our own open_id — a
+      // non-leader decides to defer without any chat-member lookup.
+      expect(mockedListBots).not.toHaveBeenCalled();
+    });
+
+    it('defers in a per-bot daemon even when getAllBots() only knows itself (no split-brain)', async () => {
+      // Faithful to production: the Codex process's in-memory registry has ONLY
+      // Codex. The OLD getAllBots()-based election would make Codex self-elect as
+      // "first known bot" and double-create. The fix reads the global bot-name
+      // registry (bots-info.json), so Codex still defers to the first @-mentioned
+      // bot (Claude).
+      vi.mocked(getAllBots).mockReturnValueOnce([
+        { botName: 'Codex', config: { larkAppId: 'app-2', larkAppSecret: 's', cliId: 'codex', workingDir: '~' } },
+      ] as unknown as ReturnType<typeof getAllBots>);
+      const ds = makeDaemonSession();
+      const deps = makeDeps(ds);
+      const msg = makeLarkMessage('/group @Claude @Codex 项目', {
+        mentions: [
+          { key: '@_user_1', name: 'Claude', openId: 'ou_claude' },
+          { key: '@_user_2', name: 'Codex', openId: 'ou_codex' },
+        ],
+      });
+
+      // Handled by the app-2 (Codex) daemon process.
+      await handleCommand('/group', ROOT_ID, msg, deps, 'app-2');
+
+      expect(mockedCreate).not.toHaveBeenCalled();
+      expect(deps.sessionReply).not.toHaveBeenCalled();
+    });
+
+    it('fails closed (no group) when an @-mentioned bot cannot be resolved to an app id', async () => {
+      // We are the leader (Claude, first), but the chat-member roster is missing
+      // Codex → must NOT create a group silently dropping an intended bot.
+      mockedListBots.mockResolvedValueOnce([
+        { larkAppId: 'app-1', openId: 'ou_claude', name: 'claude-code', displayName: 'Claude', source: 'configured' },
+      ]);
+      const ds = makeDaemonSession();
+      const deps = makeDeps(ds);
+      const msg = makeLarkMessage('/group @Claude @Codex 项目', {
+        mentions: [
+          { key: '@_user_1', name: 'Claude', openId: 'ou_claude' },
+          { key: '@_user_2', name: 'Codex', openId: 'ou_codex' },
+        ],
+      });
+
+      await handleCommand('/group', ROOT_ID, msg, deps, LARK_APP_ID);
+
+      expect(mockedCreate).not.toHaveBeenCalled();
+      const reply = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(reply).toContain('无法解析');
+    });
+
+    it('fails closed (no group) when the global bot registry is empty (corrupt bots-info.json)', async () => {
+      // Simulate a missing/corrupt bots-info.json → globalKnownBotNames() empty.
+      vi.mocked(readFileSync).mockImplementationOnce((p: any) => {
+        if (typeof p === 'string' && p.includes('bots-info.json')) return '[]';
+        throw new Error('unexpected read');
+      });
+      const ds = makeDaemonSession();
+      const deps = makeDeps(ds);
+      const msg = makeLarkMessage('/group @Codex 项目', {
+        mentions: [
+          { key: '@_user_1', name: 'Claude', openId: 'ou_claude' },
+          { key: '@_user_2', name: 'Codex', openId: 'ou_codex' },
+        ],
+      });
+
+      await handleCommand('/group', ROOT_ID, msg, deps, LARK_APP_ID);
+
+      expect(mockedCreate).not.toHaveBeenCalled();
+      const reply = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(reply).toContain('无法解析');
+    });
+
+    it('fails closed (no group) when bots are mentioned but the source chatId is unknown', async () => {
+      const ds = makeDaemonSession({ chatId: undefined as unknown as string });
+      const deps = makeDeps(ds);
+      const msg = makeLarkMessage('/group @Codex 项目', {
+        mentions: [
+          { key: '@_user_1', name: 'Claude', openId: 'ou_claude' },
+          { key: '@_user_2', name: 'Codex', openId: 'ou_codex' },
+        ],
+      });
+
+      await handleCommand('/group', ROOT_ID, msg, deps, LARK_APP_ID);
+
+      expect(mockedCreate).not.toHaveBeenCalled();
+      const reply = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(reply).toContain('无法解析');
     });
   });
 
