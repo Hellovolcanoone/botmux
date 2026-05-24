@@ -21,7 +21,8 @@ import { discoverAdoptableSessions, validateAdoptTarget, type AdoptableSession }
 import { generateAuthUrl, getTokenStatus } from '../utils/user-token.js';
 import { bindOncall, unbindOncall, getOncallStatus } from '../services/oncall-store.js';
 import { invalidWorkingDirs } from '../utils/working-dir.js';
-import { resolveRoleFile, writeRoleFile, deleteRoleFile } from './role-resolver.js';
+import { writeRoleFile, deleteRoleFile, resolveRole, resolveTeamRoleFile, writeTeamRoleFile, deleteTeamRoleFile } from './role-resolver.js';
+import { getBotCapability, setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
 import type { LarkMessage, DaemonToWorker } from '../types.js';
 import { sessionKey, sessionAnchorId } from './types.js';
 import type { DaemonSession } from './types.js';
@@ -192,13 +193,61 @@ async function handleRoleCommand(
     deps.sessionReply(rid, content, msgType, larkAppId);
   const trimmed = args.trim();
   const loc = localeForBot(larkAppId);
+  const dataDir = config.session.dataDir;
 
-  // /role → show current role
+  // /role team [...] — manage the team-level (per-bot, cross-chat) role
+  const teamMatch = trimmed.match(/^team\b([\s\S]*)$/);
+  if (teamMatch) {
+    const teamArgs = teamMatch[1].trim();
+    const teamSet = teamArgs.match(/^set\s+([\s\S]+)/);
+    if (teamSet) {
+      const content = teamSet[1].trim();
+      if (!content) { await sessionReply(rootId, t('role.set_empty', undefined, loc)); return; }
+      writeTeamRoleFile(larkAppId, content);
+      await sessionReply(rootId, t('role.team_saved', { bytes: Buffer.byteLength(content, 'utf-8'), max: 4096 }, loc));
+      return;
+    }
+    if (teamArgs === 'delete' || teamArgs === '删除') {
+      await sessionReply(rootId, deleteTeamRoleFile(larkAppId) ? t('role.team_deleted', undefined, loc) : t('role.team_nothing', undefined, loc));
+      return;
+    }
+    const content = resolveTeamRoleFile(larkAppId);
+    if (content) {
+      await sessionReply(rootId, `${t('role.team_current', undefined, loc)}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: Buffer.byteLength(content, 'utf-8'), max: 4096 }, loc)}`);
+    } else {
+      await sessionReply(rootId, t('role.team_empty', undefined, loc));
+    }
+    return;
+  }
+
+  // /role cap [...] — manage the short capability label shown in the roster
+  const capMatch = trimmed.match(/^cap\b([\s\S]*)$/);
+  if (capMatch) {
+    const capArgs = capMatch[1].trim();
+    const capSet = capArgs.match(/^set\s+([\s\S]+)/);
+    if (capSet) {
+      const label = capSet[1].trim();
+      if (!label) { await sessionReply(rootId, t('role.cap_set_empty', undefined, loc)); return; }
+      setBotCapability(dataDir, larkAppId, label);
+      await sessionReply(rootId, t('role.cap_saved', { cap: getBotCapability(dataDir, larkAppId) ?? label }, loc));
+      return;
+    }
+    if (capArgs === 'clear' || capArgs === '清除') {
+      await sessionReply(rootId, clearBotCapability(dataDir, larkAppId) ? t('role.cap_cleared', undefined, loc) : t('role.cap_empty', undefined, loc));
+      return;
+    }
+    const cap = getBotCapability(dataDir, larkAppId);
+    await sessionReply(rootId, cap ? t('role.cap_current', { cap }, loc) : t('role.cap_empty', undefined, loc));
+    return;
+  }
+
+  // /role → show the EFFECTIVE role + where it comes from (chat override > team > none)
   if (!trimmed) {
-    const content = resolveRoleFile(larkAppId, chatId);
+    const { content, source } = resolveRole(larkAppId, chatId);
     if (content) {
       const len = Buffer.byteLength(content, 'utf-8');
-      await sessionReply(rootId, `${t('role.current', undefined, loc)}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: len, max: 4096 }, loc)}`);
+      const srcLabel = source === 'chat' ? t('role.src_chat', undefined, loc) : t('role.src_team', undefined, loc);
+      await sessionReply(rootId, `${t('role.current', undefined, loc)} ${srcLabel}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: len, max: 4096 }, loc)}`);
     } else {
       await sessionReply(rootId, t('role.empty', undefined, loc));
     }

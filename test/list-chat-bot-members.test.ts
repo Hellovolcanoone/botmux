@@ -70,10 +70,33 @@ describe('listChatBotMembers', () => {
     const bots = await listChatBotMembers('cli_self', 'oc_chat');
 
     expect(bots).toEqual([
-      { larkAppId: 'cli_self', name: 'codex', displayName: 'Botmux Oncall(Codex)', openId: 'ou_self_seen_by_self', source: 'configured' },
-      { larkAppId: 'cli_peer', name: 'codex', displayName: 'Botmux Oncall(CoCo)', openId: 'ou_peer_seen_by_self', source: 'configured' },
+      { larkAppId: 'cli_self', name: 'codex', displayName: 'Botmux Oncall(Codex)', openId: 'ou_self_seen_by_self', source: 'configured', capability: undefined, hasTeamRole: false, mentionable: true, mentionSource: 'cross-ref' },
+      { larkAppId: 'cli_peer', name: 'codex', displayName: 'Botmux Oncall(CoCo)', openId: 'ou_peer_seen_by_self', source: 'configured', capability: undefined, hasTeamRole: false, mentionable: true, mentionSource: 'cross-ref' },
     ]);
     expect(bots.map(b => b.larkAppId === 'cli_self')).toEqual([true, false]);
+  });
+
+  it('marks a peer NOT in cross-ref as known-but-not-reliably-mentionable', async () => {
+    state.dataDir = mkdtempSync(join(tmpdir(), 'botmux-list-chat-bots-'));
+    // cli_peer is in bots-info (so we know its self-view open_id) but NOT in the
+    // cli_self cross-ref → cli_self cannot reliably @-mention it.
+    writeFileSync(join(state.dataDir, 'bots-info.json'), JSON.stringify([
+      { larkAppId: 'cli_self', botOpenId: 'ou_self_seen_by_self', botName: 'BotSelf', cliId: 'codex' },
+      { larkAppId: 'cli_peer', botOpenId: 'ou_peer_self_view', botName: 'BotPeer', cliId: 'codex' },
+    ]));
+    writeFileSync(join(state.dataDir, 'bot-openids-cli_self.json'), JSON.stringify({
+      'BotSelf': 'ou_self_seen_by_self',
+    }));
+
+    const { listChatBotMembers } = await import('../src/im/lark/client.js');
+    const bots = await listChatBotMembers('cli_self', 'oc_chat');
+
+    const self = bots.find(b => b.larkAppId === 'cli_self')!;
+    const peer = bots.find(b => b.larkAppId === 'cli_peer')!;
+    expect(self.mentionable).toBe(true);           // self is always fine
+    expect(self.mentionSource).toBe('cross-ref');
+    expect(peer.mentionable).toBe(false);          // self-view open_id is wrong for cli_self to use
+    expect(peer.mentionSource).toBe('self');
   });
 
   it('includes observed bots from observed-bots-<larkAppId>-<chatId>.json with source="introduce"', async () => {

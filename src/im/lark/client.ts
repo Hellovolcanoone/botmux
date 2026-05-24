@@ -7,6 +7,8 @@ import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { resolveUserToken } from '../../utils/user-token.js';
 import { listObservedBots } from '../../services/observed-bots-store.js';
+import { getBotCapability } from '../../services/bot-profile-store.js';
+import { resolveTeamRoleFile } from '../../core/role-resolver.js';
 
 // Cached lightweight Lark clients for all configured bots (for isInChat checks)
 let allBotClients: Array<{ appId: string; cliId: string; client: InstanceType<typeof Client> }> | null = null;
@@ -713,6 +715,18 @@ export type ChatBotMember = {
   name: string;
   displayName: string;
   source: 'configured' | 'introduce';
+  /** Short capability label (team-level), for roster discovery. Configured bots only. */
+  capability?: string;
+  /** Whether this bot has a team-level role registered. Configured bots only. */
+  hasTeamRole: boolean;
+  /**
+   * Whether the observing app (the `larkAppId` arg) can RELIABLY @-mention this
+   * member. Lark open_id is per-app scoped, so a bot's self-reported open_id is
+   * not usable by another app. Reliable only when learned via cross-ref (from
+   * @mention events) or via /introduce (observed, already observer-scoped).
+   */
+  mentionable: boolean;
+  mentionSource: 'cross-ref' | 'self' | 'observed' | 'fallback';
 };
 
 export async function listChatBotMembers(larkAppId: string, chatId: string): Promise<ChatBotMember[]> {
@@ -753,15 +767,26 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
         if (res.code === 0 && res.data?.is_in_chat) {
           const info = appIdToInfo.get(appId);
           // Prefer cross-reference (correct per-app open_id), fall back to self-seen
-          const openId = (info?.botName && crossRef.get(info.botName.toLowerCase()))
-            ?? info?.botOpenId
-            ?? appId;
+          const crossHit = info?.botName ? crossRef.get(info.botName.toLowerCase()) : undefined;
+          const openId = crossHit ?? info?.botOpenId ?? appId;
+          const isSelf = appId === larkAppId;
+          // Reliable @-mention only when the per-app open_id was learned via
+          // cross-ref; self-view open_id (info.botOpenId) is wrong for OTHER
+          // apps, and the appId fallback is no handle at all. Self is always fine.
+          const mentionSource: ChatBotMember['mentionSource'] = crossHit
+            ? 'cross-ref'
+            : (info?.botOpenId ? 'self' : 'fallback');
+          const mentionable = isSelf || mentionSource === 'cross-ref';
           return {
             larkAppId: appId,
             openId,
             name: cliId,
             displayName: info?.botName ?? cliId,
             source: 'configured',
+            capability: getBotCapability(config.session.dataDir, appId) ?? undefined,
+            hasTeamRole: resolveTeamRoleFile(appId) !== null,
+            mentionable,
+            mentionSource,
           };
         }
       } catch (err) {
@@ -787,6 +812,11 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
         name: o.name,
         displayName: o.name,
         source: 'introduce' as const,
+        // Observed open_ids are recorded from THIS observer's perspective, so
+        // they are already the correct per-app handle → reliably mentionable.
+        hasTeamRole: false,
+        mentionable: true,
+        mentionSource: 'observed' as const,
       }));
   } catch (err) {
     logger.debug(`Failed to load observed bots for ${chatId}: ${err}`);
