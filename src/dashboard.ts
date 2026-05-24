@@ -15,6 +15,8 @@ import { DaemonRegistry } from './dashboard/registry.js';
 import { Aggregator, subscribeDaemon } from './dashboard/aggregator.js';
 import { pickCreatorForGroup } from './dashboard/operator-selector.js';
 import { handleWorkflowApi, jsonRes } from './dashboard/workflow-api.js';
+import { handleDashboardTriggerApi } from './dashboard/trigger-api.js';
+import { handleConnectorApi } from './dashboard/connector-api.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 
@@ -150,7 +152,7 @@ async function proxyToDaemon(
 ): Promise<Response> {
   const d = registry.getByAppId(larkAppId);
   if (!d) {
-    return new Response(JSON.stringify({ ok: false, error: 'daemon_offline' }), {
+    return new Response(JSON.stringify({ ok: false, error: 'daemon_offline', errorCode: 'daemon_offline' }), {
       status: 503,
       headers: { 'content-type': 'application/json' },
     });
@@ -254,6 +256,14 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/schedules') {
       return jsonRes(res, 200, { schedules: aggregator.getSchedules() });
+    }
+
+    if (await handleConnectorApi(req, res, url)) {
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/trigger') {
+      return handleDashboardTriggerApi(req, res, { proxyToDaemon });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/bot-onboarding/start') {

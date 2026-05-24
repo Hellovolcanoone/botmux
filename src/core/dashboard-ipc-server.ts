@@ -16,6 +16,8 @@ import { locateLimiter } from './dashboard-locate.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { validateWorkingDir } from './working-dir.js';
 import { resolveRoleFile, writeRoleFile, deleteRoleFile } from './role-resolver.js';
+import { triggerSessionTurn } from './trigger-session.js';
+import { validateTriggerRequest } from '../services/trigger-types.js';
 import {
   composeRowFromActive,
   composeRowFromClosed,
@@ -278,6 +280,35 @@ ipcRoute('GET', '/api/schedules', (_req, res) => {
 ipcRoute('POST', '/api/schedules/:id/run',    (_req, res, p) => jsonRes(res, 200, scheduler.runNow(p.id)));
 ipcRoute('POST', '/api/schedules/:id/pause',  (_req, res, p) => jsonRes(res, 200, scheduler.setEnabled(p.id, false)));
 ipcRoute('POST', '/api/schedules/:id/resume', (_req, res, p) => jsonRes(res, 200, scheduler.setEnabled(p.id, true)));
+
+ipcRoute('POST', '/api/trigger', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, errorCode: 'bot_not_found', error: 'larkAppId_not_set' });
+  const activeSessions = getActiveSessionsRegistry();
+  if (!activeSessions) return jsonRes(res, 503, { ok: false, errorCode: 'trigger_failed', error: 'active session registry unavailable' });
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    return jsonRes(res, 400, { ok: false, errorCode: 'bad_json', error: 'invalid JSON body' });
+  }
+  const valid = validateTriggerRequest(body);
+  if (!valid.ok) return jsonRes(res, valid.status, valid.body);
+  try {
+    const result = await triggerSessionTurn(valid.request, { larkAppId: cachedLarkAppId, activeSessions });
+    const status = result.ok
+      ? 200
+      : result.errorCode === 'bot_not_in_chat'
+        ? 403
+        : result.errorCode === 'session_not_found'
+          ? 404
+        : result.errorCode === 'target_required' || result.errorCode === 'bad_request'
+          ? 400
+          : 500;
+    return jsonRes(res, status, result);
+  } catch (e: any) {
+    return jsonRes(res, 500, { ok: false, errorCode: 'trigger_failed', error: e?.message ?? String(e) });
+  }
+});
 
 // ─── Groups (Phase B) ──────────────────────────────────────────────────────
 
