@@ -19,6 +19,7 @@ import {
 import {
   ASK_SELECT_ACTION,
   ASK_SUBMIT_ACTION,
+  ASK_TOGGLE_ACTION,
   buildAskCard,
   createLarkAskCardDispatcher,
   handleAskCardAction,
@@ -62,7 +63,7 @@ function makePending(overrides: Partial<PendingAsk> = {}): PendingAsk {
 }
 
 describe('buildAskCard', () => {
-  it('多问卡片：每问一个分区 + 选项组件 + 一个 submit', () => {
+  it('多问卡片：每问一个分区 + option buttons + 一个 submit', () => {
     const ask = makePending({
       questions: [
         { prompt: 'q1', multiSelect: false, options: [{ key: 'y', label: '是' }, { key: 'n', label: '否' }] },
@@ -79,9 +80,12 @@ describe('buildAskCard', () => {
     // submit 按钮 action 存在
     expect(blob).toContain(ASK_SUBMIT_ACTION);
 
-    // 每问的选项 value 编码 questionIndex::key
-    expect(blob).toContain('0::y');
-    expect(blob).toContain('1::a');
+    // 每问的选项通过 ask_toggle button 编码 question_index + key
+    expect(blob).toContain(ASK_TOGGLE_ACTION);
+    expect(blob).toContain('"question_index":"0"');
+    expect(blob).toContain('"key":"y"');
+    expect(blob).toContain('"question_index":"1"');
+    expect(blob).toContain('"key":"a"');
   });
 
   it('单问卡片：渲染 prompt、approver、ask_id、nonce', () => {
@@ -95,12 +99,14 @@ describe('buildAskCard', () => {
     expect(metaDiv.fields[1].text.content).toContain('ou\\_owner');
     expect(text).toContain('"ask_id":"ask-1"');
     expect(text).toContain('"nonce":"nonce-1"');
-    // 单选：select_static
-    expect(text).toContain('select_static');
+    // 单问单选：稳定 action button，点击即答；不使用会被飞书 silent-drop 的 form/select_static
+    expect(text).toContain(ASK_SELECT_ACTION);
+    expect(text).not.toContain('select_static');
+    expect(text).not.toContain('"tag":"form"');
     expect(text).toContain('继续发布');
   });
 
-  it('单问单选：使用 select_static，多问多选：使用 multi_select_static', () => {
+  it('多问/多选：使用 buttons + submit，不使用 form/select_static', () => {
     const ask = makePending({
       questions: [
         { prompt: 'single', multiSelect: false, options: [{ key: 'y', label: '是' }, { key: 'n', label: '否' }] },
@@ -108,8 +114,12 @@ describe('buildAskCard', () => {
       ],
     });
     const blob = buildAskCard(ask);
-    expect(blob).toContain('"select_static"');
-    expect(blob).toContain('"multi_select_static"');
+    expect(blob).toContain(ASK_TOGGLE_ACTION);
+    expect(blob).toContain(ASK_SUBMIT_ACTION);
+    expect(blob).toContain('☐ A');
+    expect(blob).not.toContain('"select_static"');
+    expect(blob).not.toContain('"multi_select_static"');
+    expect(blob).not.toContain('"tag":"form"');
   });
 
   it('settled 态（answered）：渲染答案摘要、无可点组件', () => {
@@ -190,7 +200,7 @@ describe('handleAskCardAction', () => {
     expect(pending).toBeDefined();
 
     // nonce 不匹配 → stale
-    const stale = handleAskCardAction({
+    const stale = await handleAskCardAction({
       operator: { open_id: 'ou_owner' },
       action: {
         value: {
@@ -204,7 +214,7 @@ describe('handleAskCardAction', () => {
     expect(stale?.toast.content).toContain('失效');
 
     // 正确 nonce + key → accepted
-    const accepted = handleAskCardAction({
+    const accepted = await handleAskCardAction({
       operator: { open_id: 'ou_owner' },
       action: {
         value: {
@@ -238,7 +248,7 @@ describe('handleAskCardAction', () => {
     });
     await Promise.resolve();
 
-    const result = handleAskCardAction({
+    const result = await handleAskCardAction({
       operator: { open_id: 'ou_intruder' },
       action: {
         value: {
@@ -251,6 +261,44 @@ describe('handleAskCardAction', () => {
     });
     expect(result?.toast.type).toBe('warning');
     expect(result?.toast.content).toContain('没有权限');
+  });
+
+  it('ask_toggle：累积勾选并返回原地 patch 卡片，展示已选状态', async () => {
+    let captured: PendingAsk | undefined;
+    setCardDispatcher({
+      async send(ask) {
+        captured = ask;
+        return { messageId: 'om_ask' };
+      },
+    });
+    registerAsk({
+      larkAppId: 'cli_ask',
+      chatId: 'oc_chat',
+      rootMessageId: 'om_root',
+      sessionId: 'sess-1',
+      approvers: new Set(['ou_owner']),
+      questions: [
+        { prompt: 'q', multiSelect: true, options: [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }] },
+      ],
+      timeoutMs: 10_000,
+    });
+    await Promise.resolve();
+
+    const patch = await handleAskCardAction({
+      operator: { open_id: 'ou_owner' },
+      action: {
+        value: {
+          action: ASK_TOGGLE_ACTION,
+          ask_id: captured!.askId,
+          nonce: captured!.nonce,
+          question_index: '0',
+          key: 'a',
+        },
+      },
+    });
+
+    expect(JSON.stringify(patch)).toContain('☑ A');
+    expect(JSON.stringify(patch)).toContain('☐ B');
   });
 });
 
@@ -477,8 +525,8 @@ describe('handleAskCardAction: ask_submit 路径', () => {
     expect(mockedSubmitAsk).not.toHaveBeenCalled();
   });
 
-  it('缺少 askId/nonce → 返回含"失效"字样的 warning toast', () => {
-    const result = handleAskCardAction({
+  it('缺少 askId/nonce → 返回含"失效"字样的 warning toast', async () => {
+    const result = await handleAskCardAction({
       operator: { open_id: 'ou_owner' },
       action: {
         value: { action: ASK_SUBMIT_ACTION },

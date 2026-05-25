@@ -19,7 +19,7 @@ import type {
   PendingAsk,
 } from './ask-types.js';
 
-interface InternalPending extends PendingAsk {
+interface InternalPending extends Omit<PendingAsk, 'selections'> {
   resolve: (result: AskResult) => void;
   timeoutHandle: NodeJS.Timeout;
   /** epoch ms when settle ran; undefined while still pending. */
@@ -325,7 +325,10 @@ function settle(askId: string, result: AskResult): void {
  *  dispatcher. Keeps the dispatcher contract narrow. */
 function snapshot(ask: InternalPending): PendingAsk {
   const { resolve: _r, timeoutHandle: _t, settledAt: _sat, selections: _sel, ...rest } = ask;
-  return rest;
+  return {
+    ...rest,
+    selections: ask.questions.map((_, i) => [...(ask.selections.get(i) ?? new Set<string>())]),
+  };
 }
 
 /** Drop settled entries that have aged past the retention window. Cheap O(n)
@@ -349,11 +352,17 @@ export function _pendingCount(): number {
   return n;
 }
 
+/** Read a pending ask by id. Returns a snapshot; mutating it has no effect on
+ *  broker state. Used by the card handler to PATCH toggle state. */
+export function getAskSnapshot(askId: string): PendingAsk | undefined {
+  const a = pending.get(askId);
+  return a ? snapshot(a) : undefined;
+}
+
 /** Read a pending ask by id — for tests only. Returns a snapshot; mutating it
  *  has no effect on broker state. */
 export function _getPending(askId: string): PendingAsk | undefined {
-  const a = pending.get(askId);
-  return a ? snapshot(a) : undefined;
+  return getAskSnapshot(askId);
 }
 
 /** 返回当前 pending map 中所有 askId 列表（含 settled 但仍在 retention 内的条目）。

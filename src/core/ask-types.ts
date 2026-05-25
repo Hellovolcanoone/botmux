@@ -114,6 +114,8 @@ export interface PendingAsk {
   approvers: ReadonlySet<string>;
   /** 问题列表，替代旧的 `options` + `prompt`。 */
   questions: ReadonlyArray<AskQuestion>;
+  /** 当前已勾选答案快照。仅 daemon/card 内部使用；CLI IPC 边界不暴露。 */
+  selections?: ReadonlyArray<ReadonlyArray<string>>;
   createdAt: number;
   deadlineAt: number;
   /** Set after the card dispatch succeeds. Until then, the ask is "registered

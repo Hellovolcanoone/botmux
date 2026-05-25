@@ -4,7 +4,7 @@ import type {
   AskResult,
   PendingAsk,
 } from '../../core/ask-types.js';
-import { submitAsk, tryResolveAsk } from '../../core/ask-broker.js';
+import { getAskSnapshot, submitAsk, toggleAsk, tryResolveAsk } from '../../core/ask-broker.js';
 import { logger } from '../../utils/logger.js';
 import { replyMessage, sendMessage, updateMessage } from './client.js';
 
@@ -14,8 +14,10 @@ export const ASK_SELECT_ACTION = 'ask_select';
 /** 新多问 Submit 动作（form 内提交按钮携带此 action）。 */
 export const ASK_SUBMIT_ACTION = 'ask_submit';
 
-/** form 名称常量，与 workflow-cards.ts 形式对齐。 */
-const ASK_FORM_NAME = 'ask_form';
+/** 累积勾选动作。飞书会 silent-drop form + select_static，所以 v0.1.8 用按钮态。 */
+export const ASK_TOGGLE_ACTION = 'ask_toggle';
+
+const MAX_BUTTONS_PER_ACTION_ROW = 4;
 
 export interface AskCardActionData {
   operator?: { open_id?: string };
@@ -68,10 +70,12 @@ export function createLarkAskCardDispatcher(
 }
 
 export function isAskCardAction(action?: string): boolean {
-  return action === ASK_SELECT_ACTION || action === ASK_SUBMIT_ACTION;
+  return action === ASK_SELECT_ACTION || action === ASK_SUBMIT_ACTION || action === ASK_TOGGLE_ACTION;
 }
 
-export function handleAskCardAction(data: AskCardActionData): { toast: { type: string; content: string } } | undefined {
+export async function handleAskCardAction(
+  data: AskCardActionData,
+): Promise<{ toast: { type: string; content: string } } | Record<string, unknown> | undefined> {
   const value = data.action?.value;
   const action = asString(value?.action);
   if (!isAskCardAction(action)) return undefined;
@@ -90,13 +94,27 @@ export function handleAskCardAction(data: AskCardActionData): { toast: { type: s
     return toastForOutcome(tryResolveAsk({ askId, nonce, selected, by }));
   }
 
-  // 新 Submit 路径：从 form_value 中防御式解析各问答案，调 submitAsk
+  if (action === ASK_TOGGLE_ACTION) {
+    const questionIndex = asNumber(value?.question_index);
+    const key = asString(value?.key);
+    if (!Number.isInteger(questionIndex) || !key) return staleToast();
+    const outcome = toggleAsk({ askId, nonce, questionIndex, key, by });
+    if (outcome !== 'toggled') return toastForOutcome(outcome);
+    const updated = getAskSnapshot(askId);
+    if (!updated) return staleToast();
+    return JSON.parse(buildAskCard(updated)) as Record<string, unknown>;
+  }
+
+  // 新 Submit 路径：优先从按钮累积态提交；兼容旧 form_value 回调。
   if (action === ASK_SUBMIT_ACTION) {
     const formValue = data.action?.form_value ?? {};
-    // 推断问题数量：找最大 qN 的 N+1
-    const questionCount = guessQuestionCount(formValue);
-    const selections = parseFormSelections(formValue, questionCount);
-    return toastForOutcome(submitAsk({ askId, nonce, by, selections }));
+    if (Object.keys(formValue).length > 0) {
+      // 推断问题数量：找最大 qN 的 N+1
+      const questionCount = guessQuestionCount(formValue);
+      const selections = parseFormSelections(formValue, questionCount);
+      return toastForOutcome(submitAsk({ askId, nonce, by, selections }));
+    }
+    return toastForOutcome(submitAsk({ askId, nonce, by }));
   }
 
   return staleToast();
@@ -105,9 +123,12 @@ export function handleAskCardAction(data: AskCardActionData): { toast: { type: s
 /**
  * 构建 ask 卡片 JSON 字符串。
  *
- * 未 settle 时：将所有问题包在一个 form 内，每问渲染标题 div + 下拉选择组件，
- * 最后附一个 `action_type:'form_submit'` 的提交按钮。
- * 单选问题用 `select_static`，多选问题用 `multi_select_static`。
+ * 未 settle 时：
+ *   - 单问单选：每个选项一个按钮，点击即 settle（旧 ask_select 语义）
+ *   - 多问或多选：每个选项一个按钮用于累积勾选，最后用 Submit settle
+ *
+ * 注意：飞书服务端会 silent-drop `form` 内的 select_static / multi_select_static，
+ * 所以这里只使用稳定的 `action` + `button` 结构。
  *
  * 已 settle 时：渲染状态摘要，展示每问的选中标签（answered），或超时/失效信息。
  */
@@ -134,17 +155,17 @@ export function buildAskCard(ask: PendingAsk, result?: AskResult): string {
       text: { tag: 'lark_md', content: status },
     });
   } else {
-    // 未 settle：多问 form，每问一个标题 div + 选择组件，最后一个 Submit 按钮
+    // 未 settle：只用 action/buttons，避免 form+select 被飞书服务端静默丢弃。
     elements.push({ tag: 'hr' });
 
-    // form 内的元素列表
-    const formElements: Array<Record<string, unknown>> = [];
+    const requiresSubmit = ask.questions.length > 1 || ask.questions.some((q) => q.multiSelect);
+    const selections = ask.selections ?? ask.questions.map(() => []);
 
     for (let i = 0; i < ask.questions.length; i++) {
       const q = ask.questions[i]!;
 
       // 问题标题
-      formElements.push({
+      elements.push({
         tag: 'div',
         text: {
           tag: 'lark_md',
@@ -152,39 +173,50 @@ export function buildAskCard(ask: PendingAsk, result?: AskResult): string {
         },
       });
 
-      // 选项组件：单选 select_static / 多选 multi_select_static
-      const selectTag = q.multiSelect ? 'multi_select_static' : 'select_static';
-      const placeholder = q.multiSelect ? '可多选' : '请选择';
-      formElements.push({
-        tag: selectTag,
-        name: `q${i}`,
-        placeholder: { tag: 'plain_text', content: placeholder },
-        options: q.options.map((opt) => ({
-          text: { tag: 'plain_text', content: opt.label },
-          // value 编码 questionIndex::key，供 handler 解析
-          value: `${i}::${opt.key}`,
-        })),
-      });
+      const selected = new Set(selections[i] ?? []);
+      const optionButtons = q.options.map((opt) => ({
+        tag: 'button',
+        text: {
+          tag: 'plain_text',
+          content: requiresSubmit ? optionLabel(q.multiSelect, selected.has(opt.key), opt.label) : opt.label,
+        },
+        type: selected.has(opt.key) ? 'primary' : 'default',
+        value: requiresSubmit
+          ? {
+              action: ASK_TOGGLE_ACTION,
+              ask_id: ask.askId,
+              nonce: ask.nonce,
+              question_index: String(i),
+              key: opt.key,
+            }
+          : {
+              action: ASK_SELECT_ACTION,
+              ask_id: ask.askId,
+              nonce: ask.nonce,
+              key: opt.key,
+            },
+      }));
+      appendActionRows(elements, optionButtons);
     }
 
-    // Submit 按钮，放在 form 内，`action_type:'form_submit'` 与 workflow-cards.ts 完全一致
-    formElements.push({
-      tag: 'button',
-      text: { tag: 'plain_text', content: '提交' },
-      type: 'primary',
-      action_type: 'form_submit',
-      value: {
-        action: ASK_SUBMIT_ACTION,
-        ask_id: ask.askId,
-        nonce: ask.nonce,
-      },
-    });
-
-    elements.push({
-      tag: 'form',
-      name: ASK_FORM_NAME,
-      elements: formElements,
-    });
+    if (requiresSubmit) {
+      elements.push({ tag: 'hr' });
+      elements.push({
+        tag: 'action',
+        actions: [
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '提交' },
+            type: 'primary',
+            value: {
+              action: ASK_SUBMIT_ACTION,
+              ask_id: ask.askId,
+              nonce: ask.nonce,
+            },
+          },
+        ],
+      });
+    }
   }
 
   return JSON.stringify({
@@ -310,6 +342,26 @@ function approverSummary(ask: PendingAsk): string {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+function asNumber(value: unknown): number {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim() !== '') return Number(value);
+  return Number.NaN;
+}
+
+function optionLabel(multiSelect: boolean, selected: boolean, label: string): string {
+  if (multiSelect) return `${selected ? '☑' : '☐'} ${label}`;
+  return `${selected ? '◉' : '○'} ${label}`;
+}
+
+function appendActionRows(elements: Array<Record<string, unknown>>, actions: Array<Record<string, unknown>>): void {
+  for (let i = 0; i < actions.length; i += MAX_BUTTONS_PER_ACTION_ROW) {
+    elements.push({
+      tag: 'action',
+      actions: actions.slice(i, i + MAX_BUTTONS_PER_ACTION_ROW),
+    });
+  }
 }
 
 function truncate(s: string, maxChars: number): string {
