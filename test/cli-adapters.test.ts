@@ -24,13 +24,14 @@ import { createGeminiAdapter } from '../src/adapters/cli/gemini.js';
 import { createOpenCodeAdapter } from '../src/adapters/cli/opencode.js';
 import { createAntigravityAdapter } from '../src/adapters/cli/antigravity.js';
 import { createMtrAdapter, mtrSessionIdForBotmuxSession } from '../src/adapters/cli/mtr.js';
+import { createHermesAdapter } from '../src/adapters/cli/hermes.js';
 import type { CliAdapter, CliId } from '../src/adapters/cli/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ALL_CLI_IDS: CliId[] = ['claude-code', 'aiden', 'coco', 'codex', 'gemini', 'opencode', 'antigravity', 'mtr'];
+const ALL_CLI_IDS: CliId[] = ['claude-code', 'aiden', 'coco', 'codex', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes'];
 
 // ---------------------------------------------------------------------------
 // 1. Factory: createCliAdapterSync
@@ -264,6 +265,26 @@ describe('mtr buildArgs', () => {
   });
 });
 
+describe('hermes buildArgs', () => {
+  const adapter = createHermesAdapter('/usr/bin/hermes');
+
+  it('fresh session passes yolo, hooks, and session-id passthrough flags', () => {
+    const args = adapter.buildArgs({ sessionId: 'bm-hermes-1', resume: false });
+    expect(args).toEqual(['--yolo', '--accept-hooks', '--pass-session-id']);
+  });
+
+  it('resume session passes --resume with botmux session id', () => {
+    const args = adapter.buildArgs({ sessionId: 'bm-hermes-1', resume: true });
+    expect(args).toEqual(['--resume', 'bm-hermes-1', '--yolo', '--accept-hooks', '--pass-session-id']);
+  });
+
+  it('does not bake initialPrompt into args', () => {
+    const args = adapter.buildArgs({ sessionId: 'bm-hermes-1', resume: false, initialPrompt: 'hello hermes' });
+    expect(args).not.toContain('hello hermes');
+    expect(adapter.passesInitialPromptViaArgs).toBeFalsy();
+  });
+});
+
 describe('antigravity buildArgs', () => {
   const adapter = createAntigravityAdapter('/usr/local/bin/agy');
 
@@ -382,6 +403,10 @@ describe('completionPattern', () => {
   it('mtr has no completionPattern', () => {
     expect(createMtrAdapter('/bin/mtr').completionPattern).toBeUndefined();
   });
+
+  it('hermes has no completionPattern', () => {
+    expect(createHermesAdapter('/bin/hermes').completionPattern).toBeUndefined();
+  });
 });
 
 describe('readyPattern', () => {
@@ -425,6 +450,10 @@ describe('readyPattern', () => {
   it('mtr has no readyPattern', () => {
     expect(createMtrAdapter('/bin/mtr').readyPattern).toBeUndefined();
   });
+
+  it('hermes has no readyPattern', () => {
+    expect(createHermesAdapter('/bin/hermes').readyPattern).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -444,6 +473,7 @@ describe('systemHints', () => {
     ['opencode', () => createOpenCodeAdapter('/bin/opencode')],
     ['antigravity', () => createAntigravityAdapter('/bin/agy')],
     ['mtr', () => createMtrAdapter('/bin/mtr')],
+    ['hermes', () => createHermesAdapter('/bin/hermes')],
   ];
 
   it.each(nonClaudeAdapters)('%s systemHints include botmux send routing guidance', (_name, factory) => {
@@ -467,6 +497,7 @@ describe('id property', () => {
     ['opencode', () => createOpenCodeAdapter('/bin/opencode')],
     ['antigravity', () => createAntigravityAdapter('/bin/agy')],
     ['mtr', () => createMtrAdapter('/bin/mtr')],
+    ['hermes', () => createHermesAdapter('/bin/hermes')],
   ];
 
   it.each(expected)('adapter id is "%s"', (expectedId, factory) => {
@@ -509,6 +540,10 @@ describe('altScreen property', () => {
 
   it('mtr uses alt screen (TUI)', () => {
     expect(createMtrAdapter('/bin/mtr').altScreen).toBe(true);
+  });
+
+  it('hermes does not use alt screen', () => {
+    expect(createHermesAdapter('/bin/hermes').altScreen).toBe(false);
   });
 });
 
@@ -568,6 +603,12 @@ describe('buildResumeCommand', () => {
       .toBe(`mtr --session ${mtrSessionIdForBotmuxSession('bm-mtr')}`);
     expect(a.buildResumeCommand?.({ sessionId: 'bm-mtr', cliSessionId: 'ses_001122334455abcdefABCDEF12' }))
       .toBe('mtr --session ses_001122334455abcdefABCDEF12');
+  });
+
+  it('hermes emits `hermes --resume <sessionId>`', () => {
+    const a = createHermesAdapter('/bin/hermes');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-hermes', cliSessionId: 'ignored' }))
+      .toBe('hermes --resume bm-hermes');
   });
 
   it('antigravity emits `agy --conversation <cliSessionId>` when known, null otherwise', () => {

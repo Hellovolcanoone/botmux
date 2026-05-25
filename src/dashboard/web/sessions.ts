@@ -13,6 +13,7 @@ const CLI_FILTER_OPTIONS = [
   'gemini',
   'opencode',
   'mtr',
+  'hermes',
   'aiden',
   'coco',
   'unknown',

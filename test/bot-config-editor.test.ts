@@ -202,12 +202,14 @@ describe('resolveCliId', () => {
     expect(resolveCliId('4')).toBe('codex');
     expect(resolveCliId('7')).toBe('opencode');
     expect(resolveCliId('9')).toBe('mtr');
+    expect(resolveCliId('10')).toBe('hermes');
   });
 
   it('passes through literal cliIds unchanged', () => {
     expect(resolveCliId('codex')).toBe('codex');
     expect(resolveCliId('opencode')).toBe('opencode');
     expect(resolveCliId('mtr')).toBe('mtr');
+    expect(resolveCliId('hermes')).toBe('hermes');
   });
 
   it('throws on typos so they do not leak into bots.json', () => {
