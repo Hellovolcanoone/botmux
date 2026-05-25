@@ -94,6 +94,9 @@ describe('built-in botmux-ask skill', () => {
     expect(skill!.content).toContain('stdout');
     expect(skill!.content).toContain('exit 124');
     expect(skill!.content).toContain('--json');
+    expect(skill!.content).toContain('覆盖所有结果类型');
+    expect(skill!.content).toContain('timedOut');
+    expect(skill!.content).toContain('selected:null');
     expect(skill!.content).toContain('botmux send');
   });
 });

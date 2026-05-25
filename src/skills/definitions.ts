@@ -490,7 +490,8 @@ esac
 botmux ask buttons --json --options "yes=继续,no=停止" "继续执行吗？"
 \`\`\`
 
-stdout 为一行 JSON：
+stdout 为一行 JSON。注意：\`--json\` 覆盖所有结果类型；超时 / 失效时也会输出 JSON，
+同时保留非 0 exit code。脚本判断超时必须看 exit code 或 \`timedOut\` 字段。
 
 \`\`\`json
 {"selected":"yes","by":"ou_xxx","timedOut":false,"comment":null}
@@ -499,10 +500,10 @@ stdout 为一行 JSON：
 ## 退出码和 stdout 契约
 
 - 成功：stdout 一行 \`<selected_key>\`，exit 0
-- \`--json\` 成功：stdout 一行 JSON，exit 0
-- 超时：stdout 为空，exit 124
+- \`--json\`：stdout 一行 JSON（包括超时 / 失效），exit code 仍按结果返回
+- 超时：默认模式 stdout 为空，exit 124；\`--json\` 时 \`{"selected":null,"timedOut":true,...}\`
 - 缺少 botmux 环境变量 / 参数错误：stdout 为空，exit 2
-- daemon 不可达或 ask 被 daemon restart 失效：stdout 为空，exit 3
+- daemon 不可达或 ask 被 daemon restart 失效：默认模式 stdout 为空，exit 3；\`--json\` 时 \`selected:null\`
 
 所有人类可读提示都在 stderr，调用方不要 parse stderr。
 
