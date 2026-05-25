@@ -331,6 +331,46 @@ botmux send --mention "ou_xxx:Aiden" "请 @Aiden 帮忙 review 这段代码"
 botmux send --mention ou_xxx "帮忙看下这段代码"
 \`\`\`
 
+### @ 决策硬门（必读）
+
+每条回复**必须显式做出 @ 决策**，否则 \`botmux send\` 报错（exit 2）不发送。三选一：
+
+| flag | 何时用 |
+|---|---|
+| \`--mention <ou_xxx:Name>\` | 点名某人/某 bot（可重复） |
+| \`--mention-back\` | @ 回**本轮触发消息的发送者**（open_id 自动从会话取，你不用记） |
+| \`--no-mention\` | 明确声明本条不 @ 任何人 |
+
+决策规则（**按内容价值判断，不是按"人还是 bot"**）：
+- **有实质结论、需要对方继续看 / 确认 / 决策** → \`--mention-back\`（@回触发者）或 \`--mention\` 点名，确保对方看到。
+- **纯记录 / 低优先级进度 / 简短确认（"收到""在看"）** → \`--no-mention\`，别打扰。
+- **如果只是没信息量的"收到"** → 不如不发，等下一条有内容时再回。
+- ⚠️ 别把 \`--no-mention\` 当默认随手带；也别无意义地 @ 打扰人。
+
+\`\`\`bash
+# 回复触发你的那个人，并 @ 回 ta
+botmux send --mention-back "好的，已处理完成。"
+# 纯状态更新，不想惊动任何人
+botmux send --no-mention "后台任务还在跑，预计 5 分钟。"
+\`\`\`
+
+（可设环境变量 \`BOTMUX_REQUIRE_MENTION_DECISION=false\` 关闭此硬门。）
+
+### 引用串联（普通群）
+
+普通群里，回复默认会**引用本轮触发的那条消息**（飞书"引用"样式），把对话串成可追溯的链——你无需做任何事。
+
+\`\`\`bash
+# 默认：自动引用本轮触发消息
+botmux send --no-mention "收到，开始处理。"
+# 引用某条特定历史消息
+botmux send --quote om_xxxxxx --no-mention "针对上面这条补充一点"
+# 发独立消息、不引用任何人
+botmux send --no-quote --no-mention "📢 全员通知"
+\`\`\`
+
+话题群（话题形态）不支持逐条引用，此能力仅在普通群生效。
+
 ### 顶层广播 / 跨群发布
 
 默认行为：消息**回复**到当前话题里。如果要把内容发到群里作为新的顶层消息（不绑定到任何已有话题），或要发到**另一个群**，用 \`--top-level\` 和 \`--chat-id\`。
@@ -356,6 +396,10 @@ botmux send --top-level --chat-id oc_xxxxxxxxxxxx "📦 自动推送内容..."
 | \`--images <path>\` | 内联图片，可重复多次 |
 | \`--files <path>\` | 附件文件，可重复多次，每个单独发送 |
 | \`--mention <open_id[:name]>\` | @mention，可重复。带 \`:name\` 时文本里的 \`@name\` 会被替换成 \<at\> 标签；只传 open_id 则在消息末尾追加 @。用 \`botmux bots list\` 查 open_id |
+| \`--mention-back\` | @ 回本轮触发消息的发送者（open_id 自动从会话取）。满足 @ 硬门 |
+| \`--no-mention\` | 明确声明本条不 @ 任何人。满足 @ 硬门 |
+| \`--quote <message_id>\` | 引用指定消息（普通群）。默认引用本轮触发消息 |
+| \`--no-quote\` | 不引用，发独立消息（普通群） |
 | \`--card\` / \`--text\` | 强制卡片或纯文本模式（默认按 md 语法自动判断） |
 | \`--top-level\` | 发顶层消息（不回复进当前话题）；自动跳过"发送给/cc" footer |
 | \`--chat-id <oc_xxx>\` | 指定目标群（默认当前会话所在群）；常和 \`--top-level\` 一起用做跨群发布 |
@@ -363,8 +407,9 @@ botmux send --top-level --chat-id oc_xxxxxxxxxxxx "📦 自动推送内容..."
 
 ## 输出
 
-成功返回 JSON: \`{"success":true,"messageId":"om_xxx","sessionId":"..."}\`
-失败打印错误到 stderr 并 exit 1。
+成功返回 JSON: \`{"success":true,"messageId":"om_xxx","sessionId":"...","quotedMessageId":"om_yyy 或 null","mentioned":[{"open_id":"ou_x","name":"Codex"}]}\`
+其中 \`quotedMessageId\` 是实际引用的消息（纯发为 null），\`mentioned\` 是实际 @ 的对象。stderr 另给一行人类可读摘要。
+失败 exit 1；**未做 @ 决策 exit 2**（按提示补 \`--mention\`/\`--mention-back\`/\`--no-mention\`）。
 `;
 
 const BOTS_SKILL = `---

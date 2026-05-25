@@ -1296,6 +1296,10 @@ interface SessionData {
   larkAppId?: string;
   ownerOpenId?: string;
   lastCallerOpenId?: string;
+  /** Chat-scope quote chain — see Session.quoteTargetId in types.ts. */
+  quoteTargetId?: string;
+  quoteTargetSenderOpenId?: string;
+  quoteTargetSenderIsBot?: boolean;
 }
 
 /**
@@ -2115,9 +2119,17 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --images <path>                 内联图片（可重复）
        --files <path>                  附件（可重复）
        --mention <open_id:name>        @提及（可重复）
+       --mention-back                  @回本轮触发消息的发送者（open_id 自动取自会话）
+       --no-mention                    明确声明本条不@任何人
+       --quote <message_id>            指定引用某条消息（普通群，默认引用本轮触发消息）
+       --no-quote                      不引用，发独立消息（普通群）
        --card | --text                 强制卡片 / 纯文本（默认按 md 语法自动判断）
        --top-level                     发顶层消息（不回复进当前话题）
        --chat-id <oc_xxx>              指定目标群（默认当前话题所在群）
+    @ 硬门：每条回复须三选一 --mention/--mention-back/--no-mention，否则报错不发。
+    按内容价值选：有实质结论要对方看/确认/决策→--mention-back(或--mention点名)；
+    纯记录/低优先级进度/简短确认→--no-mention；没信息量的"收到"不如不发。
+    （可设 BOTMUX_REQUIRE_MENTION_DECISION=false 关闭硬门）
   bots list                            列出当前群聊中的机器人（含 open_id）
   history [--limit N] [--scope session|thread|chat|ambient]
                                        拉取当前会话的消息历史 (JSON)。默认按 session scope：话题/话题群 → 话题内，普通群 → 整群；
@@ -2558,6 +2570,8 @@ function argValues(args: string[], ...flags: string[]): string[] {
 // daemon's bridge fallback path can produce identical cards. cmdSend
 // keeps using `buildCardBodyElements` and `hasMarkdown` from there.
 import { buildCardBodyElements, hasMarkdown } from './im/lark/md-card.js';
+import { config } from './config.js';
+import { resolveQuoteTarget, validateMentionDecision } from './services/send-policy.js';
 
 async function cmdSend(rest: string[]): Promise<void> {
   // Safety gate: a CLI agent running inside a workflow subagent (Slice F)
@@ -2589,6 +2603,13 @@ async function cmdSend(rest: string[]): Promise<void> {
   // for streaming-card / progress UI.
   const sendTopLevel = rest.includes('--top-level');
   const overrideChatId = argValue(rest, '--chat-id');
+  // Quote chain (chat scope): --quote <message_id> overrides the auto target,
+  // --no-quote forces a plain (un-quoted) send.
+  const explicitQuote = argValue(rest, '--quote');
+  const noQuote = rest.includes('--no-quote');
+  // @ hard-gate: every reply must explicitly choose one of these.
+  const mentionBack = rest.includes('--mention-back');
+  const noMention = rest.includes('--no-mention');
 
   const sid = sessionIdArg ?? findAncestorSessionId();
   if (!sid) {
@@ -2607,7 +2628,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     if (!existsSync(contentFile)) { console.error(`文件不存在: ${contentFile}`); process.exit(1); }
     content = readFileSync(contentFile, 'utf-8');
   } else {
-    const pos = positionals(rest, ['--card', '--text', '--top-level']);
+    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention']);
     if (pos.length > 0) {
       content = pos.join(' ');
     } else {
@@ -2634,6 +2655,27 @@ async function cmdSend(rest: string[]): Promise<void> {
     }
   }
 
+  // @ hard-gate (config.send.requireMentionDecision, default on): force the
+  // model to make an explicit @ decision before sending. --top-level publish
+  // is exempt. The error text adapts to who is being replied to (人 / bot).
+  const mentionGate = validateMentionDecision({
+    enabled: config.send.requireMentionDecision,
+    sendTopLevel,
+    hasMentionArgs: mentionArgs.length > 0,
+    mentionBack,
+    noMention,
+    hasQuoteTargetSender: !!s.quoteTargetSenderOpenId,
+  });
+  if (!mentionGate.ok) { console.error(mentionGate.error); process.exit(2); }
+
+  // --mention-back: @ the sender of the message this turn is replying to
+  // (open_id from the session — model needn't know it). Bare-name form so it
+  // renders as a trailing <at>.
+  if (mentionBack && s.quoteTargetSenderOpenId
+      && !mentions.some(m => m.open_id === s.quoteTargetSenderOpenId)) {
+    mentions.push({ open_id: s.quoteTargetSenderOpenId, name: '' });
+  }
+
   // Validate file paths
   for (const p of [...images, ...files]) {
     if (!existsSync(p)) { console.error(`文件不存在: ${p}`); process.exit(1); }
@@ -2643,7 +2685,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   const { registerBot, loadBotConfigs, findOncallChatForAnyBot } = await import('./bot-registry.js');
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
 
-  const { sendMessage, replyMessage, uploadImage, uploadFile } = await import('./im/lark/client.js');
+  const { sendMessage, replyMessage, uploadImage, uploadFile, MessageWithdrawnError } = await import('./im/lark/client.js');
   const appId = s.larkAppId!;
   // Effective target chat for top-level mode (defaults to session's chat)
   const targetChatId = overrideChatId ?? s.chatId;
@@ -2658,11 +2700,37 @@ async function cmdSend(rest: string[]): Promise<void> {
   // addressing to go to the last caller in the shared oncall workspace.
   const oncallEntry = !sendTopLevel && !overrideChatId && s.chatId
     ? findOncallChatForAnyBot(s.chatId) : undefined;
-  // Dispatch helper: top-level / chat-scope send vs reply-in-thread, single decision point
+  // Dispatch helper: top-level / chat-scope send vs reply-in-thread, single
+  // decision point. Used for file attachments (always plain in chat scope).
   const dispatch = (content: string, msgType: string): Promise<string> =>
     (sendTopLevel || isChatScope)
       ? sendMessage(appId, targetChatId, content, msgType)
       : replyMessage(appId, s.rootMessageId, content, msgType, true);
+
+  // Quote chain (普通群): the primary message replies to the turn's target so
+  // Lark renders a 引用 chain. --quote overrides, --no-quote opts out. Thread
+  // scope and --top-level never quote. Withdrawn target → fall back to plain.
+  const quoteTargetId = resolveQuoteTarget({
+    isChatScope, sendTopLevel, noQuote, explicitQuote,
+    sessionQuoteTargetId: s.quoteTargetId,
+  });
+  let primaryQuotedId: string | null = null;
+  const dispatchPrimary = async (content: string, msgType: string): Promise<string> => {
+    if (quoteTargetId) {
+      try {
+        const id = await replyMessage(appId, quoteTargetId, content, msgType, false);
+        primaryQuotedId = quoteTargetId;
+        return id;
+      } catch (err: any) {
+        if (err instanceof MessageWithdrawnError) {
+          console.error(`引用目标 ${quoteTargetId} 已撤回，改为普通发送`);
+          return sendMessage(appId, targetChatId, content, msgType);
+        }
+        throw err;
+      }
+    }
+    return dispatch(content, msgType);
+  };
 
   try {
     // Upload images in parallel
@@ -2708,6 +2776,10 @@ async function cmdSend(rest: string[]): Promise<void> {
       crossRef = existsSync(crossRefPath)
         ? JSON.parse(readFileSync(crossRefPath, 'utf-8'))
         : {};
+      // --no-mention 显式不 @ 任何人：跳过正文 @BotName 的自动注入，否则正文里
+      // 出现的 @名字 仍会被注入成 <at>，破坏 --no-mention 语义、还可能误触发对方
+      // bot（正是要避免的循环 @）。botEntries/crossRef 仍需加载供 footer 寻址用。
+      if (!noMention) {
       const alreadyMentioned = new Set(mentions.map(m => m.open_id));
       // Sort by name length desc so longer names ("Claude分身") win over their
       // prefix ("Claude") when both could match — break-on-first-hit otherwise
@@ -2750,17 +2822,30 @@ async function cmdSend(rest: string[]): Promise<void> {
           break;
         }
       }
+      }
     } catch { /* best-effort */ }
 
     const explicitKnownBotMention = hasKnownBotMention(text, mentions, botEntries, crossRef, appId);
     const knownBotOpenIds = knownBotOpenIdsFromCrossRef(crossRef, botEntries, appId);
-    const footerAddressing = sendTopLevel
+    // --no-mention 显式不 @ 任何人 → 连 footer 的"发送给/cc"寻址 <at> 也清空，
+    // 否则 footer 仍会 @ 人，与 --no-mention 语义和"未@任何人"输出自相矛盾
+    // （Codex review P2）。--top-level 同样无特定收件人。
+    const footerAddressingRaw = (sendTopLevel || noMention)
       ? { sendTo: undefined as string | undefined, cc: [] as string[] }
       : buildFooterAddressing(s, {
           isOncall: !!oncallEntry,
           hasExplicitBotMention: explicitKnownBotMention,
           knownBotOpenIds,
         });
+    // De-dupe vs body @: if someone is already @'d in the body (典型是
+    // --mention-back @ 了触发者，而 footer 的"发送给"又指向同一个 owner/caller)，
+    // 从 footer 去掉，避免一条消息里出现两个相同的 @。
+    const bodyMentionIds = new Set(mentions.map(m => m.open_id));
+    const footerAddressing = {
+      sendTo: footerAddressingRaw.sendTo && !bodyMentionIds.has(footerAddressingRaw.sendTo)
+        ? footerAddressingRaw.sendTo : undefined,
+      cc: footerAddressingRaw.cc.filter(id => !bodyMentionIds.has(id)),
+    };
 
     // Decide: interactive card (renders markdown) vs. post (plain text).
     // Explicit --card / --text wins; otherwise auto-detect markdown syntax.
@@ -2845,7 +2930,7 @@ async function cmdSend(rest: string[]): Promise<void> {
         config: { update_multi: true },
         body: { direction: 'vertical', elements },
       });
-      messageId = await dispatch(cardJson, 'interactive');
+      messageId = await dispatchPrimary(cardJson, 'interactive');
     } else {
       // Plain-text path: build post content, paragraph per line.
       const postContent: any[][] = text ? text.split('\n').map((line: string) => {
@@ -2890,7 +2975,7 @@ async function cmdSend(rest: string[]): Promise<void> {
       }
 
       const postJson = JSON.stringify({ zh_cn: { title: '', content: postContent } });
-      messageId = await dispatch(postJson, 'post');
+      messageId = await dispatchPrimary(postJson, 'post');
     }
 
     // Bridge fallback marker — append-only jsonl per session. The worker
@@ -2923,7 +3008,17 @@ async function cmdSend(rest: string[]): Promise<void> {
     // --mention 的 open_id 解析（在上方 mentions 数组里完成）仍然必要，它让
     // Lark 在消息里渲染真正的 @at 元素，从而触发对方 bot 的 WS 事件投递。
 
-    console.log(JSON.stringify({ success: true, messageId, sessionId: sid }));
+    const atSummary = mentions.length > 0
+      ? `@${mentions.map(m => m.name || m.open_id).join(',')}`
+      : '未@任何人';
+    console.error(`✓ 已发送 ${messageId} ｜ ${primaryQuotedId ? `引用 ${primaryQuotedId}` : '未引用'} ｜ ${atSummary}`);
+    console.log(JSON.stringify({
+      success: true,
+      messageId,
+      sessionId: sid,
+      quotedMessageId: primaryQuotedId,
+      mentioned: mentions.map(m => ({ open_id: m.open_id, name: m.name })),
+    }));
   } catch (err: any) {
     console.error(`发送失败: ${err.message}`);
     process.exit(1);

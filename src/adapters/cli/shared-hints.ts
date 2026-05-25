@@ -19,6 +19,7 @@ export function buildBotmuxShellHints(locale?: Locale): string[] {
     t('ai.shell.heredoc_example', undefined, locale),
     t('ai.shell.helpers', undefined, locale),
     t('ai.shell.when_to_send', undefined, locale),
+    t('ai.shell.mention_gate', undefined, locale),
   ];
 }
 

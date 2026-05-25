@@ -1694,6 +1694,14 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const now = Date.now();
   session.larkAppId = larkAppId;
   session.ownerOpenId = senderOpenId;
+  session.lastCallerOpenId = senderOpenId;
+  // First turn of a brand-new topic: seed quoteTarget* so the very first
+  // `botmux send` can --mention-back / 引用 the triggering message (chat scope).
+  // Without this the first reply hits hasQuoteTargetSender=false (exit 2) and
+  // chat-scope首条不引用. Use the event's sender open_id (correct app scope).
+  session.quoteTargetId = parsed.messageId;
+  session.quoteTargetSenderOpenId = senderOpenId;
+  session.quoteTargetSenderIsBot = parsed.senderType === 'app' || parsed.senderType === 'bot';
   session.lastMessageAt = new Date(now).toISOString();
   session.scope = scope;
   sessionStore.updateSession(session);
@@ -1999,10 +2007,16 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   if (ds) {
     markSessionActivity(ds);
     const callerOpenId = parsed.senderId || data?.sender?.sender_id?.open_id;
+    // quoteTargetId changes every inbound message (always a new message_id), so
+    // — unlike lastCallerOpenId — persist unconditionally. Powers `botmux send`'s
+    // default chat-scope quote chain + --mention-back.
+    ds.session.quoteTargetId = parsed.messageId;
+    ds.session.quoteTargetSenderOpenId = callerOpenId;
+    ds.session.quoteTargetSenderIsBot = isForeignBot;
     if (callerOpenId && ds.session.lastCallerOpenId !== callerOpenId) {
       ds.session.lastCallerOpenId = callerOpenId;
-      sessionStore.updateSession(ds.session);
     }
+    sessionStore.updateSession(ds.session);
   }
 
   // If waiting for repo selection, buffer the message and remind user
@@ -2018,12 +2032,17 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       });
       enriched += `\n\n${tr('daemon.enriched_mentions_label', undefined, localeForBot(larkAppId))}\n${mentionLines.join('\n')}`;
     }
-    // Stamp each buffered follow-up with its own <sender> tag — pendingFollowUps
-    // can contain messages from multiple users while a single ds.pendingSender
-    // is fixed at the first message, so without per-message attribution the
-    // CLI can't tell which user said what after repo selection unlocks the spawn.
-    const followUpSenderTag = renderSenderTag(await getThreadSender());
-    if (followUpSenderTag) enriched = `${followUpSenderTag}\n${enriched}`;
+    // Stamp a buffered follow-up with its own <sender> tag ONLY when it comes
+    // from a different user than the first message (ds.pendingSender) — the
+    // deferred spawn already carries that sender's <sender> block, and the
+    // follow-ups now fold into the same <user_message>, so a same-user tag is
+    // pure duplication. A differing sender still gets attributed so the CLI can
+    // tell multi-user buffered messages apart after repo selection unlocks.
+    const followUpSender = await getThreadSender();
+    if (followUpSender?.openId && followUpSender.openId !== ds.pendingSender?.openId) {
+      const followUpSenderTag = renderSenderTag(followUpSender);
+      if (followUpSenderTag) enriched = `${followUpSenderTag}\n${enriched}`;
+    }
     if (!ds.pendingFollowUps) ds.pendingFollowUps = [];
     ds.pendingFollowUps.push(enriched);
     await sessionReply(anchor, tr('daemon.choose_repo_first', undefined, localeForBot(larkAppId)), 'text', larkAppId);
@@ -2062,6 +2081,9 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     session.larkAppId = larkAppId;
     session.ownerOpenId = ownerOpenId;
     session.lastCallerOpenId = senderOId;
+    session.quoteTargetId = parsed.messageId;
+    session.quoteTargetSenderOpenId = senderOId;
+    session.quoteTargetSenderIsBot = isForeignBot;
     session.lastMessageAt = new Date(now).toISOString();
     session.scope = scope;
     sessionStore.updateSession(session);

@@ -34,6 +34,16 @@ export interface Session {
    *  Used by `botmux send` to address the card to the actual caller in oncall
    *  groups (where the caller is often not the session owner). */
   lastCallerOpenId?: string;
+  /** Chat-scope quote chain (普通群): the latest inbound message this turn is
+   *  responding to. `botmux send` quotes it by default so replies render
+   *  Lark's 引用 chain. Updated on every inbound message routed into the
+   *  session. */
+  quoteTargetId?: string;
+  /** open_id of the quote-target message's sender — used by --mention-back. */
+  quoteTargetSenderOpenId?: string;
+  /** Whether the quote-target sender is a bot (vs a human) — drives the
+   *  @ hard-gate's context-aware error text. */
+  quoteTargetSenderIsBot?: boolean;
   /** Persisted streaming-card state — allows the existing card to be PATCHed
    *  (rather than a fresh POST) after daemon restart. */
   streamCardId?: string;

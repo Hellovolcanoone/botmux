@@ -264,17 +264,20 @@ export function buildNewTopicPrompt(
     }
   }
 
-  const userBlock = `<user_message>\n${userMessage}\n</user_message>`;
+  // Messages the user sent while the repo-selection card was still pending are
+  // buffered as followUps. Fold them into the single <user_message> body
+  // (blank-line separated) rather than emitting a separate <follow_up_message>
+  // block per message: the deferred spawn is conceptually one opening turn, so
+  // one block reads cleanly and the surrounding metadata envelope
+  // (sender/mention) isn't repeated for every buffered line.
+  const mergedMessage = followUps && followUps.length > 0
+    ? [userMessage, ...followUps].join('\n\n')
+    : userMessage;
+  const userBlock = `<user_message>\n${mergedMessage}\n</user_message>`;
   const parts: string[] = [userBlock];
 
   const senderBlock = renderSenderTag(sender);
   if (senderBlock) parts.push(senderBlock);
-
-  if (followUps && followUps.length > 0) {
-    for (const fu of followUps) {
-      parts.push(`<follow_up_message>\n${fu}\n</follow_up_message>`);
-    }
-  }
 
   const attachHint = formatAttachmentsHint(attachments, locale);
   if (attachHint) parts.push(attachHint);

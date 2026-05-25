@@ -420,6 +420,7 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
               `    ${t('ai.identity.mention_usage', undefined, locale)}`,
               `    ${t('ai.identity.mention_when_to', undefined, locale)}`,
               `    ${t('ai.identity.mention_when_not', undefined, locale)}`,
+              `    ${t('ai.identity.mention_gate', undefined, locale)}`,
               '  </routing_rules>',
               '</identity>',
             ]

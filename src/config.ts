@@ -31,6 +31,13 @@ export const config = {
   session: {
     dataDir: process.env.SESSION_DATA_DIR ?? new URL('../data', import.meta.url).pathname,
   },
+  send: {
+    /** @ hard-gate: every model-initiated `botmux send` reply must explicitly
+     *  choose --mention / --mention-back / --no-mention. Set
+     *  BOTMUX_REQUIRE_MENTION_DECISION=false to disable (kill-switch if the
+     *  gate misfires in production). */
+    requireMentionDecision: (process.env.BOTMUX_REQUIRE_MENTION_DECISION ?? 'true').toLowerCase() !== 'false',
+  },
   daemon: {
     cliId: (process.env.CLI_ID ?? 'claude-code') as import('./adapters/cli/types.js').CliId,
     cliPathOverride: process.env.CLI_PATH,
