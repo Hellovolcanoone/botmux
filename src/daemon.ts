@@ -113,7 +113,11 @@ import { resolveWait } from './workflows/wait.js';
 import { replay } from './workflows/events/replay.js';
 import { isValidRunId, readRunSnapshot } from './workflows/ops-projection.js';
 import { AttemptResumeManager } from './workflows/attempt-resume.js';
-import { setCardDispatcher as setAskCardDispatcher } from './core/ask-broker.js';
+import {
+  setCardDispatcher as setAskCardDispatcher,
+  registerAsk as registerAskBroker,
+} from './core/ask-broker.js';
+import { parseAskBody, resolveAskApprovers } from './core/ask-api.js';
 import { createLarkAskCardDispatcher } from './im/lark/ask-card.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -1427,6 +1431,56 @@ ipcRoute('POST', '/api/workflows/definitions/:id/run', async (req, res, params) 
           500;
     return jsonRes(res, status, result);
   }
+  return jsonRes(res, 200, result);
+});
+
+// ─── botmux ask v0.1.7 IPC route ─────────────────────────────────────────────
+//
+// CLI side: `botmux ask buttons --options "..."` POSTs here and keeps the
+// connection open until the broker settles the ask. Long keep-alive is OK —
+// the request's lifetime is bounded by `body.timeoutMs` which the broker
+// enforces. Default fetch on the CLI side has no read timeout.
+
+ipcRoute('POST', '/api/asks', async (req, res) => {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody<unknown>(req);
+  } catch {
+    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+  }
+  const parsed = parseAskBody(raw);
+  if ('error' in parsed) return jsonRes(res, 400, { ok: false, error: parsed.error });
+
+  const approvers = resolveAskApprovers({
+    larkAppId: parsed.larkAppId,
+    sessionId: parsed.sessionId,
+    explicit: parsed.approvers,
+    getBotAllowedUsers: (id) => {
+      try { return getBot(id).resolvedAllowedUsers; } catch { return []; }
+    },
+    getSessionOwner: (sid) => {
+      for (const ds of activeSessions.values()) {
+        if (ds.session.sessionId === sid) return ds.ownerOpenId;
+      }
+      return undefined;
+    },
+  });
+  if (approvers.size === 0) {
+    // Nobody can answer — fail loud rather than registering a
+    // guaranteed-timeout. CLI side maps this to exit 2.
+    return jsonRes(res, 400, { ok: false, error: 'no_approvers' });
+  }
+
+  const result = await registerAskBroker({
+    larkAppId: parsed.larkAppId,
+    chatId: parsed.chatId,
+    rootMessageId: parsed.rootMessageId,
+    sessionId: parsed.sessionId,
+    approvers,
+    options: parsed.options,
+    prompt: parsed.prompt,
+    timeoutMs: parsed.timeoutMs,
+  });
   return jsonRes(res, 200, result);
 });
 

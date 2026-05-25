@@ -3210,6 +3210,145 @@ botmux create-group — 用一组机器人新建飞书群
 
 // ─── Bots subcommand ─────────────────────────────────────────────────────────
 
+// ─── botmux ask v0.1.7 ───────────────────────────────────────────────────────
+//
+// CLI agent inside a botmux-spawned session calls `botmux ask buttons
+// --options "..." "<prompt>"`. Daemon sends a Lark card; user clicks; CLI
+// process unblocks with the selected key (or exit 124 on timeout, exit 3 if
+// the daemon dies). See /tmp/botmux-ask.md (or design memory).
+
+async function cmdAsk(sub: string, rest: string[]): Promise<void> {
+  // Only `buttons` shipped in v0.1.7. The bare alias (`botmux ask --options`)
+  // routes here with sub='' — accept it and behave identically. `ask text` /
+  // `ask confirm` are reserved for later versions.
+  if (sub && sub !== 'buttons') {
+    console.error(
+      `botmux ask: 未知 subcommand "${sub}"（v0.1.7 仅支持 \`buttons\` 或省略）`,
+    );
+    process.exit(2);
+  }
+
+  const { findMissingAskEnv, parseAskOptions, parseAskTimeoutSeconds, AskArgsError } =
+    await import('./core/ask-args.js');
+  type AskResult = import('./core/ask-types.js').AskResult;
+  type AskJsonOutput = import('./core/ask-types.js').AskJsonOutput;
+
+  const missing = findMissingAskEnv(process.env);
+  if (missing) {
+    console.error(
+      `botmux ask: 缺少必需环境变量 ${missing}。` +
+        ` 请在 botmux daemon spawn 的 CLI 会话内运行。`,
+    );
+    process.exit(2);
+  }
+
+  const optionsRaw = argValue(rest, '--options');
+  const timeoutRaw = argValue(rest, '--timeout');
+  const useJson = rest.includes('--json');
+  const approverArgs = argValues(rest, '--approver');
+  const positionalArgs = positionals(rest, ['--json']);
+
+  let options;
+  let timeoutMs;
+  try {
+    options = parseAskOptions(optionsRaw);
+    timeoutMs = parseAskTimeoutSeconds(timeoutRaw);
+  } catch (err) {
+    if (err instanceof AskArgsError) {
+      console.error(`botmux ask: ${err.message}`);
+      process.exit(2);
+    }
+    throw err;
+  }
+
+  const prompt = positionalArgs.join(' ').trim();
+  if (!prompt) {
+    console.error(
+      'botmux ask: 缺少 prompt。用法: botmux ask buttons --options "yes,no" "继续发版吗？"',
+    );
+    process.exit(2);
+  }
+
+  const larkAppId = process.env.BOTMUX_LARK_APP_ID!;
+  const daemon = findDaemon(larkAppId);
+  if (!daemon) {
+    console.error(
+      `botmux ask: 找不到 daemon (larkAppId=${larkAppId})。daemon 已停？exit 3.`,
+    );
+    process.exit(3);
+  }
+
+  const body = {
+    sessionId: process.env.BOTMUX_SESSION_ID!,
+    chatId: process.env.BOTMUX_CHAT_ID!,
+    larkAppId,
+    rootMessageId: process.env.BOTMUX_ROOT_MESSAGE_ID || null,
+    options,
+    prompt,
+    timeoutMs,
+    approvers: approverArgs,
+  };
+
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/asks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      // No client-side timeout — broker enforces `timeoutMs` and will respond
+      // with `kind:'timedOut'` so this fetch always settles.
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`botmux ask: 无法连接 daemon (port=${daemon.ipcPort}): ${msg}`);
+    process.exit(3);
+  }
+
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = (await res.text()).slice(0, 200); } catch { /* */ }
+    if (res.status === 400 && /no_approvers/.test(errBody)) {
+      console.error(
+        'botmux ask: 当前会话没有可批准者（session.owner 不在 bot.allowedUsers 里，且 --approver 未指定）',
+      );
+      process.exit(2);
+    }
+    console.error(`botmux ask: daemon HTTP ${res.status}: ${errBody}`);
+    process.exit(3);
+  }
+
+  let result: AskResult;
+  try {
+    result = (await res.json()) as AskResult;
+  } catch (err) {
+    console.error(`botmux ask: daemon 返回非 JSON: ${err}`);
+    process.exit(3);
+  }
+
+  if (useJson) {
+    const out: AskJsonOutput = {
+      selected: result.kind === 'answered' ? result.selected : null,
+      by: result.kind === 'answered' ? result.by : null,
+      comment: null,
+      timedOut: result.kind === 'timedOut',
+    };
+    process.stdout.write(JSON.stringify(out) + '\n');
+  } else if (result.kind === 'answered') {
+    process.stdout.write(result.selected + '\n');
+  }
+
+  switch (result.kind) {
+    case 'answered':
+      process.exit(0);
+    case 'timedOut':
+      console.error(`botmux ask: 超时（${timeoutMs / 1000}s），无回复`);
+      process.exit(124);
+    case 'invalidated':
+      console.error(`botmux ask: 已失效 (${result.reason})`);
+      process.exit(3);
+  }
+}
+
 async function cmdBots(sub: string, rest: string[]): Promise<void> {
   process.env.SESSION_DATA_DIR ??= resolveDataDir();
 
@@ -3414,6 +3553,7 @@ switch (command) {
   case 'rm':      cmdDelete(); break;
   case 'resume':  await cmdResume(); break;
   case 'schedule': await cmdSchedule(process.argv[3] ?? '', process.argv.slice(4)); break;
+  case 'ask':      await cmdAsk(process.argv[3] ?? '', process.argv.slice(4)); break;
   case 'workflow': {
     const { cmdWorkflow } = await import('./cli/workflow.js');
     await cmdWorkflow(process.argv[3] ?? '', process.argv.slice(4));
