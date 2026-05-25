@@ -14,10 +14,10 @@ import { join, dirname } from 'node:path';
 import { config } from '../config.js';
 import { jsonRes } from './workflow-api.js';
 import { pairingStart, pairingStatusView, pairingConsume, PAIR_COOKIE, SESSION_COOKIE } from './pairing-api.js';
-import { getWebSession, revokeWebSession, type WebSession } from '../services/web-session-store.js';
+import { getWebSession, revokeWebSession, updateSessionTeam, type WebSession } from '../services/web-session-store.js';
 import { buildTeamRoster } from '../services/team-roster.js';
-import { getTeam, removeMember, isMember } from '../services/team-store.js';
-import { createInvite } from '../services/invite-store.js';
+import { getTeam, removeMember, isMember, listTeamsForMember, createTeam, addMember } from '../services/team-store.js';
+import { createInvite, consumeInvite } from '../services/invite-store.js';
 import { setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
 import { setBotOwner, clearBotOwner } from '../services/bot-owner-store.js';
 import { listConnectors } from '../services/connector-store.js';
@@ -143,7 +143,47 @@ export async function handleTeamRoute(
   const knownBot = (app: string) => buildTeamRoster(dataDir, session.teamId).bots.some(b => b.larkAppId === app);
 
   if (path === '/api/team/me' && method === 'GET') {
-    jsonRes(res, 200, { ok: true, user: session.identity, teamId: session.teamId });
+    const teams = listTeamsForMember(dataDir, { unionId: session.identity.unionId, openId: session.identity.openId })
+      .map(t => ({ id: t.id, name: t.name, memberCount: t.members.length }));
+    jsonRes(res, 200, { ok: true, user: session.identity, teamId: session.teamId, teamName: getTeam(dataDir, session.teamId)?.name, teams });
+    return true;
+  }
+  // Switch the session's active team (must already be a member of the target).
+  if (path === '/api/team/switch' && method === 'POST') {
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const teamId = String(body?.teamId ?? '');
+    if (!isMember(dataDir, teamId, { unionId: session.identity.unionId, openId: session.identity.openId })) {
+      jsonRes(res, 403, { ok: false, error: 'not_a_member' });
+      return true;
+    }
+    updateSessionTeam(dataDir, cookies[SESSION_COOKIE] ?? '', teamId);
+    jsonRes(res, 200, { ok: true, teamId });
+    return true;
+  }
+  // Create a new team; the creator joins it and the session switches to it.
+  if (path === '/api/team/create' && method === 'POST') {
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const name = String(body?.name ?? '').trim();
+    if (!name) { jsonRes(res, 400, { ok: false, error: 'name_required' }); return true; }
+    const team = createTeam(dataDir, name);
+    addMember(dataDir, team.id, { unionId: session.identity.unionId, openId: session.identity.openId, name: session.identity.name });
+    updateSessionTeam(dataDir, cookies[SESSION_COOKIE] ?? '', team.id);
+    jsonRes(res, 200, { ok: true, teamId: team.id, name: team.name });
+    return true;
+  }
+  // Join another team via a single-use invite code; the session switches to it.
+  if (path === '/api/team/join' && method === 'POST') {
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const code = String(body?.code ?? '').trim();
+    if (!code) { jsonRes(res, 400, { ok: false, error: 'code_required' }); return true; }
+    const inv = consumeInvite(dataDir, code);
+    if (!inv.ok) { jsonRes(res, 403, { ok: false, error: `invite_${inv.reason}` }); return true; }
+    addMember(dataDir, inv.teamId, { unionId: session.identity.unionId, openId: session.identity.openId, name: session.identity.name });
+    updateSessionTeam(dataDir, cookies[SESSION_COOKIE] ?? '', inv.teamId);
+    jsonRes(res, 200, { ok: true, teamId: inv.teamId, name: getTeam(dataDir, inv.teamId)?.name });
     return true;
   }
   if (path === '/api/team/roster' && method === 'GET') {

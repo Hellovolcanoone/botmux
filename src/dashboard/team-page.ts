@@ -26,8 +26,9 @@ export const TEAM_PAGE_HTML = `<!doctype html>
   body { font: 15px/1.5 -apple-system, system-ui, "PingFang SC", sans-serif; margin: 0; background: var(--bg); color: var(--text); }
   header { padding: 14px 20px; background: var(--header-bg); color: #fff; display: flex; justify-content: space-between; align-items: center; }
   header b { font-size: 16px; }
-  .topbar-r { display: flex; gap: 14px; align-items: center; }
-  #theme-toggle { background: transparent; border: 1px solid rgba(255,255,255,.3); color: #fff; padding: 4px 10px; }
+  .topbar-r { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  header select, header button { background: transparent; border: 1px solid rgba(255,255,255,.3); color: #fff; padding: 4px 10px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; }
+  header select option { color: #1f2329; }
   main { max-width: 920px; margin: 0 auto; padding: 20px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
   h2 { font-size: 15px; margin: 0 0 12px; color: var(--heading); }
@@ -56,7 +57,7 @@ export const TEAM_PAGE_HTML = `<!doctype html>
 </style>
 </head>
 <body>
-<header><b>botmux 团队平台</b><div class="topbar-r"><button id="theme-toggle">🌙 暗色</button><span id="who"></span></div></header>
+<header><b>botmux 团队平台</b><div class="topbar-r"><select id="team-switcher" title="切换团队" class="hide"></select><button id="btn-newteam" class="hide">＋ 团队</button><button id="btn-jointeam" class="hide">加入团队</button><button id="theme-toggle">🌙 暗色</button><span id="who"></span></div></header>
 <main>
   <!-- Login -->
   <section id="login" class="card hide">
@@ -249,6 +250,28 @@ async function showApp(){
   $('who').textContent = me.body?.user?.name ? me.body.user.name + ' · 退出' : '退出';
   $('who').style.cursor = 'pointer';
   $('who').onclick = async () => { await jpost('/api/team/logout'); location.reload(); };
+
+  // Multi-team switcher: list my teams, switch active, create, join-by-invite.
+  const teams = me.body?.teams || [], curTeam = me.body?.teamId;
+  const sw = $('team-switcher');
+  sw.classList.remove('hide'); $('btn-newteam').classList.remove('hide'); $('btn-jointeam').classList.remove('hide');
+  sw.innerHTML = teams.length
+    ? teams.map(t => '<option value="'+esc(t.id)+'"'+(t.id===curTeam?' selected':'')+'>'+esc(t.name)+' ('+t.memberCount+')</option>').join('')
+    : '<option>（无团队）</option>';
+  sw.onchange = async () => {
+    const r = await jpost('/api/team/switch', { teamId: sw.value });
+    if (r.body?.ok) showApp(); else { alert('切换失败：' + esc(r.body?.error || r.status)); showApp(); }
+  };
+  $('btn-newteam').onclick = async () => {
+    const name = prompt('新团队名称：'); if (!name || !name.trim()) return;
+    const r = await jpost('/api/team/create', { name: name.trim() });
+    if (r.body?.ok) showApp(); else alert('创建失败：' + esc(r.body?.error || r.status));
+  };
+  $('btn-jointeam').onclick = async () => {
+    const code = prompt('输入团队邀请码：'); if (!code || !code.trim()) return;
+    const r = await jpost('/api/team/join', { code: code.trim() });
+    if (r.body?.ok) showApp(); else alert('加入失败：' + esc(r.body?.error || r.status));
+  };
 
   const r = await jget('/api/team/roster');
   const t = r.body || {};

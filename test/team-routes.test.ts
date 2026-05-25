@@ -24,7 +24,8 @@ vi.mock('../src/config.js', () => ({
 
 import { handleTeamRoute } from '../src/dashboard/team-routes.js';
 import { claimPairing } from '../src/services/pairing-store.js';
-import { removeMember, DEFAULT_TEAM_ID } from '../src/services/team-store.js';
+import { removeMember, DEFAULT_TEAM_ID, createTeam } from '../src/services/team-store.js';
+import { createInvite } from '../src/services/invite-store.js';
 
 let dataDir: string;
 beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'botmux-teamroutes-')); state.dataDir = dataDir; });
@@ -293,6 +294,70 @@ describe('handleTeamRoute', () => {
     res = makeRes();
     await call(makeReq('POST', '/api/team/bots/cli_ghost/owner', { cookie: c }), res, '/api/team/bots/cli_ghost/owner');
     expect(res.statusCode).toBe(404);
+  });
+
+  it('multi-team: /me lists my teams; create adds a team and switches to it', async () => {
+    const session = await login(); // 张三 bootstrapped into DEFAULT
+    const c = 'bmx_session=' + session;
+    let res = makeRes();
+    await call(makeReq('GET', '/api/team/me', { cookie: c }), res, '/api/team/me');
+    expect(json(res).teams.map((t: any) => t.id)).toEqual([DEFAULT_TEAM_ID]);
+    expect(json(res).teamId).toBe(DEFAULT_TEAM_ID);
+    // create a new team → joins it + session switches
+    res = makeRes();
+    await call(makeReq('POST', '/api/team/create', { cookie: c, body: { name: '支付组' } }), res, '/api/team/create');
+    expect(res.statusCode).toBe(200);
+    const tid = json(res).teamId;
+    res = makeRes();
+    await call(makeReq('GET', '/api/team/me', { cookie: c }), res, '/api/team/me');
+    expect(json(res).teamId).toBe(tid);
+    expect(json(res).teams.length).toBe(2);
+    expect(json(res).teams.map((t: any) => t.name)).toContain('支付组');
+  });
+
+  it('multi-team: create requires a name (400)', async () => {
+    const session = await login();
+    const res = makeRes();
+    await call(makeReq('POST', '/api/team/create', { cookie: 'bmx_session=' + session, body: { name: '  ' } }), res, '/api/team/create');
+    expect(res.statusCode).toBe(400);
+    expect(json(res).error).toBe('name_required');
+  });
+
+  it('multi-team: switch rejects a team I am not a member of (403), allows one I am', async () => {
+    const session = await login();
+    const c = 'bmx_session=' + session;
+    let res = makeRes();
+    await call(makeReq('POST', '/api/team/switch', { cookie: c, body: { teamId: 'team_ghost' } }), res, '/api/team/switch');
+    expect(res.statusCode).toBe(403);
+    expect(json(res).error).toBe('not_a_member');
+    // create then switch back to DEFAULT works
+    await call(makeReq('POST', '/api/team/create', { cookie: c, body: { name: 'B' } }), makeRes(), '/api/team/create');
+    res = makeRes();
+    await call(makeReq('POST', '/api/team/switch', { cookie: c, body: { teamId: DEFAULT_TEAM_ID } }), res, '/api/team/switch');
+    expect(res.statusCode).toBe(200);
+    expect(json(res).teamId).toBe(DEFAULT_TEAM_ID);
+  });
+
+  it('multi-team: join another team via invite switches into it; bad code 403', async () => {
+    const session = await login(); // 张三, member of DEFAULT only
+    const c = 'bmx_session=' + session;
+    // an external team with an outstanding invite (minted by someone else)
+    const ext = createTeam(dataDir, '外部团队');
+    const inv = createInvite(dataDir, ext.id, 'someone');
+    let res = makeRes();
+    await call(makeReq('POST', '/api/team/join', { cookie: c, body: { code: inv.code } }), res, '/api/team/join');
+    expect(res.statusCode).toBe(200);
+    expect(json(res).teamId).toBe(ext.id);
+    // now a member of ext + session switched there
+    res = makeRes();
+    await call(makeReq('GET', '/api/team/me', { cookie: c }), res, '/api/team/me');
+    expect(json(res).teamId).toBe(ext.id);
+    expect(json(res).teams.map((t: any) => t.id)).toContain(ext.id);
+    // a bogus code is rejected
+    res = makeRes();
+    await call(makeReq('POST', '/api/team/join', { cookie: c, body: { code: 'NOPE' } }), res, '/api/team/join');
+    expect(res.statusCode).toBe(403);
+    expect(json(res).error).toBe('invite_not_found');
   });
 
   it('logout clears the session cookie', async () => {

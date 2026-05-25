@@ -90,6 +90,18 @@ export function getWebSession(dataDir: string, token: string, now: number = Date
   return data[token] ?? null;
 }
 
+/** Re-scope an existing session to another team (after a verified switch/join/create).
+ *  Returns true if the session existed and was updated. */
+export function updateSessionTeam(dataDir: string, token: string, teamId: string, now: number = Date.now()): boolean {
+  if (!token) return false;
+  const data = prune(readFile(dataDir), now);
+  const s = data[token];
+  if (!s) return false;
+  s.teamId = teamId;
+  writeFileAtomic(dataDir, data);
+  return true;
+}
+
 /** Revoke (logout). Returns true if a session was removed. */
 export function revokeWebSession(dataDir: string, token: string): boolean {
   const data = readFile(dataDir);
