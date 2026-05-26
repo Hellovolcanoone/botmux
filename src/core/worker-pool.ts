@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { ensureSkills } from '../skills/installer.js';
+import { ensureSkills, ensureAskSkill } from '../skills/installer.js';
 import { installHook } from '../adapters/hook-installer.js';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
@@ -402,11 +402,16 @@ export function ensureCliSkills(cliId: CliId, cliPathOverride?: string): void {
   if (skillsInstalledCliIds.has(cliId)) return;
   const adapter = createCliAdapterSync(cliId, cliPathOverride);
   ensureSkills(cliId, adapter.skillsDir);
-  // 安装 askUserQuestion hook：把 botmux hook 子命令写入各 CLI 配置（幂等）
+  // askUserQuestion 接管策略：hook 优先 + 非 hook CLI 用 skill 兜底。
+  // - 有 hookInstall（Claude/OpenCode）：装 hook 拦截原生 AskUserQuestion，并删掉
+  //   botmux-ask skill，避免 skill 与 hook 双重弹卡。
+  // - 无 hookInstall（Codex/Cursor/尚未接 hook 的终端原生 CLI）：保留 botmux-ask
+  //   skill 作兜底，让 agent 仍可用 `botmux ask` 把选择题引到飞书。
   if (adapter.hookInstall) {
     try { installHook(cliId, adapter.hookInstall, hookCommandFor(cliId)); }
     catch (err) { logger.warn(`[hook] install failed for ${cliId}: ${err instanceof Error ? err.message : String(err)}`); }
   }
+  ensureAskSkill(cliId, adapter.skillsDir, !adapter.hookInstall);
   skillsInstalledCliIds.add(cliId);
 }
 

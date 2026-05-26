@@ -84,12 +84,12 @@ describe('built-in botmux-workflow-create skill', () => {
   });
 });
 
-describe('botmux-ask skill 退役', () => {
-  it('BUILTIN_SKILLS 不再包含 botmux-ask（改由 hook 接管）', () => {
+describe('botmux-ask skill 条件兜底（hook 优先 + 非 hook CLI 保留）', () => {
+  it('不在 BUILTIN_SKILLS（不再无条件装到所有 CLI）', () => {
     expect(BUILTIN_SKILLS.find(s => s.name === 'botmux-ask')).toBeUndefined();
   });
 
-  it('RETIRED_SKILL_NAMES 包含 botmux-ask（清理已安装的旧 SKILL.md）', () => {
-    expect(RETIRED_SKILL_NAMES).toContain('botmux-ask');
+  it('不在 RETIRED_SKILL_NAMES（改为按 CLI 条件管理，非全量退役）', () => {
+    expect(RETIRED_SKILL_NAMES).not.toContain('botmux-ask');
   });
 });
