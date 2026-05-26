@@ -152,6 +152,8 @@ describe('installHook — claude-settings', () => {
 describe('installHook — opencode-plugin', () => {
   let tmpDir: string;
   let configPath: string;
+  // 注意：opencode-plugin 路径下 installHook 会忽略传入的 hookCommand 字符串，
+  // 改用 hookCommandParts('opencode') 自行解析 argv（见 P1.2 修复）。这里传个占位即可。
   const hookCommand = '/usr/bin/node /path/to/cli.js hook opencode';
 
   beforeEach(() => {
@@ -159,12 +161,19 @@ describe('installHook — opencode-plugin', () => {
     configPath = join(tmpDir, '.config', 'opencode', 'plugin', 'botmux-ask.js');
   });
 
-  it('写入包含 hookCommand 的插件文件', () => {
+  it('插件用 argv 形式 spawnSync(cmd, args)，不拆 shell 字符串（Codex P1.2 回归）', () => {
     installHook('opencode', { configPath, format: 'opencode-plugin' }, hookCommand);
-
     const content = readFileSync(configPath, 'utf-8');
-    expect(content).toContain(hookCommand);
+
     expect(content).toContain('question.asked');
+    expect(content).toContain('spawnSync(');
+    // args 以 JSON 数组嵌入，包含 hook 子命令与 cliId
+    expect(content).toContain('"hook"');
+    expect(content).toContain('"opencode"');
+    expect(content).toContain('cli.js');
+    // 绝不能再出现「把带引号命令字符串 .split(" ")」的旧写法
+    expect(content).not.toContain('.split(');
+    expect(content).not.toContain('parts[0]');
   });
 
   it('幂等——二次调用后文件内容与第一次完全相同', () => {

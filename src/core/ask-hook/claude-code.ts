@@ -112,11 +112,12 @@ const claudeCodeAdapter: HookAskAdapter = {
     return JSON.stringify(directive);
   },
 
-  passthrough(payload: unknown): string {
-    // 放行：allow + 空 answers，让 Claude Code 继续原生终端提问
-    const rawQuestions = extractRawQuestions(payload);
-    const directive = buildAllowDirective(hookEventName(payload), rawQuestions, {});
-    return JSON.stringify(directive);
+  passthrough(_payload: unknown): string {
+    // 真放行：空 stdout（+ exit 0）。Claude Code 无 hook decision 时工具照常执行，
+    // AskUserQuestion 在终端原生提问。
+    // 绝不能输出 allow + updatedInput：那会用空 answers 顶替 tool input，把这次提问
+    // 错误地"答空"掉（非 botmux 会话 / daemon 不可达时尤其有害）。
+    return '';
   },
 };
 

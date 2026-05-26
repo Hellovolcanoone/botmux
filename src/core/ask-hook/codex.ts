@@ -64,14 +64,10 @@ const codexAdapter: HookAskAdapter = {
   },
 
   passthrough(_payload: unknown): string {
-    // 放行：behavior='allow'，让 Codex CLI 继续原生终端处理
-    const directive = {
-      hookSpecificOutput: {
-        hookEventName: 'PermissionRequest',
-        decision: { behavior: 'allow' },
-      },
-    };
-    return JSON.stringify(directive);
+    // 真放行：空 stdout（+ exit 0），不做任何 decision，让 Codex 走默认行为。
+    // 不输出 allow——那是替用户自动批准，并非"放行不干预"。
+    // （Codex 当前未接 hook，此分支仅为将来接入时的安全默认。）
+    return '';
   },
 };
 

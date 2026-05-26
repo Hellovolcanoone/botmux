@@ -8,6 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { logger } from '../utils/logger.js';
+import { hookCommandParts } from './hook-command.js';
 
 // ─── 类型 ────────────────────────────────────────────────────────────────────
 
@@ -127,10 +128,10 @@ function installClaudeSettings(configPath: string, hookCommand: string): void {
  * OpenCode 插件 API 目前处于 dogfood 阶段，`question.asked` 钩子形状和返回值约定
  * 需要在真实会话中实测确认（stdin/stdout 格式、同步/异步、返回值结构等）。
  */
-function buildOpenCodePlugin(hookCommand: string): string {
-  // 把 hookCommand 拆成 [execPath, ...args]，供 spawnSync 调用
-  // hookCommand 形如：/path/to/node /path/to/cli.js hook opencode
-  const escapedCommand = JSON.stringify(hookCommand);
+function buildOpenCodePlugin(parts: { cmd: string; args: string[] }): string {
+  // 用 argv 形式嵌入（不拼 shell 字符串、不 split）：含空格/引号的路径也不会被拆坏。
+  const cmdLit = JSON.stringify(parts.cmd);
+  const argsLit = JSON.stringify(parts.args);
   return `// botmux-ask opencode plugin
 // 将 OpenCode 的 question.asked 事件转发到 botmux hook opencode。
 // TODO(dogfood): 校验 OpenCode 插件 question.asked API
@@ -141,17 +142,17 @@ export default {
 
   // question.asked: OpenCode 向用户提问时触发。
   // payload 形状待实测（见 TODO 注释）。
-  // 返回值 { answer: string } 或 undefined（undefined = 由 OpenCode 自行处理）。
+  // 返回值 { type:'answer', answers } 或 undefined（undefined = 由 OpenCode 自行处理）。
   "question.asked"(payload) {
     try {
       const input = JSON.stringify(payload);
-      const parts = ${escapedCommand}.split(" ");
-      const result = spawnSync(parts[0], parts.slice(1), {
+      const result = spawnSync(${cmdLit}, ${argsLit}, {
         input,
         encoding: "utf-8",
         timeout: 86400000, // 24h，等待用户在飞书回答
       });
-      if (result.status === 0 && result.stdout) {
+      // stdout 为空 = hook 客户端 passthrough（放行）→ 返回 undefined，OpenCode 原生处理。
+      if (result.status === 0 && result.stdout && result.stdout.trim()) {
         return JSON.parse(result.stdout.trim());
       }
     } catch {
@@ -166,8 +167,8 @@ export default {
 /**
  * 写入 OpenCode 插件文件。幂等：内容相同则跳过。
  */
-function installOpenCodePlugin(configPath: string, hookCommand: string): void {
-  const content = buildOpenCodePlugin(hookCommand);
+function installOpenCodePlugin(configPath: string, parts: { cmd: string; args: string[] }): void {
+  const content = buildOpenCodePlugin(parts);
   const changed = writeIfChanged(configPath, content);
   if (changed) {
     logger.info(`[hook] 已写入 OpenCode 插件 → ${configPath}`);
@@ -198,7 +199,8 @@ export function installHook(
         installClaudeSettings(configPath, hookCommand);
         break;
       case 'opencode-plugin':
-        installOpenCodePlugin(configPath, hookCommand);
+        // OpenCode 插件走 argv parts（spawnSync），不复用 shell 字符串，避免被 split 拆坏。
+        installOpenCodePlugin(configPath, hookCommandParts(cliId));
         break;
       default: {
         // TypeScript exhaustiveness（编译时保障，运行时防御）

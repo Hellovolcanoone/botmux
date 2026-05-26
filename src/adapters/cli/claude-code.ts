@@ -709,7 +709,7 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
     systemHints: [],
     altScreen: false,
     skillsDir: '~/.claude/skills',
-    // askUserQuestion hook 写全局 ~/.claude/settings.json（matcher='*' 的 PreToolUse），
+    // askUserQuestion hook 写全局 ~/.claude/settings.json（matcher='AskUserQuestion' 的 PreToolUse），
     // 把 AskUserQuestion 事件转发到 `botmux hook claude-code`。
     // 选全局而非进程级 --settings：adopt 模式接管的是 botmux 没启动、拿不到 --settings
     // 的已有 claude 会话，只有全局配置那条会话才读得到。代价是会作用于非 botmux 的

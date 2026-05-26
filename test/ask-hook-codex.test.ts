@@ -53,26 +53,19 @@ describe('Codex hook adapter', () => {
     });
   });
 
-  describe('passthrough', () => {
-    it('PermissionRequest → hookSpecificOutput.decision.behavior=allow', () => {
-      const payload = loadFixture('codex-permission-single.json');
-      const directive = JSON.parse(codex.passthrough(payload)) as Record<string, unknown>;
-      const hso = directive.hookSpecificOutput as Record<string, unknown>;
-      expect(hso.hookEventName).toBe('PermissionRequest');
-      const decision = hso.decision as Record<string, unknown>;
-      // TODO(dogfood): 验证 codex directive 形状
-      expect(decision.behavior).toBe('allow');
+  describe('passthrough（真放行 = 空 stdout）', () => {
+    // 回归保护（Codex P1.1）：passthrough = 空串、不做任何 decision。
+    // 不输出 allow/deny——那是替用户自动决策，并非"放行不干预"。
+    it('PermissionRequest payload → 空字符串', () => {
+      expect(codex.passthrough(loadFixture('codex-permission-single.json'))).toBe('');
     });
 
-    it('输出为合法 JSON 字符串', () => {
-      const payload = loadFixture('codex-permission-single.json');
-      expect(() => JSON.parse(codex.passthrough(payload))).not.toThrow();
-    });
-
-    it('passthrough 不含 deny', () => {
-      const payload = loadFixture('codex-permission-single.json');
-      const directiveStr = codex.passthrough(payload);
-      expect(directiveStr).not.toContain('deny');
+    it('不含 allow / deny / decision', () => {
+      const out = codex.passthrough(loadFixture('codex-permission-single.json'));
+      expect(out).toBe('');
+      expect(out).not.toContain('allow');
+      expect(out).not.toContain('deny');
+      expect(out).not.toContain('decision');
     });
   });
 });

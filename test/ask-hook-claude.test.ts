@@ -153,28 +153,20 @@ describe('Claude Code hook adapter', () => {
     });
   });
 
-  describe('passthrough', () => {
-    it('返回 PreToolUse permissionDecision=allow + 空 answers 的 directive', () => {
+  describe('passthrough（真放行 = 空 stdout）', () => {
+    // 回归保护（Codex P1.1）：passthrough 必须是 no-op（空串），绝不能输出
+    // allow + updatedInput——否则会用空 answers 顶替 tool input，把提问"答空"掉。
+    it('非 askUserQuestion 事件 → 空字符串', () => {
       const payload = { ...(loadFixture('claude-ask-single.json') as any), hook_event_name: 'PreToolUse' };
-      const directive = JSON.parse(claude.passthrough(payload)) as Record<string, unknown>;
-      const hso = directive.hookSpecificOutput as Record<string, unknown>;
-      expect(hso.hookEventName).toBe('PreToolUse');
-      expect(hso.permissionDecision).toBe('allow');
-      const updatedInput = hso.updatedInput as Record<string, unknown>;
-      expect(updatedInput.answers).toEqual({});
+      expect(claude.passthrough(payload)).toBe('');
     });
 
-    it('passthrough 包含原始 questions（让 Claude 知道 context）', () => {
+    it('askUserQuestion 原始 payload → 仍是空字符串，不含 updatedInput/allow', () => {
       const payload = loadFixture('claude-ask-single.json') as any;
-      const directive = JSON.parse(claude.passthrough(payload)) as Record<string, unknown>;
-      const updatedInput = (directive.hookSpecificOutput as any).decision.updatedInput as Record<string, unknown>;
-      expect(Array.isArray(updatedInput.questions)).toBe(true);
-      expect((updatedInput.questions as unknown[]).length).toBeGreaterThan(0);
-    });
-
-    it('输出为合法 JSON 字符串', () => {
-      const payload = loadFixture('claude-ask-single.json');
-      expect(() => JSON.parse(claude.passthrough(payload))).not.toThrow();
+      const out = claude.passthrough(payload);
+      expect(out).toBe('');
+      expect(out).not.toContain('updatedInput');
+      expect(out).not.toContain('allow');
     });
   });
 });

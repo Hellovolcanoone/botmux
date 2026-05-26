@@ -138,34 +138,22 @@ describe('OpenCode hook adapter', () => {
     });
   });
 
-  describe('passthrough', () => {
-    it('单问 → { type: "answer", answers: [[""]] }', () => {
-      const payload = loadFixture('opencode-ask-single.json');
-      const directive = JSON.parse(opencode.passthrough(payload)) as Record<string, unknown>;
-      expect(directive.type).toBe('answer');
-      expect(directive.answers).toEqual([['']]);
+  describe('passthrough（真放行 = 空 stdout）', () => {
+    // 回归保护（Codex P1.1）：passthrough = 空串。插件见空 stdout → 返回 undefined →
+    // OpenCode 原生处理；绝不输出 {type:'answer',...} 用空答案顶替提问。
+    it('单问 payload → 空字符串', () => {
+      expect(opencode.passthrough(loadFixture('opencode-ask-single.json'))).toBe('');
     });
 
-    it('多问 → answers 长度等于 question 数量，每项为 [""]', () => {
-      const payload = loadFixture('opencode-ask-multi.json');
-      const directive = JSON.parse(opencode.passthrough(payload)) as Record<string, unknown>;
-      expect(directive.type).toBe('answer');
-      const answers = directive.answers as string[][];
-      expect(answers).toHaveLength(2);
-      expect(answers[0]).toEqual(['']);
-      expect(answers[1]).toEqual(['']);
+    it('多问 payload → 空字符串', () => {
+      expect(opencode.passthrough(loadFixture('opencode-ask-multi.json'))).toBe('');
     });
 
-    it('无 questions 结构 → [[""]]（兜底 1 个 question）', () => {
+    it('无 questions 结构 → 空字符串，不含 answer', () => {
       const payload = { hook_event_name: 'QuestionAsked', session_id: 'opencode-x', question_text: 'ok?' };
-      const directive = JSON.parse(opencode.passthrough(payload)) as Record<string, unknown>;
-      expect(directive.type).toBe('answer');
-      expect(directive.answers).toEqual([['']]);
-    });
-
-    it('输出为合法 JSON 字符串', () => {
-      const payload = loadFixture('opencode-ask-single.json');
-      expect(() => JSON.parse(opencode.passthrough(payload))).not.toThrow();
+      const out = opencode.passthrough(payload);
+      expect(out).toBe('');
+      expect(out).not.toContain('answer');
     });
   });
 });

@@ -6,9 +6,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { runHook } from '../src/cli.js';
 import type { AskResult } from '../src/core/ask-types.js';
-import claudeAdapter from '../src/core/ask-hook/claude-code.js';
 
 // ── Claude AskUserQuestion payload fixture ─────────────────────────────────────
 
@@ -85,8 +85,9 @@ describe('runHook', () => {
 
       result = await runHook(claudeAskPayload, FULL_ENV, stub, 'claude-code');
       // 输出应为 passthrough directive（behavior=allow + 空 answers）
-      const expected = claudeAdapter.passthrough(claudeAskPayload);
-      expect(result.stdout).toBe(expected);
+      // 回归（Codex P1.1）：放行 = 空 stdout，绝不输出 directive。直接断言空串，
+      // 不与实现的 passthrough() 比较，避免实现回退时测试跟着移动。
+      expect(result.stdout).toBe('');
     });
   });
 
@@ -95,8 +96,7 @@ describe('runHook', () => {
       const stub = makeAnsweredStub([['继续']]);
       const result = await runHook(claudePreToolPayload, FULL_ENV, stub, 'claude-code');
       // 应为 passthrough（stub 不应被调用）
-      const expected = claudeAdapter.passthrough(claudePreToolPayload);
-      expect(result.stdout).toBe(expected);
+      expect(result.stdout).toBe('');
     });
   });
 
@@ -105,16 +105,18 @@ describe('runHook', () => {
       const stub = makeAnsweredStub([['继续']]);
       const env = { ...FULL_ENV, BOTMUX_SESSION_ID: undefined };
       const result = await runHook(claudeAskPayload, env, stub, 'claude-code');
-      const expected = claudeAdapter.passthrough(claudeAskPayload);
-      expect(result.stdout).toBe(expected);
+      // 回归（Codex P1.1）：放行 = 空 stdout，绝不输出 directive。直接断言空串，
+      // 不与实现的 passthrough() 比较，避免实现回退时测试跟着移动。
+      expect(result.stdout).toBe('');
     });
 
     it('BOTMUX_CHAT_ID 缺失 → passthrough', async () => {
       const stub = makeAnsweredStub([['继续']]);
       const env = { ...FULL_ENV, BOTMUX_CHAT_ID: undefined };
       const result = await runHook(claudeAskPayload, env, stub, 'claude-code');
-      const expected = claudeAdapter.passthrough(claudeAskPayload);
-      expect(result.stdout).toBe(expected);
+      // 回归（Codex P1.1）：放行 = 空 stdout，绝不输出 directive。直接断言空串，
+      // 不与实现的 passthrough() 比较，避免实现回退时测试跟着移动。
+      expect(result.stdout).toBe('');
     });
   });
 
@@ -125,8 +127,9 @@ describe('runHook', () => {
       const result = await runHook(claudeAskPayload, env, stub, 'claude-code');
       // stub 不应被调用
       expect(stub).not.toHaveBeenCalled();
-      const expected = claudeAdapter.passthrough(claudeAskPayload);
-      expect(result.stdout).toBe(expected);
+      // 回归（Codex P1.1）：放行 = 空 stdout，绝不输出 directive。直接断言空串，
+      // 不与实现的 passthrough() 比较，避免实现回退时测试跟着移动。
+      expect(result.stdout).toBe('');
     });
   });
 
@@ -148,8 +151,9 @@ describe('runHook', () => {
         timedOut: true,
       });
       const result = await runHook(claudeAskPayload, FULL_ENV, timedOutStub, 'claude-code');
-      const expected = claudeAdapter.passthrough(claudeAskPayload);
-      expect(result.stdout).toBe(expected);
+      // 回归（Codex P1.1）：放行 = 空 stdout，绝不输出 directive。直接断言空串，
+      // 不与实现的 passthrough() 比较，避免实现回退时测试跟着移动。
+      expect(result.stdout).toBe('');
     });
 
     it('invalidated → passthrough', async () => {
@@ -162,8 +166,9 @@ describe('runHook', () => {
         timedOut: false,
       });
       const result = await runHook(claudeAskPayload, FULL_ENV, invalidatedStub, 'claude-code');
-      const expected = claudeAdapter.passthrough(claudeAskPayload);
-      expect(result.stdout).toBe(expected);
+      // 回归（Codex P1.1）：放行 = 空 stdout，绝不输出 directive。直接断言空串，
+      // 不与实现的 passthrough() 比较，避免实现回退时测试跟着移动。
+      expect(result.stdout).toBe('');
     });
   });
 
@@ -188,6 +193,25 @@ describe('runHook', () => {
       const env = { ...FULL_ENV, BOTMUX_ASK_TIMEOUT_MS: 'not_a_number' };
       await runHook(claudeAskPayload, env, captureStub, 'claude-code');
       expect(capturedBody?.timeoutMs).toBe(3_600_000);
+    });
+  });
+
+  // 语义③（Codex 建议）：workflow subagent 里 `botmux ask` 必须被拒绝——审批走
+  // humanGate/decision 进 event log，不能用 ad-hoc ask 绕过。cmdAsk 用 process.exit(2)
+  // 拒绝，未导出、无法直接单测，这里用源码断言钉住该 gate，防被静默移除。
+  describe('语义③：workflow 里 botmux ask 拒绝（源码 gate 守卫）', () => {
+    it('cmdAsk 含 BOTMUX_WORKFLOW gate + exit 2 拒绝', () => {
+      const src = readFileSync(
+        new URL('../src/cli.ts', import.meta.url),
+        'utf-8',
+      );
+      const cmdAskIdx = src.indexOf('async function cmdAsk(');
+      expect(cmdAskIdx).toBeGreaterThanOrEqual(0);
+      // gate 在 cmdAsk 函数体起始处
+      const region = src.slice(cmdAskIdx, cmdAskIdx + 1500);
+      expect(region).toContain("process.env.BOTMUX_WORKFLOW === '1'");
+      expect(region).toContain('process.exit(2)');
+      expect(region.toLowerCase()).toContain('refused');
     });
   });
 });

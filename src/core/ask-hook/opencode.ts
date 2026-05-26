@@ -118,16 +118,10 @@ const openCodeAdapter: HookAskAdapter = {
     return JSON.stringify({ type: 'answer', text: flat });
   },
 
-  passthrough(payload: unknown): string {
-    // 放行：每条 question 填空哨兵 ['']，OpenCode plugin 约定"未答"
-    const p = payload as Record<string, unknown> | undefined;
-    const toolInput = (p?.tool_input as { questions?: unknown[] } | undefined);
-    const questionCount = Array.isArray(toolInput?.questions)
-      ? toolInput!.questions!.length
-      : 1;
-
-    const answers: string[][] = Array.from({ length: questionCount }, () => ['']);
-    return JSON.stringify({ type: 'answer', answers });
+  passthrough(_payload: unknown): string {
+    // 真放行：空 stdout。插件见 stdout 为空 → 返回 undefined → OpenCode 自行处理
+    // （原生终端提问）。不输出 {type:'answer',...}，避免用空答案顶替这次提问。
+    return '';
   },
 };
 

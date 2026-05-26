@@ -43,6 +43,7 @@ import {
   CARD_POSTING_SENTINEL,
   parkStreamCard,
   closeSession as closeSessionHelper,
+  ensureCliEnv,
 } from './core/worker-pool.js';
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
@@ -2339,6 +2340,12 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   }
   const cfg = botConfigs[idx];
   registerBot(cfg);
+  // 启动即为本 bot 的 CLI 预装环境（skills + askUserQuestion hook + 兜底 skill）。
+  // 关键：adopt 路径会跳过 ensureCliSkills，若重启后第一次就是 adopt 一个外部
+  // claude 会话，必须保证此时全局 ~/.claude/settings.json 已带 hook——否则"全局
+  // hook 适配 adopt"不成立。这里幂等、best-effort，不阻塞启动。
+  try { ensureCliEnv(cfg.cliId, cfg.cliPathOverride); }
+  catch (err) { logger.warn(`[hook] startup ensureCliEnv failed for ${cfg.cliId}: ${err instanceof Error ? err.message : String(err)}`); }
   sessionStore.init(cfg.larkAppId);
   chatFirstSeenStore.init(cfg.larkAppId);
   // Watch schedules.json for external writes (e.g. `botmux schedule add`
