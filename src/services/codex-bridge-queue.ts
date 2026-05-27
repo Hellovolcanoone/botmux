@@ -50,6 +50,7 @@ export interface CodexPendingTurn {
   /** For local turns: the user's typed text, surfaced alongside the
    *  assistant reply so the Lark thread sees both sides of the exchange. */
   userText?: string;
+  sourceSessionId?: string;
 }
 
 export class CodexBridgeQueue {
@@ -117,6 +118,7 @@ export class CodexBridgeQueue {
           }
           if (!tooOld && fingerprintOk) {
             next.started = true;
+            next.sourceSessionId = ev.sourceSessionId;
             // Anchor the bridge-fallback suppression window to when the turn
             // ACTUALLY started processing (the transcript user event's
             // timestamp), not when the worker marked it. With type-ahead the
@@ -149,6 +151,7 @@ export class CodexBridgeQueue {
             isLocal: true,
             userText: ev.text,
             markTimeMs: ev.timestampMs,
+            sourceSessionId: ev.sourceSessionId,
           };
           const insertAt = this.queue.findIndex(t => !t.started);
           if (insertAt === -1) this.queue.push(localTurn);
@@ -157,6 +160,7 @@ export class CodexBridgeQueue {
         }
       } else if (ev.kind === 'assistant_final') {
         if (this.collecting) {
+          if (this.collecting.sourceSessionId && ev.sourceSessionId && this.collecting.sourceSessionId !== ev.sourceSessionId) continue;
           this.collecting.finalText = ev.text;
           this.collecting = null;
         }

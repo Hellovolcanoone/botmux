@@ -20,6 +20,7 @@ vi.mock('node:child_process', async () => {
 
 const existsSyncMock = vi.mocked(existsSync);
 const spawnSyncMock = vi.mocked(spawnSync);
+const CONTENT_JSON_PREFIX = String.fromCharCode(0) + 'json:';
 
 describe('hermes transcript reader', () => {
   beforeEach(() => {
@@ -42,18 +43,19 @@ describe('hermes transcript reader', () => {
       status: 0,
       stdout: JSON.stringify([
         { id: 2, session_id: 'h1', role: 'user', content: 'hello', timestamp: 100 },
-        { id: 3, session_id: 'h1', role: 'assistant', content: '\u0000json:[{"text":"hi"}]', timestamp: 101 },
-        { id: 4, session_id: 'h1', role: 'assistant', content: '', timestamp: 102 },
+        { id: 3, session_id: 'h1', role: 'assistant', content: `${CONTENT_JSON_PREFIX}[{"text":"thinking"}]`, timestamp: 101, finish_reason: 'tool_calls' },
+        { id: 4, session_id: 'h1', role: 'assistant', content: `${CONTENT_JSON_PREFIX}[{"text":"hi"}]`, timestamp: 102, finish_reason: 'stop' },
+        { id: 5, session_id: 'h1', role: 'assistant', content: '', timestamp: 103, finish_reason: 'stop' },
       ]),
       stderr: '',
     } as any);
     const { drainHermesStateDb } = await import('../src/services/hermes-transcript.js');
 
     expect(drainHermesStateDb(1, '/tmp/state.db')).toEqual({
-      newOffset: 4,
+      newOffset: 5,
       events: [
-        { uuid: 'hermes:2', timestampMs: 100000, kind: 'user', text: 'hello' },
-        { uuid: 'hermes:3', timestampMs: 101000, kind: 'assistant_final', text: 'hi' },
+        { uuid: 'hermes:2', timestampMs: 100000, kind: 'user', text: 'hello', sourceSessionId: 'h1' },
+        { uuid: 'hermes:4', timestampMs: 102000, kind: 'assistant_final', text: 'hi', sourceSessionId: 'h1' },
       ],
     });
   });

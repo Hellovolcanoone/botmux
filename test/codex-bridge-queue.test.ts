@@ -254,6 +254,19 @@ describe('CodexBridgeQueue', () => {
     });
   });
 
+  it('ignores assistant_final from a different source session while collecting', () => {
+    const q = new CodexBridgeQueue();
+    q.mark('t1', 'lark prompt', 100);
+    q.ingest([
+      { uuid: 'u1', timestampMs: 110, kind: 'user', text: 'lark prompt', sourceSessionId: 'h1' },
+      { uuid: 'a-other', timestampMs: 120, kind: 'assistant_final', text: 'wrong session reply', sourceSessionId: 'h2' },
+    ]);
+    expect(q.drainEmittable()).toEqual([]);
+
+    q.ingest([{ uuid: 'a1', timestampMs: 130, kind: 'assistant_final', text: 'right session reply', sourceSessionId: 'h1' }]);
+    expect(q.drainEmittable()[0].finalText).toBe('right session reply');
+  });
+
   it('clearPending wipes queue state', () => {
     const q = new CodexBridgeQueue();
     q.mark('t1', 'one', 100);
