@@ -55,6 +55,14 @@ function federationToken(req: IncomingMessage, url: URL): string {
   return (url.searchParams.get('syncToken') ?? '').trim();
 }
 
+/** Header-only bearer for pre-auth WRITE endpoints (group create): the token must
+ *  never come from URL/body — keep it out of access logs and off replayable surfaces.
+ *  Unlike federationToken() there is NO ?syncToken= / body fallback here. */
+function bearerOnly(req: IncomingMessage): string {
+  const auth = req.headers['authorization'];
+  return (typeof auth === 'string' && auth.startsWith('Bearer ')) ? auth.slice(7).trim() : '';
+}
+
 async function readBody(req: IncomingMessage, maxBytes = 256 * 1024): Promise<any> {
   const chunks: Buffer[] = [];
   let total = 0;
@@ -194,21 +202,24 @@ export async function handleFederationApi(
     if (!deps.createTeamGroup) { jsonRes(res, 501, { ok: false, error: 'group_create_unavailable' }); return true; }
     let body: any;
     try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
-    const token = federationToken(req, url) || String(body?.syncToken ?? '').trim();
+    const token = bearerOnly(req); // header-only: a write endpoint must not take the token from URL/body
     const found = getDeploymentByToken(dataDir, token);
     if (!found) { jsonRes(res, 403, { ok: false, error: 'unknown_token' }); return true; }
     const requestId = String(body?.requestId ?? '').trim();
     if (!requestId) { jsonRes(res, 400, { ok: false, error: 'request_id_required' }); return true; }
     const larkAppIds: string[] = Array.isArray(body?.larkAppIds) ? body.larkAppIds.filter((x: any) => typeof x === 'string') : [];
     const name = String(body?.name ?? '').trim() || '协作群';
-    // Idempotency: replay of same {syncToken, requestId} returns the first result.
+    // Idempotency: replay of the same {syncToken, requestId} returns the FIRST
+    // terminal result verbatim — including failures (delegation_timeout /
+    // group_create_proxy_failed) which may already have side-effected. A genuine
+    // retry must use a fresh requestId; replaying must never re-orchestrate.
     const idemKey = `group:${token}:${requestId}`;
-    const cached = idemGet(idemKey);
-    if (cached) { jsonRes(res, 200, cached); return true; }
+    const cached = idemGet(idemKey) as { status: number; body: any } | undefined;
+    if (cached) { jsonRes(res, cached.status, cached.body); return true; }
     const out = await orchestrateFederatedGroup(dataDir,
       { name, larkAppIds, operatorUnionId: found.deployment.ownerUnionId, requestId, teamId: found.teamId },
       { createTeamGroup: deps.createTeamGroup, fetcher: deps.fetcher ?? fetch, live: deps.liveBots?.() });
-    if (out.status === 200 && out.body?.ok) idemSet(idemKey, out.body);
+    idemSet(idemKey, { status: out.status, body: out.body });
     jsonRes(res, out.status, out.body);
     return true;
   }

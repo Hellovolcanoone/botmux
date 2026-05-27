@@ -212,6 +212,41 @@ describe('handleFederationApi', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('federation/group: token is header-only (rejects ?syncToken= and body token)', async () => {
+    writeBots([{ larkAppId: 'cli_hub', botOpenId: null, botName: 'Hub', cliId: 'claude' }]);
+    registerDeployment(dataDir, DEFAULT_TEAM_ID, { deploymentId: 'dep_s', name: 'S', ownerUnionId: 'on_s', bots: [{ larkAppId: 'cli_sp', botName: 'SP', cliId: 'codex' }] });
+    const syncToken = (await import('../src/services/federation-store.js')).listFederatedDeployments(dataDir, DEFAULT_TEAM_ID)[0].syncToken;
+    const createTeamGroup = vi.fn(async () => ({ ok: true, chatId: 'oc', invalidBotIds: [] }));
+    // token in query string → NOT accepted (would leak into access logs)
+    const qp = '/api/federation/group?syncToken=' + syncToken;
+    let res = makeRes();
+    await callWithGroup(makeReq('POST', qp, { larkAppIds: ['cli_hub'], requestId: 'q1' }), res, qp, createTeamGroup);
+    expect(res.statusCode).toBe(403);
+    // token in body → NOT accepted either
+    res = makeRes();
+    await callWithGroup(makeReq('POST', '/api/federation/group', { syncToken, larkAppIds: ['cli_hub'], requestId: 'b1' }), res, '/api/federation/group', createTeamGroup);
+    expect(res.statusCode).toBe(403);
+    expect(createTeamGroup).not.toHaveBeenCalled();
+  });
+
+  it('federation/group: a FAILED terminal result is cached too (replay never re-orchestrates)', async () => {
+    writeBots([{ larkAppId: 'cli_hub', botOpenId: null, botName: 'Hub', cliId: 'claude' }]);
+    registerDeployment(dataDir, DEFAULT_TEAM_ID, { deploymentId: 'dep_s', name: 'S', ownerUnionId: 'on_s', bots: [] });
+    const syncToken = (await import('../src/services/federation-store.js')).listFederatedDeployments(dataDir, DEFAULT_TEAM_ID)[0].syncToken;
+    let calls = 0;
+    const createTeamGroup = vi.fn(async () => { calls++; return { ok: false, error: 'group_create_proxy_failed' }; });
+    let res = makeRes();
+    await callWithGroup(makeReq('POST', '/api/federation/group', { larkAppIds: ['cli_hub'], requestId: 'f1' }, bearer(syncToken)), res, '/api/federation/group', createTeamGroup);
+    expect(res.statusCode).toBe(502);
+    expect(json(res).error).toBe('group_create_proxy_failed');
+    // replay same requestId → cached 502 returned verbatim, createTeamGroup NOT called again
+    res = makeRes();
+    await callWithGroup(makeReq('POST', '/api/federation/group', { larkAppIds: ['cli_hub'], requestId: 'f1' }, bearer(syncToken)), res, '/api/federation/group', createTeamGroup);
+    expect(res.statusCode).toBe(502);
+    expect(json(res).error).toBe('group_create_proxy_failed');
+    expect(calls).toBe(1);
+  });
+
   it('join requires inviteCode + deployment', async () => {
     let res = makeRes();
     await call(makeReq('POST', '/api/federation/join', { deployment: { deploymentId: 'd', name: 'n', bots: [] } }), res, '/api/federation/join');

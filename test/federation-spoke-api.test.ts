@@ -15,7 +15,7 @@ vi.mock('../src/config.js', () => ({ config: {
 } }));
 
 import { handleFederationSpokeApi } from '../src/dashboard/federation-spoke-api.js';
-import { listMemberships } from '../src/services/federation-membership-store.js';
+import { listMemberships, addMembership } from '../src/services/federation-membership-store.js';
 import { getDeploymentIdentity } from '../src/services/deployment-identity.js';
 import { consumeInvite } from '../src/services/invite-store.js';
 import { DEFAULT_TEAM_ID } from '../src/services/team-store.js';
@@ -111,6 +111,26 @@ describe('handleFederationSpokeApi', () => {
     // unassigned bot now owned by me; pre-owned bot NOT stolen
     expect(getBotOwner(dataDir, 'cli_mine')!.unionId).toBe('on_me');
     expect(getBotOwner(dataDir, 'cli_owned')!.unionId).toBe('on_existing');
+  });
+
+  it('identity: binding owner immediately pushes ownerUnionId to already-joined hubs (#3 fix)', async () => {
+    writeBots([{ larkAppId: 'cli_mine', botOpenId: null, botName: '我的', cliId: 'claude' }]);
+    // joined a remote team BEFORE binding identity → hub has no ownerUnionId yet
+    addMembership(dataDir, { hubUrl: 'http://hub:7891', teamId: 'default', teamName: 'T', syncToken: 'STOK', deploymentId: 'dep_me' });
+    let synced: any = null;
+    const fetcher = vi.fn(async (u: any, init: any) => {
+      if (String(u).endsWith('/api/federation/sync')) synced = JSON.parse(init.body);
+      return jsonResp(200, { ok: true });
+    });
+    let res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/start'), res, url('/api/team/identity/start'), { dataDir });
+    const s = json(res);
+    claimPairing(dataDir, s.code, { openId: 'ou_me', unionId: 'on_me', name: '申晗', larkAppId: 'cli_mine' });
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/consume', { pairingId: s.pairingId, browserToken: s.browserToken }), res, url('/api/team/identity/consume'), { dataDir, fetcher: fetcher as any });
+    expect(res.statusCode).toBe(200);
+    expect(json(res).hubsSynced).toBe(1);
+    expect(synced).toMatchObject({ syncToken: 'STOK', ownerUnionId: 'on_me' }); // hub gets owner NOW, not 2 min later
   });
 
   it('federated-group: includes the bound operator (this deployment owner) in invitees', async () => {

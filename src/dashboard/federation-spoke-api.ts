@@ -210,7 +210,11 @@ export async function handleFederationSpokeApi(
     for (const b of buildTeamRoster(dataDir, undefined, undefined, live).bots) {
       setBotOwner(dataDir, b.larkAppId, { unionId: owner.unionId, name: owner.name }, { override: false });
     }
-    jsonRes(res, 200, { ok: true, owner });
+    // Push the new owner identity to every joined hub NOW (best-effort) so a 拉群
+    // immediately after binding can derive the operator — don't wait for the
+    // 2-min periodic sync, otherwise #3 (operator not invited) reproduces.
+    const sync = await syncAllMemberships(dataDir, fetcher, live).catch(() => ({ synced: 0, failed: 0 }));
+    jsonRes(res, 200, { ok: true, owner, hubsSynced: sync.synced, hubsFailed: sync.failed });
     return true;
   }
 
