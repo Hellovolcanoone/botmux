@@ -15,7 +15,7 @@ import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { deleteMessage, sendMessage, listChatBotMembers, resolveUserUnionId, getChatModeStrict } from '../im/lark/client.js';
 import { claimPairing } from '../services/pairing-store.js';
 import { logger } from '../utils/logger.js';
-import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience } from './worker-pool.js';
+import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience, deleteActiveSession } from './worker-pool.js';
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
 import { validateWorkingDir } from './working-dir.js';
 import { discoverAdoptableSessions, validateAdoptTarget, type AdoptableSession } from './session-discovery.js';
@@ -508,7 +508,7 @@ export async function handleCommand(
           })();
           killWorker(ds);
           sessionStore.closeSession(closedSessionId);
-          activeSessions.delete(sessionKey(rootId, larkAppId!));
+          deleteActiveSession(activeSessions, sessionKey(rootId, larkAppId!));
           const card = buildSessionClosedCard(
             closedSessionId,
             closedAnchor,

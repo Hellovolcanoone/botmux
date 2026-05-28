@@ -43,10 +43,10 @@ export const config = {
   session: {
     dataDir: process.env.SESSION_DATA_DIR ?? new URL('../data', import.meta.url).pathname,
     /** Idle time (ms) before hibernating a session (killing worker but keeping session).
-     *  Set to 0 to disable. Default: 10 minutes. */
+     *  Set to 0 to disable. Default: 30 minutes. */
     hibernateAfterMs: process.env.SESSION_HIBERNATE_AFTER_MS !== undefined
       ? Number(process.env.SESSION_HIBERNATE_AFTER_MS)
-      : 10 * 60 * 1000,
+      : 30 * 60 * 1000,
     /** How often (ms) to check for idle sessions. Default: 5 minutes. */
     hibernateCheckIntervalMs: Number(process.env.SESSION_HIBERNATE_CHECK_INTERVAL_MS) || 5 * 60 * 1000,
   },

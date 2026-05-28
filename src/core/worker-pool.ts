@@ -1575,9 +1575,10 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
               ds.streamCardId = undefined;
               persistStreamCardState(ds);
             });
-        } else if (statusChanged) {
-          // Same turn — PATCH only on status change. Image PATCHes go through
-          // the screenshot_uploaded path; text is no longer a card body mode.
+        } else if (statusChanged || usageLimitChanged) {
+          // Same turn — PATCH on status change or usageLimit change.
+          // Image PATCHes go through the screenshot_uploaded path;
+          // text is no longer a card body mode.
           const cardJson = buildStreamingCard(
             ds.session.sessionId,
             sessionAnchorId(ds),

@@ -8,7 +8,7 @@ import { localeForBot } from '../i18n/index.js';
 import { validateWorkingDir } from './working-dir.js';
 import { buildFollowUpContent, buildNewTopicPrompt, getAvailableBots, rememberLastCliInput } from './session-manager.js';
 import { markSessionActivity } from './session-activity.js';
-import { forkWorker, getCurrentCliVersion } from './worker-pool.js';
+import { forkWorker, getCurrentCliVersion, setActiveSession } from './worker-pool.js';
 import * as messageQueue from '../services/message-queue.js';
 import type { DaemonSession } from './types.js';
 import { sessionKey } from './types.js';
@@ -183,7 +183,7 @@ export async function triggerSessionTurn(
     workingDir: wd.workingDir,
   };
 
-  deps.activeSessions.set(sessionKey(anchor, larkAppId), newDs);
+  setActiveSession(deps.activeSessions, sessionKey(anchor, larkAppId), newDs);
   rememberLastCliInput(newDs, prompt, promptInput);
   forkWorker(newDs, promptInput);
 

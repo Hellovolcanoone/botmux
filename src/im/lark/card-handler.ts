@@ -21,7 +21,7 @@ import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
-import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
+import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, CARD_POSTING_SENTINEL, deleteActiveSession } from '../../core/worker-pool.js';
 import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput } from '../../core/session-manager.js';
 import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
 import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types.js';
@@ -527,7 +527,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       })();
       killWorker(ds);
       sessionStore.closeSession(closedSessionId);
-      activeSessions.delete(sKey);
+      deleteActiveSession(activeSessions, sKey);
       const card = buildSessionClosedCard(
         closedSessionId,
         closedAnchor,
@@ -586,7 +586,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     if (actionType === 'disconnect' && ds) {
       killWorker(ds);
       sessionStore.closeSession(ds.session.sessionId);
-      activeSessions.delete(sKey);
+      deleteActiveSession(activeSessions, sKey);
       await sessionReply(rootId, t('card.action.disconnected', undefined, localeForBot(ds.larkAppId)));
       logger.info(`[${tag(ds)}] Disconnected (adopt) via card button`);
     }
