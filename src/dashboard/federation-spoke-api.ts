@@ -23,8 +23,9 @@ import { getDeploymentIdentity, setDeploymentName } from '../services/deployment
 import { addMembership, listMemberships, removeMembership } from '../services/federation-membership-store.js';
 import type { FederatedBot } from '../services/federation-store.js';
 import { listFederatedDeployments } from '../services/federation-store.js';
-import { ensureDefaultTeam, DEFAULT_TEAM_ID } from '../services/team-store.js';
-import { createInvite } from '../services/invite-store.js';
+import { ensureDefaultTeam, DEFAULT_TEAM_ID, listTeams, createTeam, deleteTeam, getTeam } from '../services/team-store.js';
+import { createInvite, deleteInvitesForTeam } from '../services/invite-store.js';
+import { removeTeamFederation } from '../services/federation-store.js';
 import { loadBotConfigs, registerBot, getBot, type BotConfig } from '../bot-registry.js';
 import { setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
 import { setBotOwner } from '../services/bot-owner-store.js';
@@ -175,10 +176,12 @@ export async function handleFederationSpokeApi(
 ): Promise<boolean> {
   const path = url.pathname;
   const LOCAL = new Set(['/api/team/local', '/api/team/local-invite', '/api/team/rename-deployment', '/api/team/federated-group',
-    '/api/team/identity/start', '/api/team/identity/status', '/api/team/identity/consume', '/api/team/identity/auto-bind']);
+    '/api/team/identity/start', '/api/team/identity/status', '/api/team/identity/consume', '/api/team/identity/auto-bind',
+    '/api/team/hosted']);
   const REMOTE = new Set(['/api/team/join-remote', '/api/team/remote-roster', '/api/team/sync-remote', '/api/team/leave-remote', '/api/team/remote-group']);
   const localBotEdit = path.match(/^\/api\/team\/local-bots\/([^/]+)\/(capability|role)$/);
-  if (!LOCAL.has(path) && !REMOTE.has(path) && !localBotEdit) return false;
+  const hostedDel = path.match(/^\/api\/team\/hosted\/([^/]+)$/);
+  if (!LOCAL.has(path) && !REMOTE.has(path) && !localBotEdit && !hostedDel) return false;
   const dataDir = deps.dataDir ?? config.session.dataDir;
   const fetcher = deps.fetcher ?? fetch;
   const method = req.method ?? 'GET';
@@ -227,7 +230,8 @@ export async function handleFederationSpokeApi(
     // Operator = THIS deployment's bound owner (local initiation). Hub-derived
     // operator (for spoke-initiated /api/federation/group) is handled separately.
     const operatorUnionId = getDeploymentIdentity(dataDir).ownerUnionId;
-    const out = await orchestrateFederatedGroup(dataDir, { name, larkAppIds, operatorUnionId, requestId: randomUUID() }, { createTeamGroup: deps.createTeamGroup, fetcher, live });
+    const teamId = String(body?.teamId ?? '').trim() || DEFAULT_TEAM_ID; // which hosted team's roster gates the selection
+    const out = await orchestrateFederatedGroup(dataDir, { name, larkAppIds, operatorUnionId, requestId: randomUUID(), teamId }, { createTeamGroup: deps.createTeamGroup, fetcher, live });
     jsonRes(res, out.status, out.body);
     return true;
   }
@@ -329,10 +333,45 @@ export async function handleFederationSpokeApi(
     jsonRes(res, 200, { ok: true, deployment: me, suggestedHubUrl, ...buildFederatedRoster(dataDir, DEFAULT_TEAM_ID, botConfigOrder(), undefined, live) });
     return true;
   }
-  if (path === '/api/team/local-invite' && method === 'POST') {
+  // All teams THIS deployment hosts (default + any created), each with its
+  // aggregated roster — the SPA「我的团队」renders one block per team.
+  if (path === '/api/team/hosted' && method === 'GET') {
     ensureDefaultTeam(dataDir);
-    const inv = createInvite(dataDir, DEFAULT_TEAM_ID, getDeploymentIdentity(dataDir).deploymentId);
-    jsonRes(res, 200, { ok: true, code: inv.code, expiresAt: inv.expiresAt });
+    const me = getDeploymentIdentity(dataDir);
+    const suggestedHubUrl = `http://${config.dashboard.externalHost}:${config.dashboard.port}`;
+    const teams = listTeams(dataDir).map(t => ({
+      teamId: t.id, name: t.name, isDefault: t.id === DEFAULT_TEAM_ID,
+      ...buildFederatedRoster(dataDir, t.id, botConfigOrder(), undefined, live),
+    }));
+    jsonRes(res, 200, { ok: true, deployment: me, suggestedHubUrl, teams });
+    return true;
+  }
+  if (path === '/api/team/hosted' && method === 'POST') {
+    let body: any; try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const name = String(body?.name ?? '').trim();
+    if (!name) { jsonRes(res, 400, { ok: false, error: 'name_required' }); return true; }
+    const t = createTeam(dataDir, name);
+    jsonRes(res, 200, { ok: true, teamId: t.id, name: t.name });
+    return true;
+  }
+  if (hostedDel && method === 'DELETE') {
+    const teamId = decodeURIComponent(hostedDel[1]);
+    if (teamId === DEFAULT_TEAM_ID) { jsonRes(res, 400, { ok: false, error: 'cannot_delete_default' }); return true; }
+    if (!getTeam(dataDir, teamId)) { jsonRes(res, 404, { ok: false, error: 'team_not_found' }); return true; }
+    deleteTeam(dataDir, teamId);
+    removeTeamFederation(dataDir, teamId); // drop joined spokes' records for this team
+    deleteInvitesForTeam(dataDir, teamId); // invalidate its outstanding invites
+    jsonRes(res, 200, { ok: true });
+    return true;
+  }
+  // Generate an invite for a hosted team (defaults to the default team).
+  if (path === '/api/team/local-invite' && method === 'POST') {
+    let body: any = {}; try { body = await readBody(req); } catch { /* no body = default team */ }
+    ensureDefaultTeam(dataDir);
+    const teamId = String(body?.teamId ?? '').trim() || DEFAULT_TEAM_ID;
+    if (!getTeam(dataDir, teamId)) { jsonRes(res, 404, { ok: false, error: 'team_not_found' }); return true; }
+    const inv = createInvite(dataDir, teamId, getDeploymentIdentity(dataDir).deploymentId);
+    jsonRes(res, 200, { ok: true, code: inv.code, expiresAt: inv.expiresAt, teamId });
     return true;
   }
   if (path === '/api/team/rename-deployment' && method === 'POST') {

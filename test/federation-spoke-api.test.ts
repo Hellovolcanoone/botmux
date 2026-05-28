@@ -198,6 +198,47 @@ describe('handleFederationSpokeApi', () => {
     expect(iGroup).toBeGreaterThan(iSync); // sync strictly before group
   });
 
+  it('hosted teams: list has default; create adds (roster includes my bots); delete removes; default protected', async () => {
+    writeBots([{ larkAppId: 'cli_a', botOpenId: null, botName: 'A', cliId: 'claude' }]);
+    let res = makeRes();
+    await handleFederationSpokeApi(makeReq('GET', '/api/team/hosted'), res, url('/api/team/hosted'), { dataDir });
+    expect(json(res).ok).toBe(true);
+    expect(json(res).teams.some((t: any) => t.isDefault)).toBe(true);
+    // create
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/hosted', { name: '排障组' }), res, url('/api/team/hosted'), { dataDir });
+    const tid = json(res).teamId; expect(json(res).ok).toBe(true);
+    // appears in list + its roster includes my local bot
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('GET', '/api/team/hosted'), res, url('/api/team/hosted'), { dataDir });
+    const created = json(res).teams.find((t: any) => t.teamId === tid);
+    expect(created?.name).toBe('排障组');
+    expect(created.bots.some((b: any) => b.larkAppId === 'cli_a')).toBe(true);
+    // default delete refused
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('DELETE', '/api/team/hosted/default'), res, url('/api/team/hosted/default'), { dataDir });
+    expect(json(res).error).toBe('cannot_delete_default');
+    // delete created → gone
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('DELETE', '/api/team/hosted/' + tid), res, url('/api/team/hosted/' + tid), { dataDir });
+    expect(json(res).ok).toBe(true);
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('GET', '/api/team/hosted'), res, url('/api/team/hosted'), { dataDir });
+    expect(json(res).teams.some((t: any) => t.teamId === tid)).toBe(false);
+  });
+
+  it('local-invite accepts a teamId; unknown team → 404', async () => {
+    let res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/hosted', { name: 'X' }), res, url('/api/team/hosted'), { dataDir });
+    const tid = json(res).teamId;
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/local-invite', { teamId: tid }), res, url('/api/team/local-invite'), { dataDir });
+    expect(json(res).ok).toBe(true); expect(json(res).teamId).toBe(tid); expect(typeof json(res).code).toBe('string');
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/local-invite', { teamId: 'nope' }), res, url('/api/team/local-invite'), { dataDir });
+    expect(json(res).error).toBe('team_not_found');
+  });
+
   it('federated-group: includes the bound operator (this deployment owner) in invitees', async () => {
     writeBots([{ larkAppId: 'cli_local', botOpenId: null, botName: '本地', cliId: 'claude' }]);
     // bind owner
