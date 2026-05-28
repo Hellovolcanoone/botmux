@@ -2790,6 +2790,17 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     log('Detected root user — injecting IS_SANDBOX=1 for Claude Code');
   }
 
+  // Claude Code 2.1.x：`--resume` 一个「空闲 >70min 且累计 >10 万 token」的会话会弹
+  // 交互式菜单（Resume from summary / full / Don't ask again），botmux 无法导航 →
+  // 进程卡死（issue #62）。把 token 阈值顶到极大让触发门永远命中 `tokens < threshold`
+  // 而 return null → 菜单不弹、按 full session 原样续（走 summary 会触发 /compact，
+  // 破坏 bridge 的会话连续性追踪）。用户显式设了就尊重。注意：该 key 必须同时进
+  // BOTMUX_INJECTED_ENV_KEYS 白名单，否则 tmux backend 不会把它透传进 pane。
+  const claudeResumeTokenThreshold =
+    cfg.cliId === 'claude-code'
+      ? process.env.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD ?? '2147483647'
+      : undefined;
+
   // Predict reattach vs fresh so the log line tells the truth. When a bmx-*
   // tmux session is still alive, TmuxBackend.spawn ignores the bin/args and
   // just `tmux attach-session`s — logging `Spawning: <new bin>` in that case
@@ -2817,6 +2828,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       BOTMUX_LARK_APP_ID: cfg.larkAppId,
       BOTMUX_ROOT_MESSAGE_ID: cfg.rootMessageId,
       ...(injectClaudeSandbox ? { IS_SANDBOX: '1' } : {}),
+      ...(claudeResumeTokenThreshold ? { CLAUDE_CODE_RESUME_TOKEN_THRESHOLD: claudeResumeTokenThreshold } : {}),
     } as unknown as Record<string, string>,
   });
 
