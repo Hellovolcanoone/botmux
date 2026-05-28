@@ -112,60 +112,61 @@ export class CodexBridgeQueue {
       if (!ev.uuid || this.seen.has(ev.uuid)) continue;
       this.seen.add(ev.uuid);
       if (ev.kind === 'user') {
-        // HOL-block drop (codex 0.134.0 active-turn steer): a user event that
-        // arrives while a turn is still collecting with no finalText means
+        // First decide whether this user event is a REAL turn-start: either it
+        // matches the head pending Lark turn's fingerprint (and isn't tooOld),
+        // or — in adopt mode — it synthesises a local turn. Both the HOL-drop
+        // and the actual start key off this decision.
+        const next = this.queue.find(t => !t.started);
+        const tooOld = !!next && next.markTimeMs !== undefined && ev.timestampMs < next.markTimeMs - 5_000;
+        let fingerprintOk = true;
+        if (next?.contentFingerprint) {
+          fingerprintOk = normaliseForFingerprint(ev.text).includes(next.contentFingerprint);
+        }
+        const willStartNext = !!next && !tooOld && fingerprintOk;
+        const willSynthLocal = !willStartNext && this.localTurnsEnabled && ev.timestampMs >= this.localLowerBoundMs - 5_000;
+
+        // HOL-block drop (codex 0.134.0 active-turn steer): when a real new
+        // turn-start arrives while a turn is still collecting with no finalText,
         // codex steered/merged this input into the active turn — it processes
         // both as ONE turn and emits a single combined assistant_final, so the
         // collecting turn will NEVER get its own final. Drop it now, otherwise
         // it sits at the queue head forever and `drainEmittable()` wedges
-        // (started, no finalText → breaks the FIFO scan). Gated on freshness
-        // (event at/after the collecting turn's mark) so a replayed historical
-        // user event can't evict a live collecting turn. Mirrors Claude's
+        // (started, no finalText → breaks the FIFO scan). Gating on "is a real
+        // turn-start" reuses the tooOld/fingerprint freshness already proven for
+        // turn-start, so the same 5s-skew invariant applies to both: a replayed
+        // historical user event is tooOld → won't start a turn → won't evict a
+        // live collecting turn; and a non-matching stray user event (non-adopt)
+        // is ignored rather than treated as a turn boundary. Mirrors Claude's
         // BridgeTurnQueue.handleTurnStart HOL drop (which keys off "no assistant
         // text yet" — the streaming-transcript equivalent of "no finalText").
-        if (
-          this.collecting &&
-          this.collecting.finalText === undefined &&
-          (this.collecting.markTimeMs === undefined || ev.timestampMs >= this.collecting.markTimeMs)
-        ) {
+        if ((willStartNext || willSynthLocal) && this.collecting && this.collecting.finalText === undefined) {
           const idx = this.queue.indexOf(this.collecting);
           if (idx >= 0) this.queue.splice(idx, 1);
           this.collecting = null;
         }
-        const next = this.queue.find(t => !t.started);
-        let consumedNext = false;
-        if (next) {
-          const tooOld = next.markTimeMs !== undefined && ev.timestampMs < next.markTimeMs - 5_000;
-          let fingerprintOk = true;
-          if (next.contentFingerprint) {
-            const userText = normaliseForFingerprint(ev.text);
-            fingerprintOk = userText.includes(next.contentFingerprint);
-          }
-          if (!tooOld && fingerprintOk) {
-            next.started = true;
-            next.sourceSessionId = ev.sourceSessionId;
-            // Anchor the bridge-fallback suppression window to when the turn
-            // ACTUALLY started processing (the transcript user event's
-            // timestamp), not when the worker marked it. With type-ahead the
-            // worker marks turn N+1 immediately after turn N (both at flush
-            // time), but CoCo only writes turn N+1's user event when it
-            // dequeues it — i.e. after turn N's assistant_final. Without this
-            // override the [markTimeMs, nextTurn.markTimeMs) windows are all
-            // bunched at flush time, so turn N's own `botmux send` (which
-            // lands seconds later, after the model replies) falls OUTSIDE its
-            // own window and the fallback isn't suppressed → duplicate emit.
-            // `max` (not bare assignment) keeps the lower bound from ever
-            // moving backwards: a dequeue event can only be at or after the
-            // mark, and the -5s tooOld tolerance must not be able to widen the
-            // window into a previous turn's sends. Mirrors what Claude's
-            // BridgeTurnQueue.handleTurnStart does with eventTimeMs.
-            if (next.markTimeMs === undefined) next.markTimeMs = ev.timestampMs;
-            else next.markTimeMs = Math.max(next.markTimeMs, ev.timestampMs);
-            this.collecting = next;
-            consumedNext = true;
-          }
-        }
-        if (!consumedNext && this.localTurnsEnabled && ev.timestampMs >= this.localLowerBoundMs - 5_000) {
+
+        if (willStartNext) {
+          next!.started = true;
+          next!.sourceSessionId = ev.sourceSessionId;
+          // Anchor the bridge-fallback suppression window to when the turn
+          // ACTUALLY started processing (the transcript user event's
+          // timestamp), not when the worker marked it. With type-ahead the
+          // worker marks turn N+1 immediately after turn N (both at flush
+          // time), but CoCo only writes turn N+1's user event when it
+          // dequeues it — i.e. after turn N's assistant_final. Without this
+          // override the [markTimeMs, nextTurn.markTimeMs) windows are all
+          // bunched at flush time, so turn N's own `botmux send` (which
+          // lands seconds later, after the model replies) falls OUTSIDE its
+          // own window and the fallback isn't suppressed → duplicate emit.
+          // `max` (not bare assignment) keeps the lower bound from ever
+          // moving backwards: a dequeue event can only be at or after the
+          // mark, and the -5s tooOld tolerance must not be able to widen the
+          // window into a previous turn's sends. Mirrors what Claude's
+          // BridgeTurnQueue.handleTurnStart does with eventTimeMs.
+          if (next!.markTimeMs === undefined) next!.markTimeMs = ev.timestampMs;
+          else next!.markTimeMs = Math.max(next!.markTimeMs, ev.timestampMs);
+          this.collecting = next!;
+        } else if (willSynthLocal) {
           // Adopt mode local input: user typed in iTerm, no Lark
           // fingerprint match. Synthesise a local turn so the assistant
           // reply still reaches Lark. Insert AHEAD of any unstarted Lark

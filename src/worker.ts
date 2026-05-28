@@ -2475,11 +2475,12 @@ async function flushPending(): Promise<void> {
       }
       // All structured bridges now drain every pending message in one flush:
       // Claude's BridgeTurnQueue handles `attachment(queued_command)` events
-      // identically to `role:user`, and CoCo/Codex park queued submits in
-      // their own TUI queue (writing the transcript user event only at dequeue
-      // time), so all keep the transcript interleaved and attribute correctly.
-      // We WANT them to drain all pending here so the extras land in the TUI
-      // queue rather than waiting for the next idle.
+      // identically to `role:user`; CoCo parks queued submits in its TUI queue
+      // and writes the user event at dequeue time (transcript stays interleaved);
+      // Codex parks them too but steers them into the active turn (which can
+      // merge into one final), and CodexBridgeQueue's HOL-block-drop attributes
+      // that correctly. We WANT them to drain all pending here so the extras
+      // land in the TUI queue rather than waiting for the next idle.
     }
   } finally {
     isFlushing = false;
@@ -2503,10 +2504,10 @@ function sendToPty(content: string): void {
     send({ type: 'tui_prompt_resolved', selectedText: 'user-override' });
   }
   // See flushPending: type-ahead adapters flush even while the CLI is busy.
-  // Claude attributes `attachment(queued_command)` events identically to
-  // `role:user`, and CoCo/Codex park queued submits in their own TUI queue
-  // (writing the transcript user event only at dequeue time), so all land
-  // type-ahead'd submits in the right turn.
+  // Claude attributes `attachment(queued_command)` identically to `role:user`;
+  // CoCo parks queued submits and writes the user event at dequeue time; Codex
+  // parks them but steers into the active turn — CodexBridgeQueue's
+  // HOL-block-drop attributes the (possibly merged) result correctly.
   const typeAheadAllowed = cliAdapter.supportsTypeAhead;
   if (isPromptReady || isFlushing || typeAheadAllowed) {
     log(`Writing to PTY: "${content.substring(0, 80)}"`);
