@@ -114,10 +114,16 @@ export function getActiveSessionsRegistry(): Map<string, DaemonSession> | undefi
 /**
  * Set a session in the registry AND update the sessionId index.
  * All code paths that add/update sessions MUST use this wrapper.
+ * If the key already has a different sessionId, the old index entry is removed.
  */
 export function setActiveSession(map: Map<string, DaemonSession>, key: string, ds: DaemonSession): void {
+  const prev = map.get(key);
   map.set(key, ds);
   if (sessionIdIndex) {
+    // Clean up old sessionId index if overwriting with a different session
+    if (prev && prev.session.sessionId !== ds.session.sessionId) {
+      sessionIdIndex.delete(prev.session.sessionId);
+    }
     sessionIdIndex.set(ds.session.sessionId, key);
   }
 }
