@@ -45,6 +45,8 @@ import {
   closeSession as closeSessionHelper,
   ensureCliEnv,
   writableTerminalLinkFor,
+  indexSession,
+  unindexSession,
 } from './core/worker-pool.js';
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
@@ -1658,6 +1660,7 @@ async function replyInvalidWorkingDirs(
 
   ds.pendingRepo = false;
   activeSessions.delete(sessionKey(anchor, larkAppId));
+  unindexSession(ds.session.sessionId);
   sessionStore.closeSession(ds.session.sessionId);
   const msg = tr('cmd.repo.working_dir_not_exist', {
     dirs: invalid.map(d => `\`${d}\``).join(', '),
@@ -1783,6 +1786,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
         ownerOpenId: senderOpenId,
         ...cmdPending,
       });
+      indexSession(sessionKey(anchor, larkAppId), session.sessionId);
       // Pass mention-stripped content so /command argument parsing works.
       await handleCommand(cmd, anchor, { ...parsed, content: commandContent }, commandDeps, larkAppId);
       return;
@@ -1874,6 +1878,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     sessionStore.updateSession(ds.session);
   }
   activeSessions.set(sessionKey(anchor, larkAppId), ds);
+  indexSession(sessionKey(anchor, larkAppId), session.sessionId);
 
   // Pinned (oncall binding or inherited from sibling bot): spawn CLI immediately.
   if (pinnedWorkingDir) {
@@ -2262,6 +2267,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       sessionStore.updateSession(newDs.session);
     }
     activeSessions.set(sessionKey(anchor, larkAppId), newDs);
+    indexSession(sessionKey(anchor, larkAppId), session.sessionId);
 
     // Pinned (oncall binding or inherited from peer bot in same thread):
     // spawn CLI immediately, skip repo selection.
@@ -2549,6 +2555,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       // the main fix.
       onChatModeConverted: (chatId, appId) => {
         const key = sessionKey(chatId, appId);
+        const ds = activeSessions.get(key);
+        if (ds) unindexSession(ds.session.sessionId);
         const evicted = activeSessions.delete(key);
         logger.info(`[chat-mode-converted] ${chatId.substring(0, 12)} evicted=${evicted}; worker (if any) keeps running until /close`);
       },

@@ -68,21 +68,40 @@ function requireCallbacks(): WorkerPoolCallbacks {
 // linear-scan by sessionId.
 let activeSessionsRegistry: Map<string, DaemonSession> | undefined;
 
+// Secondary index: sessionId → sessionKey for O(1) lookup
+let sessionIdIndex: Map<string, string> | undefined;
+
 export function setActiveSessionsRegistry(m: Map<string, DaemonSession>): void {
   activeSessionsRegistry = m;
+  sessionIdIndex = new Map();
+  // Build initial index
+  for (const [key, ds] of m) {
+    sessionIdIndex.set(ds.session.sessionId, key);
+  }
 }
 
 export function listActiveSessions(): DaemonSession[] {
   return activeSessionsRegistry ? [...activeSessionsRegistry.values()] : [];
 }
 
-/** Linear-scan lookup of the active-sessions Map by `Session.sessionId`.
- *  The Map's actual key is `sessionKey(rootId, larkAppId)` (composite), so we
- *  cannot use Map.get here. */
+/** O(1) lookup of the active-sessions Map by `Session.sessionId` using secondary index. */
 export function findActiveBySessionId(sessionId: string): DaemonSession | undefined {
-  if (!activeSessionsRegistry) return undefined;
-  for (const s of activeSessionsRegistry.values()) if (s.session.sessionId === sessionId) return s;
-  return undefined;
+  if (!activeSessionsRegistry || !sessionIdIndex) return undefined;
+  const key = sessionIdIndex.get(sessionId);
+  if (!key) return undefined;
+  return activeSessionsRegistry.get(key);
+}
+
+/** Update sessionId index when a session is added/updated. */
+export function indexSession(key: string, sessionId: string): void {
+  if (!sessionIdIndex) return;
+  sessionIdIndex.set(sessionId, key);
+}
+
+/** Remove sessionId from index when a session is deleted. */
+export function unindexSession(sessionId: string): void {
+  if (!sessionIdIndex) return;
+  sessionIdIndex.delete(sessionId);
 }
 
 /** Direct access to the active-sessions Map. Reserved for callers that need
@@ -1432,16 +1451,26 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
       case 'screen_update': {
         if (!ds.workerPort) break;
         const prevStatus = ds.lastScreenStatus;
+        const prevContent = ds.lastScreenContent;
         updateUsageLimitState(ds, msg.usageLimit);
+
+        // Compute new status before updating state
+        const newStatus = (msg.usageLimit ?? ds.usageLimit) ? 'limited' : msg.status;
+        const contentChanged = msg.content !== prevContent;
+        const statusChanged = prevStatus !== newStatus;
+
+        // Skip if nothing changed (dedup optimization)
+        if (!contentChanged && !statusChanged) break;
+
         ds.lastScreenContent = msg.content;
-        ds.lastScreenStatus = (msg.usageLimit ?? ds.usageLimit) ? 'limited' : msg.status;
+        ds.lastScreenStatus = newStatus;
 
         // Dashboard: publish a patch only when status truly transitioned, so
         // SSE clients reflect real state changes (starting → working → idle)
         // without flooding on every PTY tick. The screen analyzer is the
         // upstream debouncer — by the time we get here, status flips are
         // already coarse-grained.
-        if (prevStatus !== ds.lastScreenStatus) {
+        if (statusChanged) {
           dashboardEventBus.publish({
             type: 'session.update',
             body: {
@@ -1516,11 +1545,9 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
               ds.streamCardId = undefined;
               persistStreamCardState(ds);
             });
-        } else {
+        } else if (statusChanged) {
           // Same turn — PATCH only on status change. Image PATCHes go through
           // the screenshot_uploaded path; text is no longer a card body mode.
-          const statusChanged = prevStatus !== ds.lastScreenStatus;
-          if (!statusChanged) break;
           const cardJson = buildStreamingCard(
             ds.session.sessionId,
             sessionAnchorId(ds),
