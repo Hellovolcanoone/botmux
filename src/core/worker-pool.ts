@@ -111,6 +111,30 @@ export function getActiveSessionsRegistry(): Map<string, DaemonSession> | undefi
   return activeSessionsRegistry;
 }
 
+/**
+ * Set a session in the registry AND update the sessionId index.
+ * All code paths that add/update sessions MUST use this wrapper.
+ */
+export function setActiveSession(map: Map<string, DaemonSession>, key: string, ds: DaemonSession): void {
+  map.set(key, ds);
+  if (sessionIdIndex) {
+    sessionIdIndex.set(ds.session.sessionId, key);
+  }
+}
+
+/**
+ * Delete a session from the registry AND remove it from the sessionId index.
+ * All code paths that remove sessions MUST use this wrapper.
+ */
+export function deleteActiveSession(map: Map<string, DaemonSession>, key: string): boolean {
+  const ds = map.get(key);
+  if (!ds) return false;
+  if (sessionIdIndex) {
+    sessionIdIndex.delete(ds.session.sessionId);
+  }
+  return map.delete(key);
+}
+
 // ─── "Real relayable session" predicate ─────────────────────────────────────
 
 /**
@@ -845,7 +869,9 @@ export async function closeSession(
   let killedLive = false;
   if (ds) {
     killWorker(ds);
-    activeSessionsRegistry?.delete(sessionKey(sessionAnchorId(ds), ds.larkAppId));
+    if (activeSessionsRegistry) {
+      deleteActiveSession(activeSessionsRegistry, sessionKey(sessionAnchorId(ds), ds.larkAppId));
+    }
     killedLive = true;
     if (!ds.exitEventEmitted) {
       ds.exitEventEmitted = true;
@@ -912,7 +938,7 @@ export async function setActiveSessionSafe(
     );
     await closeSession(prev.session.sessionId);
   }
-  map.set(key, ds);
+  setActiveSession(map, key, ds);
 }
 
 // ─── Session transfer (cross-chat relay) ────────────────────────────────────
@@ -1080,7 +1106,9 @@ export async function transferSession(
   // Detach worker — TmuxBackend.kill() does NOT destroy the tmux session, so
   // the CLI process and its rolling jsonl continue running.
   kw(ds);
-  activeSessionsRegistry?.delete(sessionKey(oldAnchor, ds.larkAppId));
+  if (activeSessionsRegistry) {
+    deleteActiveSession(activeSessionsRegistry, sessionKey(oldAnchor, ds.larkAppId));
+  }
 
   // Rewrite routing fields. Target chat is always chat-scope: leader posts a
   // notification message (M1) used as `targetRootMessageId` for trace, but
@@ -1452,15 +1480,17 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         if (!ds.workerPort) break;
         const prevStatus = ds.lastScreenStatus;
         const prevContent = ds.lastScreenContent;
+        const prevUsageLimit = ds.usageLimit;
         updateUsageLimitState(ds, msg.usageLimit);
 
         // Compute new status before updating state
         const newStatus = (msg.usageLimit ?? ds.usageLimit) ? 'limited' : msg.status;
         const contentChanged = msg.content !== prevContent;
         const statusChanged = prevStatus !== newStatus;
+        const usageLimitChanged = JSON.stringify(prevUsageLimit) !== JSON.stringify(ds.usageLimit);
 
         // Skip if nothing changed (dedup optimization)
-        if (!contentChanged && !statusChanged) break;
+        if (!contentChanged && !statusChanged && !usageLimitChanged) break;
 
         ds.lastScreenContent = msg.content;
         ds.lastScreenStatus = newStatus;
@@ -1809,13 +1839,25 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
     // fires first wins, the other's emit is suppressed.
     if (!ds.exitEventEmitted) {
       ds.exitEventEmitted = true;
-      dashboardEventBus.publish({
-        type: 'session.exited',
-        body: {
-          sessionId: ds.session.sessionId,
-          reason: code === 0 ? 'graceful' : `exit_code_${code}`,
-        },
-      });
+      if (ds.hibernated) {
+        // Hibernation is not a real exit — session is preserved for resume
+        dashboardEventBus.publish({
+          type: 'session.hibernated',
+          body: {
+            sessionId: ds.session.sessionId,
+            reason: 'idle',
+          },
+        });
+        ds.hibernated = false;  // Reset flag for next wake
+      } else {
+        dashboardEventBus.publish({
+          type: 'session.exited',
+          body: {
+            sessionId: ds.session.sessionId,
+            reason: code === 0 ? 'graceful' : `exit_code_${code}`,
+          },
+        });
+      }
     }
   });
 }

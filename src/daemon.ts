@@ -47,6 +47,8 @@ import {
   writableTerminalLinkFor,
   indexSession,
   unindexSession,
+  setActiveSession,
+  deleteActiveSession,
 } from './core/worker-pool.js';
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
@@ -1659,8 +1661,7 @@ async function replyInvalidWorkingDirs(
   if (invalid.length === 0) return false;
 
   ds.pendingRepo = false;
-  activeSessions.delete(sessionKey(anchor, larkAppId));
-  unindexSession(ds.session.sessionId);
+  deleteActiveSession(activeSessions, sessionKey(anchor, larkAppId));
   sessionStore.closeSession(ds.session.sessionId);
   const msg = tr('cmd.repo.working_dir_not_exist', {
     dirs: invalid.map(d => `\`${d}\``).join(', '),
@@ -1770,7 +1771,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
         cmdPending = { pendingRepo: true, pendingPrompt: '', workingDir: pinnedWorkingDir };
       }
       sessionStore.updateSession(session);
-      activeSessions.set(sessionKey(anchor, larkAppId), {
+      setActiveSession(activeSessions, sessionKey(anchor, larkAppId), {
         session,
         worker: null,
         workerPort: null,
@@ -1786,7 +1787,6 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
         ownerOpenId: senderOpenId,
         ...cmdPending,
       });
-      indexSession(sessionKey(anchor, larkAppId), session.sessionId);
       // Pass mention-stripped content so /command argument parsing works.
       await handleCommand(cmd, anchor, { ...parsed, content: commandContent }, commandDeps, larkAppId);
       return;
@@ -1877,8 +1877,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     ds.session.workingDir = pinnedWorkingDir;
     sessionStore.updateSession(ds.session);
   }
-  activeSessions.set(sessionKey(anchor, larkAppId), ds);
-  indexSession(sessionKey(anchor, larkAppId), session.sessionId);
+  setActiveSession(activeSessions, sessionKey(anchor, larkAppId), ds);
 
   // Pinned (oncall binding or inherited from sibling bot): spawn CLI immediately.
   if (pinnedWorkingDir) {
@@ -2266,8 +2265,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       newDs.session.workingDir = pinnedWorkingDir;
       sessionStore.updateSession(newDs.session);
     }
-    activeSessions.set(sessionKey(anchor, larkAppId), newDs);
-    indexSession(sessionKey(anchor, larkAppId), session.sessionId);
+    setActiveSession(activeSessions, sessionKey(anchor, larkAppId), newDs);
 
     // Pinned (oncall binding or inherited from peer bot in same thread):
     // spawn CLI immediately, skip repo selection.
@@ -2555,9 +2553,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       // the main fix.
       onChatModeConverted: (chatId, appId) => {
         const key = sessionKey(chatId, appId);
-        const ds = activeSessions.get(key);
-        if (ds) unindexSession(ds.session.sessionId);
-        const evicted = activeSessions.delete(key);
+        const evicted = deleteActiveSession(activeSessions, key);
         logger.info(`[chat-mode-converted] ${chatId.substring(0, 12)} evicted=${evicted}; worker (if any) keeps running until /close`);
       },
     });
@@ -2579,6 +2575,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // ─── Session hibernation: kill idle workers to save resources ──────────────
   // Sessions stay in activeSessions but worker processes are killed after
   // config.session.hibernateAfterMs of inactivity. New messages auto-resume.
+  // Only hibernate sessions that are truly idle (not working, not adopted, not workflow).
   const hibernateAfterMs = config.session.hibernateAfterMs;
   const hibernateCheckIntervalMs = config.session.hibernateCheckIntervalMs;
   let hibernateTimer: ReturnType<typeof setInterval> | undefined;
@@ -2586,10 +2583,23 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     const checkHibernate = () => {
       const now = Date.now();
       for (const [key, ds] of activeSessions) {
+        // Skip sessions without workers or already killed
         if (!ds.worker || ds.worker.killed) continue;
-        const idleMs = now - ds.lastMessageAt;
+
+        // Skip sessions that are actively working or in special states
+        if (ds.lastScreenStatus === 'working' || ds.lastScreenStatus === 'analyzing') continue;
+        if (ds.lastScreenStatus === 'limited') continue;  // waiting for usage limit retry
+
+        // Skip adopted sessions (they bridge to external CLIs)
+        if (ds.adoptedFrom) continue;
+
+        // Calculate idle time based on last activity
+        const lastActivity = Math.max(ds.lastMessageAt, ds.spawnedAt);
+        const idleMs = now - lastActivity;
+
         if (idleMs > hibernateAfterMs) {
-          logger.info(`[${tag(ds)}] Hibernating session (idle ${Math.round(idleMs / 1000)}s > ${Math.round(hibernateAfterMs / 1000)}s)`);
+          logger.info(`[${tag(ds)}] Hibernating session (idle ${Math.round(idleMs / 1000)}s > ${Math.round(hibernateAfterMs / 1000)}s, status=${ds.lastScreenStatus})`);
+          ds.hibernated = true;  // Mark as hibernated so worker exit publishes session.hibernated instead of session.exited
           killWorker(ds);
         }
       }

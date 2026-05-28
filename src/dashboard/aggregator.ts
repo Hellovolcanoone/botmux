@@ -33,6 +33,11 @@ export class Aggregator {
         if (cur) this.sessions.set(ev.body.sessionId, { ...cur, status: 'closed' });
         break;
       }
+      case 'session.hibernated': {
+        const cur = this.sessions.get(ev.body.sessionId);
+        if (cur) this.sessions.set(ev.body.sessionId, { ...cur, status: 'hibernated' });
+        break;
+      }
       case 'schedule.created':
         this.schedules.set((ev.body.schedule as Sched).id, ev.body.schedule as Sched);
         break;

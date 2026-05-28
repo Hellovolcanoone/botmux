@@ -97,6 +97,10 @@ export interface DaemonSession {
    *  (closeSession) and the worker-process exit handler may try to publish;
    *  this guard prevents double-counting on the dashboard side. */
   exitEventEmitted?: boolean;
+  /** Flag set to true when a session is hibernated (worker killed to save resources
+   *  but session preserved). Worker exit handler checks this flag and publishes
+   *  session.hibernated instead of session.exited. */
+  hibernated?: boolean;
   /** Present when this session was created via /adopt (shared observation mode). */
   adoptedFrom?: {
     tmuxTarget: string;       // e.g. "0:2.0" — user's original tmux pane

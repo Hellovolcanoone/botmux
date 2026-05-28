@@ -6,6 +6,7 @@ export type DashboardEvent =
   | { type: 'session.spawned';   body: { session: any /* SessionRow */ } }
   | { type: 'session.update';    body: { sessionId: string; patch: Record<string, any> } }
   | { type: 'session.exited';    body: { sessionId: string; reason?: string } }
+  | { type: 'session.hibernated'; body: { sessionId: string; reason?: string } }
   | { type: 'schedule.created';  body: { schedule: any /* ScheduleRow */ } }
   | { type: 'schedule.updated';  body: { id: string; patch: Record<string, any> } }
   | { type: 'schedule.deleted';  body: { id: string } }

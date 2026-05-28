@@ -25,6 +25,9 @@ class Store {
     } else if (type === 'session.exited') {
       const cur = this.sessions.get(body.sessionId);
       if (cur) this.sessions.set(body.sessionId, { ...cur, status: 'closed' });
+    } else if (type === 'session.hibernated') {
+      const cur = this.sessions.get(body.sessionId);
+      if (cur) this.sessions.set(body.sessionId, { ...cur, status: 'hibernated' });
     } else if (type === 'schedule.created') {
       this.schedules.set(body.schedule.id, body.schedule);
     } else if (type === 'schedule.updated') {
@@ -56,7 +59,7 @@ export async function bootstrap() {
 
   const es = new EventSource('/events');
   const types = [
-    'session.spawned', 'session.update', 'session.exited',
+    'session.spawned', 'session.update', 'session.exited', 'session.hibernated',
     'schedule.created', 'schedule.updated', 'schedule.deleted',
     'schedule.fired', 'heartbeat',
   ];

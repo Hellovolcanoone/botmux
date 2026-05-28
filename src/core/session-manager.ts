@@ -11,7 +11,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as messageQueue from '../services/message-queue.js';
 import { downloadMessageResource, listChatBotMembers } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
-import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe } from './worker-pool.js';
+import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, setActiveSession } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
@@ -770,7 +770,7 @@ export function resumeSession(
   };
 
   messageQueue.ensureQueue(anchor);
-  activeSessions.set(key, ds);
+  setActiveSession(activeSessions, key, ds);
   logger.info(`Resumed session ${sessionId.substring(0, 8)} (scope: ${scope}, anchor: ${anchor.substring(0, 12)})`);
   return { ok: true, ds };
 }
@@ -945,7 +945,7 @@ export async function executeScheduledTask(
     hasHistory: isContinuation,
     workingDir: task.workingDir,
   };
-  activeSessions.set(sessionKey(anchor, larkAppId), ds);
+  setActiveSession(activeSessions, sessionKey(anchor, larkAppId), ds);
   rememberLastCliInput(ds, task.prompt, prompt);
   forkWorker(ds, prompt);
 

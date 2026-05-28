@@ -46,7 +46,7 @@ vi.mock('../src/im/lark/client.js', () => ({
 const forkWorkerSpy = vi.fn();
 const killWorkerSpy = vi.fn();
 
-import { transferSession, setActiveSessionsRegistry, setActiveSessionSafe } from '../src/core/worker-pool.js';
+import { transferSession, setActiveSessionsRegistry, setActiveSessionSafe, setActiveSession } from '../src/core/worker-pool.js';
 import * as sessionStore from '../src/services/session-store.js';
 import { dashboardEventBus } from '../src/core/dashboard-events.js';
 import { sessionKey } from '../src/core/types.js';
@@ -120,7 +120,7 @@ describe('transferSession', () => {
     // through, or a future caller passing through a raw chatType string).
     // The runtime check inside transferSession must catch it.
     const ds = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target', 'p2p' as any);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe('target_chat_type_unsupported');
@@ -138,7 +138,7 @@ describe('transferSession', () => {
   it('returns adopt_not_relayable when source session was attached via /adopt', async () => {
     const adoptDs = makeDs();
     adoptDs.session.adoptedFrom = { tmuxTarget: '0:2.0', originalCliPid: 12345, cwd: '/tmp/proj' };
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), adoptDs);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), adoptDs);
 
     const r = await callTransfer(adoptDs.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(false);
@@ -150,7 +150,7 @@ describe('transferSession', () => {
 
   it('returns same_chat when target chatId equals current chatId', async () => {
     const ds = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
     const r = await callTransfer(ds.session.sessionId, 'oc_source', 'om_target_root');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe('same_chat');
@@ -180,7 +180,7 @@ describe('transferSession', () => {
         lastCliInput: undefined as any,
       },
     });
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), scratch);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), scratch);
 
     const r = await callTransfer(scratch.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(false);
@@ -193,7 +193,7 @@ describe('transferSession', () => {
   it('rewrites chatId, rootMessageId, scope, chatType in both ds and session', async () => {
     const ds = makeDs();
     // thread-scope source: key is rootMessageId-based
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
 
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(true);
@@ -210,7 +210,7 @@ describe('transferSession', () => {
 
   it('clears card state pinned to the source chat', async () => {
     const ds = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
 
     await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
 
@@ -225,7 +225,7 @@ describe('transferSession', () => {
   it('rotates activeSessions key from old anchor to new chatId', async () => {
     const ds = makeDs();
     const oldKey = sessionKey('om_source_root', 'cli_app_test');
-    registry.set(oldKey, ds);
+    setActiveSession(registry, oldKey, ds);
 
     await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
 
@@ -237,7 +237,7 @@ describe('transferSession', () => {
 
   it('persists session record via sessionStore.updateSession', async () => {
     const ds = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
 
     await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
 
@@ -249,7 +249,7 @@ describe('transferSession', () => {
 
   it('publishes a dashboard session.update event reflecting the transfer', async () => {
     const ds = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
 
     await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
 
@@ -269,7 +269,7 @@ describe('transferSession', () => {
 
   it('calls forkWorker with empty prompt + resume=true to re-attach tmux', async () => {
     const ds = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
 
     await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
 
@@ -288,7 +288,7 @@ describe('transferSession', () => {
     // by /relay --create's peer coordinator.
     const fakeWorker = { killed: false } as any;
     const ds = makeDs({ worker: fakeWorker, lastScreenStatus: 'working' });
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
 
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(false);
@@ -304,7 +304,7 @@ describe('transferSession', () => {
     // Refuse so the user finishes setup in the source chat first instead
     // of producing an empty new-chat session.
     const ds = makeDs({ pendingRepo: true });
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
 
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(false);
@@ -315,7 +315,7 @@ describe('transferSession', () => {
 
   it('refuses with target_chat_has_session when target chat already has a chat-scope session for this bot', async () => {
     const movingDs = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), movingDs);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), movingDs);
 
     // Pre-existing chat-scope session in the target chat for the same bot
     // with a real worker — this is what should trigger the conflict.
@@ -331,7 +331,7 @@ describe('transferSession', () => {
       chatId: 'oc_target',
       scope: 'chat',
     });
-    registry.set(sessionKey('oc_target', 'cli_app_test'), existingDs);
+    setActiveSession(registry, sessionKey('oc_target', 'cli_app_test'), existingDs);
 
     const r = await callTransfer(movingDs.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(false);
@@ -352,7 +352,7 @@ describe('transferSession', () => {
     // toast). The fix: close the scratch in-line so the slot is properly
     // freed before we set the relayed session at the same key.
     const movingDs = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), movingDs);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), movingDs);
 
     const scratchDs = makeDs({
       session: {
@@ -367,7 +367,7 @@ describe('transferSession', () => {
       chatId: 'oc_target',
       scope: 'chat',
     });
-    registry.set(sessionKey('oc_target', 'cli_app_test'), scratchDs);
+    setActiveSession(registry, sessionKey('oc_target', 'cli_app_test'), scratchDs);
     // getSession is consulted by closeSession to decide whether to mark
     // the store row closed — return a status='active' record so the store
     // close path fires.
@@ -385,7 +385,7 @@ describe('transferSession', () => {
 
   it('allows transfer when target chat has only thread-scope sessions (no chat-scope collision)', async () => {
     const movingDs = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), movingDs);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), movingDs);
 
     // Same chat as target, but rooted at a different thread — anchor is
     // rootMessageId, so sessionKey doesn't collide.
@@ -400,7 +400,7 @@ describe('transferSession', () => {
       chatId: 'oc_target',
       scope: 'thread',
     });
-    registry.set(sessionKey('om_other_thread_root', 'cli_app_test'), otherThreadDs);
+    setActiveSession(registry, sessionKey('om_other_thread_root', 'cli_app_test'), otherThreadDs);
 
     const r = await callTransfer(movingDs.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(true);
@@ -414,7 +414,7 @@ describe('transferSession', () => {
     // an inert snapshot before the transfer proceeds. This test pins that
     // patch invocation so a refactor can't silently drop it.
     const ds = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
     updateMessageMock.mockClear();
 
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
@@ -442,7 +442,7 @@ describe('transferSession', () => {
     // noisy, and not useful as a historical snapshot (王皓 caught this).
     // The frozen card stays minimal: header + "已搬迁" notice text only.
     const ds = makeDs({ currentImageKey: undefined, lastScreenContent: 'hello from tmux\n$ idle' });
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
     updateMessageMock.mockClear();
 
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
@@ -461,7 +461,7 @@ describe('transferSession', () => {
     // Freeze is best-effort — Lark may reject the patch (card withdrawn,
     // expired). The transfer itself must not depend on it.
     const ds = makeDs();
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
     updateMessageMock.mockRejectedValueOnce(new Error('card withdrawn'));
 
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
@@ -473,7 +473,7 @@ describe('transferSession', () => {
     const ds = makeDs({ streamCardId: undefined, session: {
       ...makeDs().session, streamCardId: undefined,
     }});
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
     updateMessageMock.mockClear();
 
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
@@ -484,7 +484,7 @@ describe('transferSession', () => {
   it('proceeds when worker is in limited state (parked on usage-limit prompt)', async () => {
     const fakeWorker = { killed: false } as any;
     const ds = makeDs({ worker: fakeWorker, lastScreenStatus: 'limited' });
-    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    setActiveSession(registry, sessionKey('om_source_root', 'cli_app_test'), ds);
 
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(true);
@@ -547,7 +547,7 @@ describe('setActiveSessionSafe', () => {
     );
 
     const key = sessionKey('oc_c', 'cli_app_test');
-    registry.set(key, prevDs);
+    setActiveSession(registry, key, prevDs);
 
     await setActiveSessionSafe(registry, key, newDs);
 
@@ -558,7 +558,7 @@ describe('setActiveSessionSafe', () => {
   it('is a no-op when the key already holds the same session instance', async () => {
     const ds = makeSimpleDs('only-sess');
     const key = sessionKey('oc_c', 'cli_app_test');
-    registry.set(key, ds);
+    setActiveSession(registry, key, ds);
 
     await setActiveSessionSafe(registry, key, ds);
 
