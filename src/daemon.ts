@@ -2576,6 +2576,29 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   scheduler.setOwnerFilter(cfg.larkAppId, idx === 0);
   scheduler.startScheduler();
 
+  // ─── Session hibernation: kill idle workers to save resources ──────────────
+  // Sessions stay in activeSessions but worker processes are killed after
+  // config.session.hibernateAfterMs of inactivity. New messages auto-resume.
+  const hibernateAfterMs = config.session.hibernateAfterMs;
+  const hibernateCheckIntervalMs = config.session.hibernateCheckIntervalMs;
+  let hibernateTimer: ReturnType<typeof setInterval> | undefined;
+  if (hibernateAfterMs > 0) {
+    const checkHibernate = () => {
+      const now = Date.now();
+      for (const [key, ds] of activeSessions) {
+        if (!ds.worker || ds.worker.killed) continue;
+        const idleMs = now - ds.lastMessageAt;
+        if (idleMs > hibernateAfterMs) {
+          logger.info(`[${tag(ds)}] Hibernating session (idle ${Math.round(idleMs / 1000)}s > ${Math.round(hibernateAfterMs / 1000)}s)`);
+          killWorker(ds);
+        }
+      }
+    };
+    hibernateTimer = setInterval(checkHibernate, hibernateCheckIntervalMs);
+    hibernateTimer.unref?.();
+    logger.info(`Session hibernation enabled: idle threshold ${Math.round(hibernateAfterMs / 1000)}s, check every ${Math.round(hibernateCheckIntervalMs / 1000)}s`);
+  }
+
   // Graceful shutdown. Sends SIGTERM (or `{type:'close'}` IPC via killWorker)
   // to every worker, then waits up to SHUTDOWN_GRACE_MS for them to exit
   // before sending SIGKILL to stragglers. Without the wait, daemon
@@ -2591,6 +2614,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     shuttingDown = true;
     logger.info(`Daemon shutting down... (active: ${getActiveCount()})`);
     scheduler.stopScheduler();
+    if (hibernateTimer) clearInterval(hibernateTimer);
     for (const watcher of workflowEventWatchers.values()) watcher.close();
     workflowEventWatchers.clear();
     workflowRuns.clear();

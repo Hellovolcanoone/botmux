@@ -42,6 +42,11 @@ export const config = {
   },
   session: {
     dataDir: process.env.SESSION_DATA_DIR ?? new URL('../data', import.meta.url).pathname,
+    /** Idle time (ms) before hibernating a session (killing worker but keeping session).
+     *  Set to 0 to disable. Default: 30 minutes. */
+    hibernateAfterMs: Number(process.env.SESSION_HIBERNATE_AFTER_MS) || 30 * 60 * 1000,
+    /** How often (ms) to check for idle sessions. Default: 5 minutes. */
+    hibernateCheckIntervalMs: Number(process.env.SESSION_HIBERNATE_CHECK_INTERVAL_MS) || 5 * 60 * 1000,
   },
   send: {
     /** @ hard-gate: every model-initiated `botmux send` reply must explicitly
