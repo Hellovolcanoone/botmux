@@ -745,6 +745,18 @@ export async function resumeSession(
   // `cliId` nor `lastCliInput` (those are only written once a real CLI ran).
   // A real conflict (either marker present) still blocks; scratch-only
   // conflicts get closed so they stop occupying the anchor on disk.
+  //
+  // CAVEAT — this path canNOT honor the pendingRepo carve-out the in-memory
+  // branch above applies: `pendingRepo` is a runtime DaemonSession flag that
+  // is never persisted to the store, so a pendingRepo session that's only
+  // visible here as a disk row (not in our Map) looks identical to a scratch
+  // and would be closed. Safe under the production topology (one daemon per
+  // bot): this scan is larkAppId-scoped to OUR bot, and our bot's live
+  // pendingRepo sessions are always in our Map (handled by the in-memory
+  // branch first). A disk-only active row with no CLI markers for our own
+  // bot is therefore a genuine scratch or a crash leftover — closing it is
+  // correct either way. The two branches are intentionally NOT identical;
+  // don't "unify" them by reading pendingRepo here (it isn't there to read).
   const conflicts = sessionStore.listSessions().filter(s =>
     s.sessionId !== sessionId
     && s.status === 'active'

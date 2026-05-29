@@ -33,25 +33,44 @@ vi.mock('../src/services/frozen-card-store.js', () => ({
   deleteFrozenCards: vi.fn(),
 }));
 
+// Shared holder so the mocked worker-pool can reach the SAME activeSessions
+// Map a test passes into resumeSession. In production, worker-pool's
+// closeSession evicts from the daemon-registered activeSessionsRegistry,
+// which IS the same Map object resumeSession receives — so the mock here
+// faithfully reproduces "closeSession deletes the entry from the live Map"
+// rather than relying on the downstream set() overwrite to hide the scratch.
+const wp = vi.hoisted(() => ({ registry: null as Map<string, any> | null }));
+
 vi.mock('../src/core/worker-pool.js', () => ({
   forkWorker: vi.fn(),
   forkAdoptWorker: vi.fn(),
   killStalePids: vi.fn(),
   getCurrentCliVersion: vi.fn(() => '1.0.0-test'),
   restoreUsageLimitRuntimeState: vi.fn(),
-  // Stub: bypass the closeSession-on-collision path and just set the entry.
-  // The collision-detection behavior is exercised in transfer-session.test.ts.
+  // Faithful: mirror the real setActiveSessionSafe — if a DIFFERENT entry
+  // already holds the key, evict it (close) before setting, instead of a
+  // bare overwrite that would mask a lingering occupant.
   setActiveSessionSafe: vi.fn(async (map: Map<string, any>, key: string, ds: any) => {
+    const prev = map.get(key);
+    if (prev && prev !== ds) {
+      for (const [k, v] of map) { if (v === prev) { map.delete(k); break; } }
+    }
     map.set(key, ds);
   }),
   // Real predicate (same logic as production): worker OR persisted CLI markers.
   isRelayableRealSession: (ds: any) =>
     !!ds?.worker || !!ds?.session?.cliId || !!ds?.session?.lastCliInput,
-  // closeSession is invoked by resumeSession to evict a scratch occupant.
-  // Stub it to mark the store row closed + drop from the passed-in map is
-  // not possible here (no map ref), so just mark the store record closed via
-  // sessionStore — tests assert on the store / resume outcome.
+  // Faithful closeSession: actually evict the entry from the live Map (by
+  // sessionId, as the real one does via activeSessionsRegistry) AND mark the
+  // persisted row closed — so tests verify the eviction MECHANISM, not just
+  // the end state.
   closeSession: vi.fn(async (sid: string) => {
+    const reg = wp.registry;
+    if (reg) {
+      for (const [k, v] of reg) {
+        if (v?.session?.sessionId === sid) { reg.delete(k); break; }
+      }
+    }
     const store = await import('../src/services/session-store.js');
     const s = store.getSession(sid);
     if (s && s.status !== 'closed') store.closeSession(sid);
@@ -100,7 +119,7 @@ vi.mock('../src/core/session-activity.js', () => ({
 }));
 
 import { restoreActiveSessions, resumeSession } from '../src/core/session-manager.js';
-import { restoreUsageLimitRuntimeState } from '../src/core/worker-pool.js';
+import { restoreUsageLimitRuntimeState, closeSession } from '../src/core/worker-pool.js';
 import * as sessionStore from '../src/services/session-store.js';
 import { sessionKey } from '../src/core/types.js';
 import type { DaemonSession } from '../src/core/types.js';
@@ -108,6 +127,8 @@ import type { DaemonSession } from '../src/core/types.js';
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'session-resume-test-'));
   sessionStore.init();
+  wp.registry = null;
+  vi.mocked(closeSession).mockClear();
 });
 
 afterEach(() => {
@@ -234,10 +255,18 @@ describe('resumeSession', () => {
         worker: null, pendingRepo: false, chatId: 'oc_scratch_chat', scope: 'chat', larkAppId: 'app_test',
       };
       map.set(key, scratch);
+      // Wire the shared registry so the faithful closeSession mock evicts from
+      // THIS map — lets us assert the eviction mechanism, not just end state.
+      wp.registry = map;
 
       const r = await resumeSession(closed.sessionId, map);
       expect(r.ok).toBe(true);
-      // The resumed session now owns the anchor (scratch was evicted + replaced).
+      // Eviction mechanism: closeSession was actually invoked on the scratch
+      // (not silently overwritten by the downstream set).
+      expect(closeSession).toHaveBeenCalledWith('scratch-2716f0f8');
+      // The scratch is gone from the live Map…
+      expect([...map.values()].some(v => v.session.sessionId === 'scratch-2716f0f8')).toBe(false);
+      // …and the resumed session now owns the anchor.
       if (r.ok) expect(map.get(key)!.session.sessionId).toBe(closed.sessionId);
     });
 
