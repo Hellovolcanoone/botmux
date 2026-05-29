@@ -1359,6 +1359,15 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
             writableTerminalLinkFor(ds),
           );
           ds.streamCardId = await cb.sessionReply(sessionAnchorId(ds), streamCardJson, 'interactive', ds.larkAppId);
+          // This card IS the current turn's live card — clear the new-turn flag
+          // so subsequent screen_updates PATCH it (starting → working) instead of
+          // POSTing a second card. Without this, a re-fork that happens while
+          // streamCardPending is true (new turn + worker had exited) leaves the
+          // flag set, the next screen_update takes the new-card POST branch, and
+          // this "starting" card is orphaned (never entered frozenCards, so
+          // recallFrozenCards can't withdraw it). Mirrors the screen_update POST
+          // branch which clears the flag after posting.
+          ds.streamCardPending = false;
           persistStreamCardState(ds);
           // Re-sync worker's display mode (it starts fresh in 'hidden')
           if (ds.worker && ds.displayMode && ds.displayMode !== 'hidden') {
