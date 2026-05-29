@@ -942,6 +942,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           }
         }
 
+        // 主动开工 — 场景②: capture the genuine routing shape NOW, before the
+        // `/t` override below can mutate a 普通群 chat-scope into thread-scope.
+        // decideRouting only yields {thread, anchor=messageId} for a real
+        // 话题群 new-topic seed; a non-@ `/t …` in a 普通群 must NOT count as one
+        // (FR-7), so auto-topic eligibility keys off the pre-override values.
+        const autoTopicSeedScope = routing.scope;
+        const autoTopicSeedAnchor = routing.anchor;
+
         // /t / /topic in 普通群: flip routing to thread-scope so the bot's
         // first reply seeds a fresh Lark thread, even if a chat-scope session
         // is currently active in this chat.
@@ -1006,8 +1014,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
               // the original ignore. Sender is intentionally not gated (D4).
               const autoTopic = shouldAutoStartOnNewTopic({
                 enabled: getBot(larkAppId).config.autoStartOnNewTopic === true,
-                scope: routing.scope,
-                anchor: routing.anchor,
+                scope: autoTopicSeedScope,
+                anchor: autoTopicSeedAnchor,
                 messageId,
                 chatType,
                 ownsSession,

@@ -1929,11 +1929,15 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
 // 主动开工 — 场景①: in-flight lock so two near-simultaneous `bot.added` events
 // for the same chat (reconnect replay / double-delivery) can't both spawn —
 // claimed synchronously before the first await, released in `finally` (FR-13).
-// We deliberately do NOT keep a process-lifetime "already started" set: that
-// would block a legitimate re-add after the user `/close`s the session. While a
-// session is live, `activeSessions` is the dedup; once closed, re-adding the
-// bot starts fresh.
 const autoStartJoinInFlight = new Set<string>();
+// 主动开工 — 场景①: `${appId}:${chatId}` → the activeSessions key of the
+// auto-started join session. Needed because in a 话题群 the session is keyed at
+// the seed message id (not chatId), so a plain `activeSessions.has(chatId)`
+// can't catch a sequential duplicate `bot.added` and would seed a 2nd topic.
+// This map is self-healing: an entry whose target is no longer in
+// activeSessions (session `/close`d) is treated as stale, so a legitimate
+// re-add still re-triggers — no process-lifetime "already started" set.
+const groupJoinAnchorByChat = new Map<string, string>();
 // 主动开工 — 场景① FR-12: only nag the admin once per process when listing chat
 // members fails (most likely a missing `im:chat` member-read scope), so a bot
 // added to many chats doesn't spam DMs.
@@ -1983,10 +1987,17 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
   }
 
   const lockKey = `${larkAppId}:join:${chatId}`;
-  if (autoStartJoinInFlight.has(lockKey) || activeSessions.has(sessionKey(chatId, larkAppId))) {
+  const chatLiveKey = `${larkAppId}:${chatId}`;
+  // Dedup: in-flight (concurrent events) OR a still-live join session already
+  // exists for this chat. The map covers the 话题群 case where the session is
+  // keyed at the seed message id, not chatId. A stale map entry (target session
+  // closed) falls through so a re-add re-triggers.
+  const priorAnchorKey = groupJoinAnchorByChat.get(chatLiveKey);
+  if (autoStartJoinInFlight.has(lockKey) || (priorAnchorKey && activeSessions.has(priorAnchorKey))) {
     logger.info(`[auto-start:入群] ${chatId.substring(0, 12)} 已在处理/已有会话，跳过（去重）`);
     return;
   }
+  if (priorAnchorKey) groupJoinAnchorByChat.delete(chatLiveKey); // stale entry, will re-register below
   autoStartJoinInFlight.add(lockKey);
   try {
     // D7 gate: an allowedUser must be a member of the chat.
@@ -2004,7 +2015,10 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
     }
 
     const chatType: 'group' = 'group';
-    const mode = await getChatMode(larkAppId, chatId);
+    // forceRefresh: the bot just joined; a 5-min-cached 'group' from before a
+    // conversion to 话题群 would wrongly pick chat-scope and reintroduce the
+    // oc_-id-as-reply-target bug (R1). Fetch fresh.
+    const mode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
     const promptBody = resolveGroupJoinPrompt(botCfg.autoStartOnGroupJoinPrompt);
     const title = (promptBody || tr('daemon.auto_start_join_title', undefined, localeForBot(larkAppId))).substring(0, 50);
 
@@ -2060,6 +2074,9 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       workingDir: pinnedWorkingDir,
     };
     activeSessions.set(dsKey, ds);
+    // Register the anchor so a later duplicate bot.added for this chat is deduped
+    // even in 话题群 (where dsKey is the seed id, not chatId).
+    groupJoinAnchorByChat.set(chatLiveKey, dsKey);
 
     const selfBot = getBot(larkAppId);
     const buildPrompt = async () => buildNewTopicPrompt(

@@ -23,6 +23,16 @@
 - **`listChatMemberOpenIds` 20 页（~2000 成员）上限**：超大群且 allowedUser 恰好排在 2000 之后会漏判，极低频，记录。
 - **`resolvedAllowedUsers` 若启动解析失败仍是 email**：会导致场景①静默不触发；属既有基础设施行为，已有日志「群内无 allowedUser 成员」。
 
+## 🔴 Codex 二轮 review 修复（合入前）
+
+| # | 问题 | 修复 |
+|---|---|---|
+| P1a | **场景②在普通群被 `/t` 误放行**：`/t` override 会把普通群 chat-scope 翻成 thread+anchor=messageId，auto-topic 判定看 override 后的 routing 就会在普通群误开工（违反 FR-7）。 | 在 `/t` override **之前**捕获 `autoTopicSeedScope/Anchor`，auto-topic 只认 override 前的真实 routing。补回归测试（含「revert 即 fail」验证）。 |
+| P1b | **话题群去重不完整**：话题群会话 keyed 在 seed message id，原 `activeSessions.has(chatId)` 抓不到串行重投 → 会再发一个 seed 再开一会话。 | 新增自愈映射 `groupJoinAnchorByChat`（`appId:chatId → dsKey`）：存活则去重、目标已 close 则视为 stale 放行（re-add 仍可重触发）；配合 in-flight 锁覆盖并发。 |
+| P2 | **R1 mode 缓存边界**：`getChatMode` 读 5 分钟缓存，曾缓存为 group 的群转话题群后入群会走回 chat-scope，R1 复现。 | 入群判定改 `getChatMode(..., { forceRefresh: true })`。 |
+
+Codex 复核 `listChatMemberOpenIds` 与 card-prefs 字符串字段无功能问题；bot.added `chat_id/operator_id`、群成员 `items[].member_id` 字段方向经官方文档核对正确。
+
 ## 测试
 
 - 新增单测 30 个（`test/auto-start.test.ts` 13 + `test/card-prefs-auto-start.test.ts` 17 含纯策略 + 持久化往返）。
