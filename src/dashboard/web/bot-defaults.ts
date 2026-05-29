@@ -157,8 +157,8 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         placeholder="${escapeHtml(t('botDefaults.rolePlaceholder'))}"
         style="width:100%;box-sizing:border-box;font:13px/1.5 ui-monospace,Menlo,monospace;padding:10px"${loaded ? '' : ' disabled'}>${loaded ? escapeHtml(b.teamRole) : ''}</textarea>
       <div class="actions">
-        <button type="button" data-action="save-role">${t('botDefaults.roleSave')}</button>
-        <button type="button" data-action="delete-role">${t('botDefaults.roleDelete')}</button>
+        <button type="button" data-action="save-role"${loaded ? '' : ' disabled'}>${t('botDefaults.roleSave')}</button>
+        <button type="button" data-action="delete-role"${loaded ? '' : ' disabled'}>${t('botDefaults.roleDelete')}</button>
         <span class="oncall-status" data-role-status></span>
       </div>
     </section>`;
@@ -410,19 +410,38 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         const roleUrl = `/api/team/local-bots/${encodeURIComponent(appId)}/role`;
         const cached = cache.bots.find((bb: any) => bb.larkAppId === appId);
 
-        // Lazily load the role ONCE per bot (textarea starts disabled so a
-        // slow/failed fetch can't be mistaken for an empty role). On success we
-        // stash it onto the snapshot (b.teamRole) so later re-renders — one per
-        // search keystroke — render from cache instead of re-fetching.
-        if (cached && typeof cached.teamRole !== 'string') {
+        // Until the role is loaded, the textarea AND both buttons render
+        // disabled. This is load-bearing: an empty not-yet-loaded textarea
+        // saved as "" is treated as a DELETE by the server (federation-spoke-api
+        // role PUT), so a mis-click during a slow load would silently wipe an
+        // existing role. We only enable the editor once GET has returned.
+        function enableLiveEditor(value: string) {
+          const live = listEl.querySelector<HTMLElement>(`.bd-card[data-appid="${CSS.escape(appId)}"]`);
+          if (!live) return; // filtered out by search — next render draws it enabled from cache
+          const ta = live.querySelector<HTMLTextAreaElement>('textarea[data-input=teamRole]');
+          const sv = live.querySelector<HTMLButtonElement>('button[data-action=save-role]');
+          const dl = live.querySelector<HTMLButtonElement>('button[data-action=delete-role]');
+          if (ta) { ta.value = value; ta.disabled = false; }
+          if (sv) sv.disabled = false;
+          if (dl) dl.disabled = false;
+        }
+
+        // Lazily load the role ONCE per bot, then stash it onto the snapshot
+        // (cached.teamRole) so later re-renders — one per search keystroke —
+        // render from cache instead of re-fetching. The teamRoleLoading sentinel
+        // guards against a re-render firing a second concurrent GET while the
+        // first is still in flight. enableLiveEditor re-queries the *current*
+        // DOM so a mid-load re-render doesn't leave a stale (detached) textarea
+        // stuck disabled.
+        if (cached && typeof cached.teamRole !== 'string' && !cached.teamRoleLoading) {
+          cached.teamRoleLoading = true;
           (async () => {
             try {
               const r = await fetch(roleUrl);
               const body = await r.json().catch(() => ({}));
               if (r.ok && body.ok) {
                 cached.teamRole = body.role ?? '';
-                roleTextarea.value = cached.teamRole;
-                roleTextarea.disabled = false;
+                enableLiveEditor(cached.teamRole);
               } else {
                 roleStatusEl.textContent = `✗ ${t('botDefaults.roleLoadErr')}: ${body.error ?? r.status}`;
                 roleStatusEl.classList.add('hint-warn-inline');
@@ -430,6 +449,8 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
             } catch (e: any) {
               roleStatusEl.textContent = `✗ ${t('botDefaults.roleLoadErr')}: ${e?.message ?? e}`;
               roleStatusEl.classList.add('hint-warn-inline');
+            } finally {
+              cached.teamRoleLoading = false;
             }
           })();
         }
@@ -439,6 +460,10 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         // so we mirror the stored value into the cache for consistent re-renders.
         async function putRole(role: string, btn: HTMLButtonElement, deleted: boolean) {
           if (!roleStatusEl) return;
+          // Defense-in-depth: never PUT before the role is loaded (would risk a
+          // ""-as-delete). The buttons render disabled until then, but guard the
+          // entry too in case of a stale handler firing.
+          if (!cached || typeof cached.teamRole !== 'string') return;
           roleStatusEl.textContent = '';
           roleStatusEl.className = 'oncall-status';
           roleSaveBtn!.disabled = true;
