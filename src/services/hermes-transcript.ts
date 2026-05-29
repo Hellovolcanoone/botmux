@@ -1,8 +1,7 @@
 /**
  * Reader for Hermes Agent's SQLite session store.
  *
- * Hermes persists CLI conversations in $HERMES_HOME/state.db (defaults to ~/.hermes/state.db).
- * Unlike Codex/CoCo,
+ * Hermes persists CLI conversations in ~/.hermes/state.db. Unlike Codex/CoCo,
  * there is no append-only JSONL file to tail, so the bridge uses the messages
  * table's monotonically increasing row id as its offset. The worker only needs
  * user rows to match Lark turns and assistant rows with visible final content
@@ -15,8 +14,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { CodexBridgeEvent } from './codex-transcript.js';
 
-const HERMES_HOME = process.env.HERMES_HOME || join(homedir(), '.hermes');
-const HERMES_STATE_DB = join(HERMES_HOME, 'state.db');
+const HERMES_STATE_DB = join(homedir(), '.hermes', 'state.db');
 const CONTENT_JSON_PREFIX = String.fromCharCode(0) + 'json:';
 
 interface HermesMessageRow {
