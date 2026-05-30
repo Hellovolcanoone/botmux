@@ -72,7 +72,7 @@ Compared to OpenClaw-style approaches built on Agent SDKs:
 
 ## 5-Minute Setup
 
-> 💡 **TL;DR**: `npm i -g botmux` → `botmux setup` and pick "scan-to-create" to get the AppID/AppSecret in one shot (Step 2) → `botmux start`. PersonalAgent apps come with event subscriptions and bot capability pre-configured, so only Step 4 (permissions) + Step 5 (optional redirect URL) + Step 6 (publish) require browser clicks; the setup wizard writes a JSON file with a one-line clipboard copy command and prints deep-links to each remaining step.
+> 💡 **TL;DR**: `npm i -g botmux` → `botmux setup` and **scan two QR codes** to get a working bot → `botmux start`. The 1st scan creates the app and saves the AppID/AppSecret (event subscriptions + bot capability pre-configured); the 2nd scan lets botmux's built-in Feishu Web login **import permissions, configure the redirect URL, and create + submit a publish version automatically**. Steps 4 (permissions) / 5 (redirect) / 6 (publish) below are all done automatically by setup and folded as a manual fallback; pass `--no-open-platform-auto` to skip the second auto-config step.
 
 ### Step 1: Install botmux
 
@@ -106,6 +106,11 @@ botmux start
 ```
 
 > `start` re-validates credentials before forking workers; missing scopes only WARN, they don't block the daemon. If you later need to verify the event subscription, Lark requires the daemon to be running so it can detect the WebSocket connection.
+
+<details>
+<summary><b>Manual Open Platform config: permissions / redirect / publish (fallback)</b> —— botmux setup does these automatically (during the 2nd scan); expand only if auto-config failed or you want to verify manually</summary>
+
+<br>
 
 ### Step 4: Add Permissions
 
@@ -143,6 +148,8 @@ Skip this step if you only need bot messaging.
 Go to "Version Management & Release", click "Create Version" and publish. Set availability to "Visible to me only" for automatic approval.
 
 ![Publish](docs/setup/publish.png)
+
+</details>
 
 ### Step 7: Create a Group and Start Chatting
 

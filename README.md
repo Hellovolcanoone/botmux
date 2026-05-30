@@ -179,7 +179,7 @@ CLI 进入 botmux 会话时自动获得 `~/.botmux/bin` 在 PATH 中，以及一
 
 ## 5 分钟快速接入
 
-> 💡 **TL;DR**：`npm i -g botmux` → `botmux setup` 选「扫码建应用」一步拿到 AppID/AppSecret（Step 2）→ `botmux start`。PersonalAgent 应用建出来时事件订阅和 bot 能力都已默认配好，只剩 Step 4 权限申请 + Step 5（按需）重定向 URL + Step 6 发版三步要在浏览器手动点；setup 完成后会自动写 JSON 文件 + 打印一键复制命令 + 各步骤的深链。
+> 💡 **TL;DR**：`npm i -g botmux` → `botmux setup`，**扫两次码**就能建好一个可用机器人 → `botmux start`。第 1 次扫码建应用、拿到 AppID/AppSecret（事件订阅 + bot 能力默认已配好）；第 2 次扫码让 botmux 内置的飞书 Web 登录**自动导入权限、配置重定向 URL、创建并提交发布版本**。下面的 Step 4 权限 / Step 5 重定向 / Step 6 发版都已由 setup 默认自动完成、折叠为手动备用；加 `--no-open-platform-auto` 可跳过第二次自动配置、改走手动。
 
 ### Step 1: 安装 botmux
 
@@ -213,6 +213,11 @@ botmux start
 ```
 
 > start 前再校验一次凭证；权限未配齐不会阻塞 daemon，只 WARN。如果之后需要确认事件订阅，飞书后台会要求 daemon 已在跑才能识别长连接。
+
+<details>
+<summary><b>手动配置开放平台：权限 / 重定向 / 发版（备用）</b> —— 这三步 botmux setup 默认已自动完成（扫第二次码时），仅在自动配置失败、或想手动核对时展开</summary>
+
+<br>
 
 ### Step 4: 添加权限
 
@@ -250,6 +255,8 @@ http://127.0.0.1:9768/callback
 进入「版本管理与发布」，点击「创建版本」并发布。可用性范围选择「仅自己可见」即可自动通过审核。
 
 ![发版](docs/setup/publish.png)
+
+</details>
 
 ### Step 7: 建群开聊
 
