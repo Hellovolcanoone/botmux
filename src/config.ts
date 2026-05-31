@@ -1,4 +1,5 @@
 import { networkInterfaces } from 'node:os';
+import type { BackendType } from './adapters/backend/types.js';
 import { probeTmuxFunctional } from './setup/ensure-tmux.js';
 
 /** Get the first non-loopback IPv4 address, fallback to localhost. */
@@ -31,7 +32,7 @@ export function getDashboardExternalHost(): string {
  * connecting to /tmp/tmux-UID/default" forever. The functional probe filters
  * those out so we silently fall back to PTY.
  */
-function detectDefaultBackend(): 'pty' | 'tmux' {
+function detectDefaultBackend(): Exclude<BackendType, 'herdr'> {
   return probeTmuxFunctional().ok ? 'tmux' : 'pty';
 }
 
@@ -53,7 +54,7 @@ export const config = {
   daemon: {
     cliId: (process.env.CLI_ID ?? 'claude-code') as import('./adapters/cli/types.js').CliId,
     cliPathOverride: process.env.CLI_PATH,
-    backendType: (process.env.BACKEND_TYPE ?? detectDefaultBackend()) as 'pty' | 'tmux',
+    backendType: (process.env.BACKEND_TYPE ?? detectDefaultBackend()) as BackendType,
     workingDir: (process.env.WORKING_DIR ?? '~').split(',').map(s => s.trim()).filter(Boolean)[0] || '~',
     workingDirs: (process.env.WORKING_DIR ?? '~').split(',').map(s => s.trim()).filter(Boolean),
     allowedUsers: (process.env.ALLOWED_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean),

@@ -21,8 +21,10 @@ import { logger } from '../utils/logger.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { botLocale, localeForBot, t as tr } from '../i18n/index.js';
 import { claudeJsonlPathForSession } from '../adapters/cli/claude-code.js';
+import { findUniqueClaudeSessionByCwd } from './session-discovery.js';
 import { buildMarkdownCard, buildContextualReplyCard } from '../im/lark/md-card.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
+import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
@@ -1935,6 +1937,18 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   //     when discovery has one or by adopted cwd as a fallback.
   // Other CLIs fall back to legacy screen-capture only.
   const adoptedCliId = adopted.cliId ?? 'claude-code';
+  if (adopted.source === 'herdr' && adoptedCliId === 'claude-code' && !adopted.sessionId) {
+    const claudeMeta = findUniqueClaudeSessionByCwd(adopted.cwd);
+    if (claudeMeta?.sessionId) {
+      adopted.sessionId = claudeMeta.sessionId;
+      if (ds.session.adoptedFrom) ds.session.adoptedFrom.sessionId = claudeMeta.sessionId;
+      sessionStore.updateSession(ds.session);
+      logger.info(`[${t}] Resolved Claude session for adopted herdr target by cwd`);
+    } else {
+      logger.warn(`[${t}] Cannot resolve unique Claude session for adopted herdr target; final replies may be unavailable`);
+    }
+  }
+  const hasCliPid = typeof adopted.originalCliPid === 'number';
   const bridgeJsonlPath =
     adoptedCliId === 'claude-code' && adopted.sessionId
       ? claudeJsonlPathForSession(adopted.sessionId, adopted.cwd)
@@ -1951,7 +1965,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     cliSessionId: isStructuredBridge ? adopted.sessionId : undefined,
     model: botCfg.model,
     disableCliBypass: botCfg.disableCliBypass === true,
-    backendType: 'tmux',
+    backendType: adopted.source === 'herdr' ? 'herdr' : 'tmux',
     prompt: '',
     resume: false,
     ownerOpenId: ds.ownerOpenId,
@@ -1962,15 +1976,19 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     botOpenId: bot.botOpenId,
     locale: botLocale(botCfg),
     adoptMode: true,
+    adoptSource: adopted.source ?? 'tmux',
     adoptTmuxTarget: adopted.tmuxTarget,
+    adoptHerdrSessionName: adopted.herdrSessionName,
+    adoptHerdrTarget: adopted.herdrTarget,
+    adoptHerdrPaneId: adopted.herdrPaneId,
     adoptPaneCols: adopted.paneCols,
     adoptPaneRows: adopted.paneRows,
     bridgeJsonlPath,
     // PID + cwd: claude uses for `~/.claude/sessions/<pid>.json` resolver;
     // codex uses for `/proc/<pid>/fd` rollout discovery (works even if
     // session-discovery couldn't probe sessionId up-front).
-    adoptCliPid: (adoptedCliId === 'claude-code' || isStructuredBridge) ? adopted.originalCliPid : undefined,
-    adoptCwd: (adoptedCliId === 'claude-code' || isStructuredBridge) ? adopted.cwd : undefined,
+    adoptCliPid: hasCliPid && (adoptedCliId === 'claude-code' || isStructuredBridge) ? adopted.originalCliPid : undefined,
+    adoptCwd: hasCliPid && (adoptedCliId === 'claude-code' || isStructuredBridge) ? adopted.cwd : undefined,
     // Restored-from-metadata: this fork is recreating an /adopt session after
     // a daemon restart, NOT a fresh /adopt command. The Lark thread already
     // has every prior turn pushed as cards, so the worker should skip the
@@ -2026,66 +2044,58 @@ export function killStalePids(activeSessions_: Session[]): void {
     }
   }
 
-  // Tmux cleanup — check if any bot uses tmux (or the global default is tmux)
-  const anyTmux = getAllBots().some(b => (b.config.backendType ?? config.daemon.backendType) === 'tmux')
-    || config.daemon.backendType === 'tmux';
-  if (anyTmux) {
-    const multiBot = getAllBots().length > 1;
-    const cliIdFile = join(config.session.dataDir, 'last-cli-id');
-    let lastCliId: string | undefined;
-    try { lastCliId = readFileSync(cliIdFile, 'utf-8').trim(); } catch { /* first run */ }
-    // For tmux cleanup: use global cliId for single-bot compat
-    const currentCliId = config.daemon.cliId;
+  cleanupPersistentBackendSessions('tmux', activeSessions_);
+  cleanupPersistentBackendSessions('herdr', activeSessions_);
+}
 
-    if (!multiBot && lastCliId && lastCliId !== currentCliId) {
-      // Single-bot mode: CLI_ID changed since last run, kill ALL tmux sessions
-      logger.info(`CLI_ID changed (${lastCliId} → ${currentCliId}), killing all tmux sessions`);
-      for (const name of TmuxBackend.listBotmuxSessions()) {
-        TmuxBackend.killSession(name);
-      }
-    } else {
-      // Clean orphaned tmux sessions that belong to THIS bot only.
-      // In multi-bot mode each daemon only knows its own sessions — we must
-      // not kill tmux sessions that belong to other bots' daemons.
-      const activeNames = new Set(
-        activeSessions_.map(s => TmuxBackend.sessionName(s.sessionId)),
-      );
-      const ownedNames = new Set(
-        sessionStore.listSessions().map(s => TmuxBackend.sessionName(s.sessionId)),
-      );
-      for (const name of TmuxBackend.listBotmuxSessions()) {
-        if (ownedNames.has(name) && !activeNames.has(name)) {
-          logger.info(`Killing orphaned tmux session: ${name}`);
-          TmuxBackend.killSession(name);
-        }
-      }
-      // Per-bot CLI-mismatch cleanup: an active session whose persisted cliId
-      // no longer matches its bot's configured cliId would otherwise get
-      // resurrected on restart by TmuxBackend.spawn's reattach path (which
-      // ignores the bin/args we pass). Kill those tmux now so the session-
-      // manager restore step can fresh-spawn the new CLI on first message.
-      // (Mirror of the restoreActiveSessions guard, applied one layer earlier
-      // for tmux sessions whose daemon-side state is being rebuilt.)
-      for (const session of activeSessions_) {
-        const sessionCliId = session.cliId;
-        if (!sessionCliId || !session.larkAppId) continue;
-        let botCliId: CliId | undefined;
-        try { botCliId = getBot(session.larkAppId).config.cliId; } catch { continue; }
-        if (botCliId && sessionCliId !== botCliId) {
-          const name = TmuxBackend.sessionName(session.sessionId);
-          logger.info(`CLI mismatch for ${session.sessionId.substring(0, 8)} (session=${sessionCliId}, bot=${botCliId}), killing tmux ${name}`);
-          TmuxBackend.killSession(name);
-        }
+function cleanupPersistentBackendSessions(backendType: 'tmux' | 'herdr', activeSessions_: Session[]): void {
+  const anyBackend = getAllBots().some(b => (b.config.backendType ?? config.daemon.backendType) === backendType)
+    || config.daemon.backendType === backendType;
+  if (!anyBackend) return;
+
+  const backend = backendType === 'tmux' ? TmuxBackend : HerdrBackend;
+  const multiBot = getAllBots().length > 1;
+  const cliIdFile = join(config.session.dataDir, backendType === 'tmux' ? 'last-cli-id' : `last-cli-id-${backendType}`);
+  let lastCliId: string | undefined;
+  try { lastCliId = readFileSync(cliIdFile, 'utf-8').trim(); } catch { /* first run */ }
+  const currentCliId = config.daemon.cliId;
+
+  if (!multiBot && lastCliId && lastCliId !== currentCliId) {
+    logger.info(`CLI_ID changed (${lastCliId} → ${currentCliId}), killing all ${backendType} sessions`);
+    for (const name of backend.listBotmuxSessions()) {
+      backend.killSession(name);
+    }
+  } else {
+    const activeNames = new Set(
+      activeSessions_.map(s => backend.sessionName(s.sessionId)),
+    );
+    const ownedNames = new Set(
+      sessionStore.listSessions().map(s => backend.sessionName(s.sessionId)),
+    );
+    for (const name of backend.listBotmuxSessions()) {
+      if (ownedNames.has(name) && !activeNames.has(name)) {
+        logger.info(`Killing orphaned ${backendType} session: ${name}`);
+        backend.killSession(name);
       }
     }
-
-    // Persist current CLI_ID for next restart (best-effort, single-bot compat)
-    try {
-      mkdirSync(config.session.dataDir, { recursive: true });
-      writeFileSync(cliIdFile, currentCliId);
-    } catch (err) {
-      logger.warn(`Failed to write ${cliIdFile}: ${err}`);
+    for (const session of activeSessions_) {
+      const sessionCliId = session.cliId;
+      if (!sessionCliId || !session.larkAppId) continue;
+      let botCliId: CliId | undefined;
+      try { botCliId = getBot(session.larkAppId).config.cliId; } catch { continue; }
+      if (botCliId && sessionCliId !== botCliId) {
+        const name = backend.sessionName(session.sessionId);
+        logger.info(`CLI mismatch for ${session.sessionId.substring(0, 8)} (session=${sessionCliId}, bot=${botCliId}), killing ${backendType} ${name}`);
+        backend.killSession(name);
+      }
     }
+  }
+
+  try {
+    mkdirSync(config.session.dataDir, { recursive: true });
+    writeFileSync(cliIdFile, currentCliId);
+  } catch (err) {
+    logger.warn(`Failed to write ${cliIdFile}: ${err}`);
   }
 }
 

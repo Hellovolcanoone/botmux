@@ -1,6 +1,6 @@
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import type { CliId } from '../../adapters/cli/types.js';
-import type { AdoptableSession } from '../../core/session-discovery.js';
+import { adoptTargetKey, adoptTargetLabel, type AdoptableSession } from '../../core/session-discovery.js';
 import type { DisplayMode, StreamStatus } from '../../types.js';
 import type { CliUsageLimitState } from '../../utils/cli-usage-limit.js';
 import { t, type Locale } from '../../i18n/index.js';
@@ -1215,9 +1215,10 @@ export function buildAdoptSelectCard(sessions: AdoptableSession[], rootMessageId
     const project = s.cwd.split('/').pop() || s.cwd;
     const cliName = getCliDisplayName(s.cliId);
     const uptime = s.startedAt ? formatDuration(Date.now() - s.startedAt) : unknownUptime;
+    const targetLabel = adoptTargetLabel(s);
     return {
-      text: { tag: 'plain_text' as const, content: `${cliName} · ${project} · ${s.tmuxTarget} · ${uptime}` },
-      value: JSON.stringify({ tmuxTarget: s.tmuxTarget, cliPid: s.cliPid }),
+      text: { tag: 'plain_text' as const, content: `${cliName} · ${project} · ${targetLabel} · ${uptime}` },
+      value: JSON.stringify({ key: adoptTargetKey(s), source: s.source }),
     };
   });
 

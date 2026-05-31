@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { BackendType } from '../adapters/backend/types.js';
 import type { DaemonToWorker } from '../types.js';
 import type { Locale } from '../i18n/index.js';
 import {
@@ -59,7 +60,7 @@ export type AttemptResumeBot = {
   larkAppSecret: string;
   cliId: string;
   cliPathOverride?: string;
-  backendType?: 'pty' | 'tmux';
+  backendType?: BackendType;
   botName?: string;
   botOpenId?: string;
   locale?: Locale;

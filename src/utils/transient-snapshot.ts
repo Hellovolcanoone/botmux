@@ -22,7 +22,6 @@
  */
 import xtermHeadless from '@xterm/headless';
 const { Terminal } = xtermHeadless;
-import { TmuxPipeBackend } from '../adapters/backend/tmux-pipe-backend.js';
 import { readViewportText } from './terminal-renderer.js';
 import { captureToPng } from './screenshot-renderer.js';
 import { clamp, MIN_RENDER_COLS, MAX_RENDER_COLS, MIN_RENDER_ROWS, MAX_RENDER_ROWS } from './render-dimensions.js';
@@ -38,18 +37,25 @@ export interface TransientSnapshot {
  *  null if the backend isn't a pipe backend, the pane has gone away, or
  *  tmux refuses to answer. Callers should fall back to the legacy renderer
  *  path on null. */
+type SnapshotCapableBackend = {
+  captureViewport?: () => string;
+  getPaneSize?: () => { cols: number; rows: number } | null;
+};
+
 export function tryCapturePipeSnapshot(
   backend: unknown,
   fallbackCols: number,
   fallbackRows: number,
 ): TransientSnapshot | null {
-  if (!(backend instanceof TmuxPipeBackend)) return null;
-  const live = backend.getPaneSize();
+  if (!backend || typeof backend !== 'object') return null;
+  const maybe = backend as SnapshotCapableBackend;
+  if (typeof maybe.captureViewport !== 'function') return null;
+  const live = typeof maybe.getPaneSize === 'function' ? maybe.getPaneSize() : null;
   const cols = clamp(live?.cols ?? fallbackCols, MIN_RENDER_COLS, MAX_RENDER_COLS);
   const rows = clamp(live?.rows ?? fallbackRows, MIN_RENDER_ROWS, MAX_RENDER_ROWS);
   // Viewport-only capture: same number of rows as the transient terminal,
   // so the snapshot never overflows and triggers a normal-buffer scroll.
-  const ansi = backend.captureViewport();
+  const ansi = maybe.captureViewport();
   if (!ansi) return null;
   return { cols, rows, ansi };
 }

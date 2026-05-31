@@ -793,8 +793,8 @@ async function promptEditBotConfig(
   }
 
   printInputHelp('会话后端 backendType', [
-    '可选。pty 更轻量；tmux 支持 adopt 和 Web Terminal 附着。',
-    '留空保留当前值；输入 - 回到自动检测；只接受 pty 或 tmux。',
+    '可选。pty 更轻量；tmux 支持 adopt 和 Web Terminal 附着；herdr 支持托管持久会话。',
+    '留空保留当前值；输入 - 回到自动检测；只接受 pty、tmux 或 herdr。',
   ]);
   input.backendType = await ask(rl, `会话后端 backendType [${formatOptionalValue(bot.backendType)}]: `);
 

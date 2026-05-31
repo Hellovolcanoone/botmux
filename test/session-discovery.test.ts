@@ -193,6 +193,7 @@ describe('discoverAdoptableSessions', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]).toEqual({
+      source: 'tmux',
       tmuxTarget: 'mysession:0.0',
       panePid: 1000,
       cliPid: 1002,
@@ -551,6 +552,20 @@ describe('discoverAdoptableSessions', () => {
 });
 
 describe('validateAdoptTarget', () => {
+  // Legacy signature accepted (tmuxTarget, pid); the herdr PR refactored
+  // validateAdoptTarget to take the full AdoptableSession-shaped object so it
+  // can route to either tmux or herdr validators. These helpers preserve the
+  // original tests' intent while feeding the new shape.
+  const tmuxTarget = (target: string, cliPid: number) => ({
+    source: 'tmux' as const,
+    tmuxTarget: target,
+    cliPid,
+    cliId: 'claude-code' as const,
+    cwd: '/x',
+    paneCols: 200,
+    paneRows: 50,
+  });
+
   it('should return true when expected CLI process is still running', () => {
     setupMocks({
       paneLines: 'mysession:0.0 1000\n',
@@ -560,7 +575,7 @@ describe('validateAdoptTarget', () => {
       dimsMap: {},
     });
 
-    const result = validateAdoptTarget('mysession:0.0', 1001);
+    const result = validateAdoptTarget(tmuxTarget('mysession:0.0', 1001));
     expect(result).toBe(true);
   });
 
@@ -569,7 +584,7 @@ describe('validateAdoptTarget', () => {
       throw new Error('pane not found');
     });
 
-    const result = validateAdoptTarget('nosession:0.0', 1001);
+    const result = validateAdoptTarget(tmuxTarget('nosession:0.0', 1001));
     expect(result).toBe(false);
   });
 
@@ -583,7 +598,7 @@ describe('validateAdoptTarget', () => {
       dimsMap: {},
     });
 
-    const result = validateAdoptTarget('mysession:0.0', 1001);
+    const result = validateAdoptTarget(tmuxTarget('mysession:0.0', 1001));
     expect(result).toBe(false);
   });
 
@@ -597,7 +612,7 @@ describe('validateAdoptTarget', () => {
     });
 
     // Expecting pid 1001 but found 1099
-    const result = validateAdoptTarget('mysession:0.0', 1001);
+    const result = validateAdoptTarget(tmuxTarget('mysession:0.0', 1001));
     expect(result).toBe(false);
   });
 
@@ -610,7 +625,7 @@ describe('validateAdoptTarget', () => {
       dimsMap: {},
     });
 
-    const result = validateAdoptTarget('mysession:0.0', 1002);
+    const result = validateAdoptTarget(tmuxTarget('mysession:0.0', 1002));
     expect(result).toBe(true);
   });
 });

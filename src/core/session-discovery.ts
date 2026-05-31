@@ -4,8 +4,8 @@
  * Discovers non-botmux tmux sessions running known CLI binaries (Claude Code,
  * Codex, Aiden, CoCo, Gemini, OpenCode, MTR, Hermes) and collects metadata needed to adopt them.
  */
-import { execSync } from 'node:child_process';
-import { readFileSync, readlinkSync } from 'node:fs';
+import { execFileSync, execSync } from 'node:child_process';
+import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, join } from 'node:path';
 import type { CliId } from '../adapters/cli/types.js';
@@ -19,15 +19,21 @@ const IS_LINUX = platform() === 'linux';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface AdoptableSession {
-  tmuxTarget: string;       // e.g. "0:2.0"
-  panePid: number;          // tmux pane's shell PID
-  cliPid: number;           // CLI process PID
-  cliId: CliId;             // recognized CLI type
-  sessionId?: string;       // Claude Code session ID
-  cwd: string;              // CLI working directory
-  startedAt?: number;       // epoch ms
-  paneCols: number;         // current pane width
-  paneRows: number;         // current pane height
+  source: 'tmux' | 'herdr';
+  tmuxTarget?: string;       // e.g. "0:2.0"
+  panePid?: number;          // tmux pane's shell PID
+  cliPid?: number;           // CLI process PID, when the source exposes one
+  herdrSessionName?: string;
+  herdrTarget?: string;
+  herdrPaneId?: string;
+  herdrAgentName?: string;
+  herdrTerminalId?: string;
+  cliId: CliId;              // recognized CLI type
+  sessionId?: string;        // CLI session ID
+  cwd: string;               // CLI working directory
+  startedAt?: number;        // epoch ms
+  paneCols: number;          // current pane width
+  paneRows: number;          // current pane height
 }
 
 // ─── CLI process name → CliId mapping ────────────────────────────────────────
@@ -207,6 +213,42 @@ function readClaudeSessionMeta(pid: number): { sessionId?: string; cwd?: string;
   }
 }
 
+
+function realpathMaybe(path: string): string {
+  try { return realpathSync(path); } catch { return path; }
+}
+
+export function findUniqueClaudeSessionByCwd(cwd: string): { sessionId?: string; startedAt?: number } | undefined {
+  let names: string[];
+  try {
+    names = readdirSync(join(homedir(), '.claude', 'sessions'));
+  } catch {
+    return undefined;
+  }
+  const wanted = realpathMaybe(cwd);
+  const matches: Array<{ sessionId?: string; startedAt?: number; updatedAt?: number }> = [];
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      const raw = readFileSync(join(homedir(), '.claude', 'sessions', name), 'utf-8');
+      const data = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof data.cwd !== 'string') continue;
+      if (realpathMaybe(data.cwd) !== wanted) continue;
+      const sessionId = typeof data.sessionId === 'string' ? data.sessionId : undefined;
+      if (!sessionId) continue;
+      matches.push({
+        sessionId,
+        startedAt: typeof data.startedAt === 'number' ? data.startedAt : undefined,
+        updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : undefined,
+      });
+    } catch {
+      // Ignore malformed or concurrently rewritten metadata files.
+    }
+  }
+  if (matches.length !== 1) return undefined;
+  return matches[0];
+}
+
 /**
  * Get pane dimensions via tmux display command.
  * Returns { cols, rows } or undefined on failure.
@@ -227,6 +269,96 @@ function getPaneDimensions(tmuxTarget: string): { cols: number; rows: number } |
   }
 }
 
+type HerdrJsonResult = { ok: true; value: any | undefined } | { ok: false };
+
+function tryHerdrJson(args: string[], opts?: { timeout?: number }): HerdrJsonResult {
+  try {
+    const out = execFileSync('herdr', args, {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: opts?.timeout ?? 5000,
+      maxBuffer: 16 * 1024 * 1024,
+    }).trim();
+    return { ok: true, value: out ? JSON.parse(out) : undefined };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function herdrJson(args: string[], opts?: { timeout?: number }): any | undefined {
+  const result = tryHerdrJson(args, opts);
+  return result.ok ? result.value : undefined;
+}
+
+function extractHerdrSessions(raw: any): any[] {
+  const sessions = raw?.sessions ?? raw?.result?.sessions;
+  return Array.isArray(sessions) ? sessions : [];
+}
+
+function extractHerdrAgents(raw: any): any[] {
+  const agents = raw?.result?.agents;
+  return Array.isArray(agents) ? agents : [];
+}
+
+function herdrAgentCliId(agent: any): CliId | undefined {
+  const name = typeof agent?.agent === 'string' ? basename(agent.agent) : '';
+  return name in CLI_COMM_MAP ? CLI_COMM_MAP[name]! : undefined;
+}
+
+function discoverHerdrAdoptableSessions(filterCliId?: CliId): AdoptableSession[] {
+  const rawSessions = herdrJson(['session', 'list', '--json']);
+  const sessions = extractHerdrSessions(rawSessions).filter((s: any) => {
+    const name = typeof s?.name === 'string' ? s.name : '';
+    return name && s?.running === true && !name.startsWith('bmx-');
+  });
+  const results: AdoptableSession[] = [];
+  for (const session of sessions) {
+    const sessionName = session.name as string;
+    const rawAgents = herdrJson(['--session', sessionName, 'agent', 'list']);
+    for (const agent of extractHerdrAgents(rawAgents)) {
+      const cliId = herdrAgentCliId(agent);
+      if (!cliId) continue;
+      if (filterCliId && cliId !== filterCliId) continue;
+      const cwd = typeof agent?.cwd === 'string' ? agent.cwd : undefined;
+      const paneId = typeof agent?.pane_id === 'string' ? agent.pane_id : undefined;
+      const terminalId = typeof agent?.terminal_id === 'string' ? agent.terminal_id : undefined;
+      const agentName = typeof agent?.agent === 'string' ? agent.agent : undefined;
+      if (!cwd || !paneId) continue;
+      const claudeMeta = cliId === 'claude-code' ? findUniqueClaudeSessionByCwd(cwd) : undefined;
+      results.push({
+        source: 'herdr',
+        herdrSessionName: sessionName,
+        herdrTarget: paneId,
+        herdrPaneId: paneId,
+        herdrAgentName: agentName,
+        herdrTerminalId: terminalId,
+        cliId,
+        sessionId: claudeMeta?.sessionId,
+        cwd,
+        startedAt: claudeMeta?.startedAt,
+        paneCols: 200,
+        paneRows: 50,
+      });
+    }
+  }
+  return results;
+}
+
+export function adoptTargetLabel(target: AdoptableSession | NonNullable<import('./types.js').DaemonSession['adoptedFrom']>): string {
+  if (target.source === 'herdr') {
+    const sessionName = target.herdrSessionName ?? 'herdr';
+    const pane = target.herdrPaneId ?? target.herdrTarget ?? target.herdrAgentName ?? 'agent';
+    return `${sessionName}:${pane}`;
+  }
+  return target.tmuxTarget ?? 'tmux';
+}
+
+export function adoptTargetKey(target: AdoptableSession): string {
+  if (target.source === 'herdr') return `herdr:${target.herdrSessionName}:${target.herdrPaneId ?? target.herdrTarget}`;
+  return `tmux:${target.tmuxTarget}:${target.cliPid}`;
+}
+
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -239,88 +371,92 @@ function getPaneDimensions(tmuxTarget: string): { cols: number; rows: number } |
  * @param filterCliId - If provided, only return sessions matching this CLI type.
  */
 export function discoverAdoptableSessions(filterCliId?: CliId): AdoptableSession[] {
+  const results: AdoptableSession[] = [];
+
   // 1. List all tmux panes
-  let panesRaw: string;
+  let panesRaw: string | undefined;
   try {
     panesRaw = execSync(
       "tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_pid}'",
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], env: tmuxEnv() },
     );
   } catch {
-    // tmux not available or no server running
-    return [];
+    panesRaw = undefined;
   }
 
-  const results: AdoptableSession[] = [];
+  if (panesRaw) {
 
-  const lines = panesRaw.split('\n').filter(Boolean);
+    const lines = panesRaw.split('\n').filter(Boolean);
 
-  for (const line of lines) {
-    // Parse: "session_name:window_index.pane_index pane_pid"
-    const spaceIdx = line.indexOf(' ');
-    if (spaceIdx === -1) continue;
+    for (const line of lines) {
+      // Parse: "session_name:window_index.pane_index pane_pid"
+      const spaceIdx = line.indexOf(' ');
+      if (spaceIdx === -1) continue;
 
-    const tmuxTarget = line.slice(0, spaceIdx);
-    const panePid = Number(line.slice(spaceIdx + 1));
-    if (isNaN(panePid)) continue;
+      const tmuxTarget = line.slice(0, spaceIdx);
+      const panePid = Number(line.slice(spaceIdx + 1));
+      if (isNaN(panePid)) continue;
 
-    // 2. Filter out bmx-* sessions
-    const sessionName = tmuxTarget.split(':')[0];
-    if (sessionName?.startsWith('bmx-')) continue;
+      // 2. Filter out bmx-* sessions
+      const sessionName = tmuxTarget.split(':')[0];
+      if (sessionName?.startsWith('bmx-')) continue;
 
-    // 3. Recursively search process tree for known CLI binaries (up to 3 levels)
-    const match = findCliProcess(panePid, 3, filterCliId);
-    if (!match) continue;
+      // 3. Recursively search process tree for known CLI binaries (up to 3 levels)
+      const match = findCliProcess(panePid, 3, filterCliId);
+      if (!match) continue;
 
-    // 3b. Filter by CLI type if requested
-    if (filterCliId && match.cliId !== filterCliId) continue;
+      // 3b. Filter by CLI type if requested
+      if (filterCliId && match.cliId !== filterCliId) continue;
 
-    // 4. Read CLI working directory (Linux: /proc; macOS: lsof)
-    const cwd = readCwd(match.pid);
-    if (!cwd) continue;
+      // 4. Read CLI working directory (Linux: /proc; macOS: lsof)
+      const cwd = readCwd(match.pid);
+      if (!cwd) continue;
 
-    // 5. Try to read CLI session metadata
-    let sessionId: string | undefined;
-    let startedAt: number | undefined;
-    if (match.cliId === 'claude-code') {
-      const meta = readClaudeSessionMeta(match.pid);
-      if (meta) {
-        sessionId = meta.sessionId;
-        startedAt = meta.startedAt;
+      // 5. Try to read CLI session metadata
+      let sessionId: string | undefined;
+      let startedAt: number | undefined;
+      if (match.cliId === 'claude-code') {
+        const meta = readClaudeSessionMeta(match.pid);
+        if (meta) {
+          sessionId = meta.sessionId;
+          startedAt = meta.startedAt;
+        }
+      } else if (match.cliId === 'codex') {
+        // Codex has no per-pid state file — bind via the open rollout fd in
+        // /proc. Worker-side has the same probe as a fallback so this is
+        // best-effort: we resolve here so the daemon-side adopt UI shows
+        // an accurate "currently in session X" hint.
+        const rollout = findCodexRolloutByPid(match.pid);
+        if (rollout) sessionId = rollout.cliSessionId;
+      } else if (match.cliId === 'coco') {
+        // CoCo: probe /proc/<pid>/fd for an open file under the session dir
+        // (session.log / traces.jsonl). events.jsonl itself is opened-written-
+        // closed per event so it's not reliable on its own. Worker-side
+        // re-probes too, so undefined here is acceptable.
+        const cocoSession = findCocoSessionByPid(match.pid);
+        if (cocoSession) sessionId = cocoSession.sessionId;
       }
-    } else if (match.cliId === 'codex') {
-      // Codex has no per-pid state file — bind via the open rollout fd in
-      // /proc. Worker-side has the same probe as a fallback so this is
-      // best-effort: we resolve here so the daemon-side adopt UI shows
-      // an accurate "currently in session X" hint.
-      const rollout = findCodexRolloutByPid(match.pid);
-      if (rollout) sessionId = rollout.cliSessionId;
-    } else if (match.cliId === 'coco') {
-      // CoCo: probe /proc/<pid>/fd for an open file under the session dir
-      // (session.log / traces.jsonl). events.jsonl itself is opened-written-
-      // closed per event so it's not reliable on its own. Worker-side
-      // re-probes too, so undefined here is acceptable.
-      const cocoSession = findCocoSessionByPid(match.pid);
-      if (cocoSession) sessionId = cocoSession.sessionId;
+
+      // 6. Get pane dimensions
+      const dims = getPaneDimensions(tmuxTarget);
+      if (!dims) continue;
+
+      results.push({
+        source: 'tmux',
+        tmuxTarget,
+        panePid,
+        cliPid: match.pid,
+        cliId: match.cliId,
+        sessionId,
+        cwd,
+        startedAt,
+        paneCols: dims.cols,
+        paneRows: dims.rows,
+      });
     }
-
-    // 6. Get pane dimensions
-    const dims = getPaneDimensions(tmuxTarget);
-    if (!dims) continue;
-
-    results.push({
-      tmuxTarget,
-      panePid,
-      cliPid: match.pid,
-      cliId: match.cliId,
-      sessionId,
-      cwd,
-      startedAt,
-      paneCols: dims.cols,
-      paneRows: dims.rows,
-    });
   }
 
+  results.push(...discoverHerdrAdoptableSessions(filterCliId));
   return results;
 }
 
@@ -328,7 +464,7 @@ export function discoverAdoptableSessions(filterCliId?: CliId): AdoptableSession
  * Re-check that a specific pane still has the expected CLI process running.
  * Used to validate an adopt target right before the actual adoption.
  */
-export function validateAdoptTarget(tmuxTarget: string, expectedPid: number): boolean {
+export function validateTmuxAdoptTarget(tmuxTarget: string, expectedPid: number): boolean {
   // Verify the tmux pane still exists and get its shell PID
   let panePid: number;
   try {
@@ -345,6 +481,29 @@ export function validateAdoptTarget(tmuxTarget: string, expectedPid: number): bo
   // Search the process tree for the expected CLI PID
   const match = findCliProcess(panePid, 3);
   return match !== undefined && match.pid === expectedPid;
+}
+
+
+export type AdoptValidationResult = 'alive' | 'missing' | 'unknown';
+
+export function validateHerdrAdoptTarget(sessionName: string | undefined, paneId: string | undefined): AdoptValidationResult {
+  if (!sessionName || !paneId) return 'missing';
+  const rawAgents = tryHerdrJson(['--session', sessionName, 'agent', 'list']);
+  if (!rawAgents.ok) return 'unknown';
+  return extractHerdrAgents(rawAgents.value).some((agent: any) => agent?.pane_id === paneId) ? 'alive' : 'missing';
+}
+
+export function validateAdoptTarget(target: AdoptableSession | NonNullable<import('./types.js').DaemonSession['adoptedFrom']>): boolean {
+  return validateAdoptTargetState(target) === 'alive';
+}
+
+export function validateAdoptTargetState(target: AdoptableSession | NonNullable<import('./types.js').DaemonSession['adoptedFrom']>): AdoptValidationResult {
+  if (target.source === 'herdr') return validateHerdrAdoptTarget(target.herdrSessionName, target.herdrPaneId ?? target.herdrTarget);
+  const pid = 'originalCliPid' in target
+    ? target.originalCliPid
+    : ('cliPid' in target ? target.cliPid : undefined);
+  if (!target.tmuxTarget || !pid) return 'missing';
+  return validateTmuxAdoptTarget(target.tmuxTarget, pid) ? 'alive' : 'missing';
 }
 
 // 仅供单测使用 —— 暴露内部 helper，方便覆盖跨平台 (Linux /proc vs macOS ps/lsof/pgrep)

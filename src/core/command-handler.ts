@@ -19,7 +19,7 @@ import { logger } from '../utils/logger.js';
 import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience } from './worker-pool.js';
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
 import { validateWorkingDir } from './working-dir.js';
-import { discoverAdoptableSessions, validateAdoptTarget, type AdoptableSession } from './session-discovery.js';
+import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { generateAuthUrl, getTokenStatus } from '../utils/user-token.js';
 import { bindOncall, unbindOncall, getOncallStatus } from '../services/oncall-store.js';
 import { invalidWorkingDirs } from '../utils/working-dir.js';
@@ -842,7 +842,7 @@ export async function handleCommand(
           const cliName = getCliDisplayName(adopted.cliId ?? 'claude-code');
           const project = adopted.cwd ? (adopted.cwd.split('/').pop() || adopted.cwd) : '';
           const label = project ? `${cliName} · ${project}` : cliName;
-          await sessionReply(rootId, t('cmd.adopt.already_adopted', { label, pane: adopted.tmuxTarget }, loc));
+          await sessionReply(rootId, t('cmd.adopt.already_adopted', { label, pane: adoptTargetLabel(adopted) }, loc));
           break;
         }
         const botCliId = ds ? getBot(ds.larkAppId).config.cliId : undefined;
@@ -855,7 +855,7 @@ export async function handleCommand(
 
         const directTarget = adoptArgs;
         if (directTarget) {
-          const target = sessions.find(s => s.tmuxTarget === directTarget);
+          const target = sessions.find(s => adoptTargetLabel(s) === directTarget || adoptTargetKey(s) === directTarget || s.tmuxTarget === directTarget || s.herdrPaneId === directTarget);
           if (!target) {
             await sessionReply(rootId, t('cmd.adopt.pane_not_found', { pane: directTarget }, loc));
             break;
@@ -1708,18 +1708,25 @@ export async function startAdoptSession(
     deps.sessionReply(rid, content, msgType, larkAppId);
   const loc: Locale = localeForBot(ds.larkAppId ?? larkAppId);
 
-  if (!validateAdoptTarget(target.tmuxTarget, target.cliPid)) {
+  if (!validateAdoptTarget(target)) {
     await sessionReply(sessionAnchorId(ds), t('cmd.adopt.target_exited', undefined, loc));
     return;
   }
 
   const project = target.cwd.split('/').pop() || target.cwd;
+  const targetLabel = adoptTargetLabel(target);
 
   ds.workingDir = target.cwd;
   ds.session.workingDir = target.cwd;
   ds.session.title = `Adopt: ${project}`;
   ds.adoptedFrom = {
+    source: target.source,
     tmuxTarget: target.tmuxTarget,
+    herdrSessionName: target.herdrSessionName,
+    herdrTarget: target.herdrTarget,
+    herdrPaneId: target.herdrPaneId,
+    herdrAgentName: target.herdrAgentName,
+    herdrTerminalId: target.herdrTerminalId,
     originalCliPid: target.cliPid,
     sessionId: target.sessionId,
     cliId: target.cliId,
@@ -1733,5 +1740,5 @@ export async function startAdoptSession(
   forkAdoptWorker(ds);
 
   const cliName = getCliDisplayName(target.cliId);
-  await sessionReply(sessionAnchorId(ds), t('cmd.adopt.success', { cliName, project, pane: target.tmuxTarget }, loc));
+  await sessionReply(sessionAnchorId(ds), t('cmd.adopt.success', { cliName, project, pane: targetLabel }, loc));
 }

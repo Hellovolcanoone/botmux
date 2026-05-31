@@ -2852,8 +2852,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         const backendType = ds.larkAppId
           ? (getBot(ds.larkAppId).config.backendType ?? config.daemon.backendType)
           : config.daemon.backendType;
-        if (backendType === 'tmux') {
-          // Tmux mode: just kill the worker process — tmux session survives for re-attach.
+        if (backendType === 'tmux' || backendType === 'herdr') {
+          // Persistent backends: just kill the worker process — backing session survives for re-attach.
           // Worker's SIGTERM handler calls backend.kill() which only detaches.
           try { w.kill('SIGTERM'); } catch { /* ignore */ }
           ds.worker = null;

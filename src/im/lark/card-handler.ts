@@ -1150,14 +1150,16 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     }
 
     // Parse selected session info
-    let selected: { tmuxTarget: string; cliPid: number };
+    let selected: { key?: string; source?: string; tmuxTarget?: string; cliPid?: number };
     try { selected = JSON.parse(option); } catch { return; }
 
     // Re-discover to get full session info and validate
-    const { discoverAdoptableSessions } = await import('../../core/session-discovery.js');
+    const { discoverAdoptableSessions, adoptTargetKey } = await import('../../core/session-discovery.js');
     const botCliId = getBot(ds.larkAppId).config.cliId;
     const sessions = discoverAdoptableSessions(botCliId);
-    const target = sessions.find(s => s.tmuxTarget === selected.tmuxTarget && s.cliPid === selected.cliPid);
+    const target = sessions.find(s => selected.key
+      ? adoptTargetKey(s) === selected.key
+      : s.tmuxTarget === selected.tmuxTarget && s.cliPid === selected.cliPid);
     if (!target) {
       await sessionReply(rootId, t('cmd.adopt.target_exited', undefined, localeForBot(ds.larkAppId)));
       if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);

@@ -267,8 +267,8 @@ export function applyBotConfigEdits<T extends Record<string, any>>(
     if (backendType === '-') {
       delete out.backendType;
     } else if (backendType) {
-      if (backendType !== 'pty' && backendType !== 'tmux') {
-        throw new Error(`backendType must be "pty" or "tmux": ${backendType}`);
+      if (backendType !== 'pty' && backendType !== 'tmux' && backendType !== 'herdr') {
+        throw new Error(`backendType must be "pty", "tmux", or "herdr": ${backendType}`);
       }
       out.backendType = backendType;
     }

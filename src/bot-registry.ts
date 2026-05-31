@@ -2,6 +2,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
+import type { BackendType } from './adapters/backend/types.js';
 import type { CliId } from './adapters/cli/types.js';
 import { logger } from './utils/logger.js';
 import { isLocale, setBotLookup, type Locale } from './i18n/index.js';
@@ -51,7 +52,7 @@ export interface BotConfig {
    * such as --yolo or --dangerously-*. Missing/false preserves legacy behavior.
    */
   disableCliBypass?: boolean;
-  backendType?: 'pty' | 'tmux';
+  backendType?: BackendType;
   workingDir?: string;
   workingDirs?: string[];
   allowedUsers?: string[];

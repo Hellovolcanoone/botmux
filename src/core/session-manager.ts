@@ -15,9 +15,10 @@ import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, resto
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
+import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { getBot, getAllBots } from '../bot-registry.js';
 import type { CliId } from '../adapters/cli/types.js';
-import { validateAdoptTarget } from './session-discovery.js';
+import { adoptTargetLabel, validateAdoptTargetState } from './session-discovery.js';
 import type { LarkAttachment, LarkMention, ScheduledTask } from '../types.js';
 import type { MessageResource } from '../im/lark/message-parser.js';
 import type { ResolvedSender } from '../im/lark/identity-cache.js';
@@ -548,10 +549,15 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
 
     // Adopt sessions: restore if original CLI is still alive, otherwise close
     if (session.title?.startsWith('Adopt:') && session.adoptedFrom) {
-      const adopted = session.adoptedFrom;
-      if (!validateAdoptTarget(adopted.tmuxTarget, adopted.originalCliPid)) {
-        logger.info(`Closing adopt session ${session.sessionId} (original CLI exited)`);
+      const adopted = session.adoptedFrom as NonNullable<DaemonSession['adoptedFrom']>;
+      const validation = validateAdoptTargetState(adopted);
+      if (validation === 'missing') {
+        logger.info(`Closing adopt session ${session.sessionId} (adopted target exited: ${adoptTargetLabel(adopted)})`);
         sessionStore.closeSession(session.sessionId);
+        continue;
+      }
+      if (validation === 'unknown') {
+        logger.warn(`Keeping adopt session ${session.sessionId} closed until next resume (target validation failed: ${adoptTargetLabel(adopted)})`);
         continue;
       }
       // Original CLI still alive — re-register and fork adopt worker
@@ -570,7 +576,7 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
         lastMessageAt: sessionLastMessageAtMs(session),
         hasHistory: false,
         workingDir: adopted.cwd,
-        adoptedFrom: adopted as DaemonSession['adoptedFrom'],
+        adoptedFrom: adopted,
         streamCardId: session.streamCardId,
         streamCardNonce: session.streamCardNonce,
         displayMode: session.displayMode === 'screenshot' || session.displayMode === 'hidden'
@@ -592,7 +598,7 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       // rather than silently overwriting it.
       await setActiveSessionSafe(activeSessions, sessionKey(anchor, larkAppId), ds);
       forkAdoptWorker(ds, { restoredFromMetadata: true });
-      logger.info(`[${session.sessionId.substring(0, 8)}] Restored adopt session (target: ${adopted.tmuxTarget}, scope: ${scope})`);
+      logger.info(`[${session.sessionId.substring(0, 8)}] Restored adopt session (target: ${adoptTargetLabel(adopted)}, scope: ${scope})`);
       continue;
     }
     // Adopt sessions without persisted metadata — close (legacy)
@@ -640,36 +646,60 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     logger.debug(`Registered session ${session.sessionId} (scope: ${scope}, anchor: ${anchor})`);
   }
 
-  // Tmux mode: auto-fork workers for sessions with surviving tmux sessions
-  if (config.daemon.backendType === 'tmux') {
-    for (const [, ds] of activeSessions) {
-      const tmuxName = TmuxBackend.sessionName(ds.session.sessionId);
-      if (!TmuxBackend.hasSession(tmuxName)) continue;
+  // Persistent backends: auto-fork workers for sessions whose backing session survived daemon restart.
+  for (const [, ds] of activeSessions) {
+    const backendType = getSessionPersistentBackendType(ds);
+    if (!backendType) continue;
 
-      // Guard against re-attaching to a tmux session that was started with a
-      // different CLI than the bot is currently configured for. tmux's
-      // attach-session ignores the bin/args we hand to backend.spawn(), so
-      // without this check, changing a bot's cliId in bots.json would silently
-      // resurrect the OLD CLI on restart. Compare persisted session.cliId
-      // (stamped at fork time in worker-pool.forkWorker) against the bot's
-      // current config; mismatch ⇒ kill the stale tmux, let the next message
-      // trigger a fresh spawn.
-      const tag = ds.session.sessionId.substring(0, 8);
-      const sessionCliId = ds.session.cliId;
-      let botCliId: CliId | undefined;
-      try { botCliId = getBot(ds.larkAppId).config.cliId; } catch { /* bot deregistered */ }
-      if (sessionCliId && botCliId && sessionCliId !== botCliId) {
-        logger.warn(`[${tag}] CLI mismatch (session=${sessionCliId}, bot=${botCliId}), killing stale tmux ${tmuxName}`);
-        TmuxBackend.killSession(tmuxName);
-        continue;
-      }
+    const backendName = persistentSessionName(backendType, ds.session.sessionId);
+    if (!persistentSessionExists(backendType, backendName)) continue;
 
-      logger.info(`[${tag}] Tmux session alive, auto-forking worker to re-attach`);
-      forkWorker(ds, '', true);
+    // Guard against re-attaching to a persistent session that was started with a
+    // different CLI than the bot is currently configured for. Persistent backend
+    // reattach ignores the bin/args handed to backend.spawn(), so changing a
+    // bot's cliId in bots.json should kill the stale backing session instead of
+    // silently resurrecting the old CLI on restart.
+    const tag = ds.session.sessionId.substring(0, 8);
+    const sessionCliId = ds.session.cliId;
+    let botCliId: CliId | undefined;
+    try { botCliId = getBot(ds.larkAppId).config.cliId; } catch { /* bot deregistered */ }
+    if (sessionCliId && botCliId && sessionCliId !== botCliId) {
+      logger.warn(`[${tag}] CLI mismatch (session=${sessionCliId}, bot=${botCliId}), killing stale ${backendType} ${backendName}`);
+      killPersistentSession(backendType, backendName);
+      continue;
     }
+
+    logger.info(`[${tag}] ${backendType} session alive, auto-forking worker to re-attach`);
+    forkWorker(ds, '', true);
   }
 
-  logger.info(`Restored ${active.length} session(s)${config.daemon.backendType === 'tmux' ? '' : ', waiting for messages to resume'}`);
+  const hasPersistentBackend = [...activeSessions.values()].some(ds => !!getSessionPersistentBackendType(ds));
+  logger.info(`Restored ${active.length} session(s)${hasPersistentBackend ? '' : ', waiting for messages to resume'}`);
+}
+
+function getSessionPersistentBackendType(ds: DaemonSession): 'tmux' | 'herdr' | undefined {
+  let backendType = config.daemon.backendType;
+  try {
+    backendType = getBot(ds.larkAppId).config.backendType ?? backendType;
+  } catch { /* bot deregistered */ }
+  return backendType === 'tmux' || backendType === 'herdr' ? backendType : undefined;
+}
+
+function persistentSessionName(backendType: 'tmux' | 'herdr', sessionId: string): string {
+  return backendType === 'tmux'
+    ? TmuxBackend.sessionName(sessionId)
+    : HerdrBackend.sessionName(sessionId);
+}
+
+function persistentSessionExists(backendType: 'tmux' | 'herdr', name: string): boolean {
+  return backendType === 'tmux'
+    ? TmuxBackend.hasSession(name)
+    : HerdrBackend.hasSession(name);
+}
+
+function killPersistentSession(backendType: 'tmux' | 'herdr', name: string): void {
+  if (backendType === 'tmux') TmuxBackend.killSession(name);
+  else HerdrBackend.killSession(name);
 }
 
 /**

@@ -309,6 +309,12 @@ describe('Adopt card actions', () => {
       // Mock discoverAdoptableSessions to return empty (target gone)
       vi.doMock('../src/core/session-discovery.js', () => ({
         discoverAdoptableSessions: vi.fn(() => []),
+        // card-handler now also pulls adoptTargetKey to disambiguate herdr
+        // vs. tmux targets in the dropdown's selected-value. The empty
+        // session list short-circuits before adoptTargetKey is invoked, so
+        // the noop impl is fine.
+        adoptTargetKey: vi.fn(() => ''),
+        adoptTargetLabel: vi.fn(() => ''),
       }));
 
       const ds = makeDaemonSession();
