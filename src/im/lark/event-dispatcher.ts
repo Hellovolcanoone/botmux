@@ -528,6 +528,12 @@ export function canTalk(larkAppId: string, chatId: string | undefined, senderOpe
 
 export function canOperate(larkAppId: string, _chatId: string | undefined, senderOpenId: string | undefined): boolean {
   const bot = getBot(larkAppId);
+  // L1 同部署兄弟 bot 互信 operate：与 canTalk 一致——isKnownPeerBot 只认本部署
+  // bots-info.json 里注册过的自家 bot。这不重开 PR #46 的封堵：人的 talk 授权
+  // （chatGrant/globalGrant）仍不漏成 operate；这里只放行「自家 bot 之间」的 /
+  // 命令（让编排者能对子 bot 跑 /repo /cd 等）。跨团队/外部 bot 仍走 allowedUsers /
+  // 后续的 operate 级 grant。
+  if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return true;
   const allowedUsers = bot.resolvedAllowedUsers;
   // globalGrants（与 allowedChatGroups 同理）确立"有白名单"语义：只配 globalGrants 也算限制态，
   // 否则 canOperate 会 fall through 到"全开放"，把 talk-only 授权变成 operate 全开——正是 PR #46
