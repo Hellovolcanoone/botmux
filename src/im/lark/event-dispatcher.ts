@@ -10,6 +10,7 @@ import { getBot, getAllBots, isChatOncallBoundForAnyBot, getOwnerOpenId, type Bo
 import { config } from '../../config.js';
 import { getChatInfo, getChatMode, listChatBotMembers, replyMessage, sendUserMessage, isHumanOpenId } from './client.js';
 import { logger } from '../../utils/logger.js';
+import { serializeByAnchor } from '../../utils/anchor-serializer.js';
 import { parseForceTopicInvocation } from '../../core/command-handler.js';
 import { shouldAutoStartOnNewTopic } from '../../core/auto-start.js';
 import { stripLeadingMentions } from './message-parser.js';
@@ -841,7 +842,11 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
               return;
             }
             const ctx = await decideRouting(larkAppId, message);
-            handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId })
+            // Serialize per anchor so back-to-back messages to the same thread
+            // (e.g. dispatch's /repo prime + brief kickoff) don't interleave with
+            // the first's async session-spawn. See anchor-serializer.ts.
+            serializeByAnchor(ctx.anchor, () =>
+              handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId }))
               .catch(err => logger.error(`Error handling message event: ${err}`));
             return;
           }
@@ -878,7 +883,10 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             }
           }
           logger.info(`Bot-to-bot @mention detected (scope=${ctx.scope}): routing to handleThreadReply`);
-          handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId })
+          // Serialize per anchor — a sub-bot dispatched a /repo prime + kickoff
+          // back-to-back into this thread must be handled in order, not raced.
+          serializeByAnchor(ctx.anchor, () =>
+            handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId }))
             .catch(err => logger.error(`Error handling bot @mention: ${err}`));
           return;
         }
@@ -1039,10 +1047,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
 
         const ctx: RoutingContext = { chatId, messageId, chatType, larkAppId, ...routing };
-        const promise = ownsSession
+        // Serialize per anchor so two messages to the same thread/chat are
+        // processed in arrival order — never concurrently. Without this a fast
+        // second message interleaves with the first's async session-spawn and is
+        // dropped (worker-not-ready → re-fork branch). See anchor-serializer.ts.
+        serializeByAnchor(ctx.anchor, () => ownsSession
           ? handlers.handleThreadReply(data, ctx)
-          : handlers.handleNewTopic(data, ctx);
-        promise.catch(err => logger.error(`Error handling message event: ${err}`));
+          : handlers.handleNewTopic(data, ctx))
+          .catch(err => logger.error(`Error handling message event: ${err}`));
       } catch (err) {
         logger.error(`Error handling message event: ${err}`);
       }
