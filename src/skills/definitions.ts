@@ -968,6 +968,75 @@ stdout 为一行 JSON。注意：\`--json\` 覆盖所有结果类型；超时 / 
 - 默认超时 300 秒，可用 \`--timeout <seconds>\` 调整
 `;
 
+const ORCHESTRATE_SKILL = `---
+name: botmux-orchestrate
+description: 作为「主 bot/编排者」把一个大项目拆成多个子项目，在普通群里自动开多话题、把不同 bot（常 coder+reviewer 一组）派进各话题并行干活，用飞书任务清单当共享进度板，收齐结果再汇总。触发：用户要「把大项目拆给多个机器人并行做」「协调多个 bot」「多话题并行推进」「你当总控/编排」，或显式提到 botmux orchestrate / botmux dispatch 派活。
+---
+
+# botmux-orchestrate — 多 bot 多话题编排
+
+你作为**编排者（主 bot）**，把一个大编程项目拆成若干**子项目**，每个子项目在群里**单开一条话题**、派给**一组 bot**（常见：一个写代码 coder + 一个 review）并行推进；用一张**飞书任务清单**当所有人共享的进度板，子 bot 干完回报后你聚合、推进、最终汇总给用户。
+
+## 适用 & 不适用
+- 适用：一个需求大到该拆成多个**基本独立**的子项目、由**多个 bot 并行**做。
+- 不适用：单个小任务（直接做，或用 botmux-handoff 交棒即可）。
+
+## 物理事实（先记牢）
+- **你和子 bot 之间没有直连**，只能靠飞书消息 + @ 触发；**没有请求-响应关联**——子 bot 干完会 **@ 你**，对你就是「话题里来了条新消息」，你被唤起后去读任务板拿结构化状态。
+- 开新话题靠 \`botmux dispatch\`（发种子消息 + 在线程里 @ 子 bot，子 bot 即在该话题各起独立会话）。**子 bot 必须已在群里且 mentionable**（有 include_bot 权限）。
+- 一条话题里可以有多个 bot（如 coder+reviewer），它们在该话题内互相 @ 协作。
+
+## 流程
+
+### 1. 查花名册
+\`botmux bots list\`（见 botmux-bots）：看群里有哪些可协作 bot、能力标签、是否 mentionable。mentionable=false 的先让它 /introduce 一次。
+
+### 2. 拆解 + 出一版分配
+把需求拆成 N 个子项目，每个给出：**标题 / 简报(目标+验收) / 工作目录 / 指派的 bot(可一组，带角色) / 依赖**。你**主动提议一版**「子项目 ↔ bot」分配。
+
+### 3. 一次性跟用户确认
+把「子项目清单 + 分配 + 开几条话题」用 \`botmux send\` 发给用户**一次审批**（可配合 botmux-ask 做按钮确认）。用户可改、可手动指派。**没通过别派活。**
+
+### 4. 建共享任务板（飞书任务清单）
+用 **lark-task** 技能建一个**任务清单**（= 大项目），每个子项目建一条**任务**：
+- 负责人(member) 设为该子 bot（type=app，飞书任务支持 bot 当负责人）；
+- 描述写清简报 + 验收标准；
+- 记下每条任务的 **task_guid**（后面塞进派活简报，子 bot 据此回写）。
+任务板给**人一眼看进度**，也是你的工作记忆。**主 bot 和子 bot 都可读写任务。**
+
+### 5. 逐个派活（开话题）
+对每个子项目，把简报写进 /tmp/brief-X.md，再：
+\`\`\`bash
+botmux dispatch --title "<子项目标题>" --bot "<coder_open_id>:名字:coder" --bot "<reviewer_open_id>:名字:reviewer" --repo "<工作目录>" --brief-file /tmp/brief-X.md
+\`\`\`
+**简报必须写清子 bot 的「完成协议」**，否则收不齐：
+- 你的飞书任务 ID 是 <task_guid>；
+- 干完用 **lark-task** 把该任务标记完成、并把产出（链接/摘要）挂到任务评论或附件；
+- 然后 **@ 主bot** 回报一句「子项目X 完成 + 产出位置」；
+- coder 写完先 @ reviewer 在本话题 review，过了再标完成。
+
+> repo 预设：\`--repo\` 让子 bot 起会话直接进该目录、免手点「选仓库」卡。注意**跨 owner 的 repo 预设可能受授权限制**——若子 bot 已配 defaultWorkingDir，可省略 \`--repo\`。
+> 想「先把 bot 拉起待命、稍后再派具体任务」：用 \`--standby\`（只定目录不派简报），之后用 \`botmux dispatch --into <话题root> --bot ... --brief ...\` 激活。
+
+### 6. 收结果 + 推进
+子 bot @ 你 → 你被唤起 → 读任务板确认完成、看产出。然后：
+- 有依赖的下一波：依赖满足了再 dispatch 下一批；
+- 卡住/超时：去对应话题 \`botmux dispatch --into <root>\` @ 它问进展，或改派；
+- 全程把关键节点用 \`botmux send\` 同步用户（人看任务板也能一眼掌握）。
+
+### 7. 汇总
+所有子项目完成 → 读各任务产出 → 给用户一份总汇总（做了什么、产出在哪、遗留项）。
+
+## 登记（别丢上下文）
+把「子项目 ↔ task_guid ↔ 话题root ↔ 指派bot」记一张小表（可写本地 scratch，如 /tmp/orchestrate-<项目>.json）；断点续跑/被唤起时据此恢复。
+
+## 注意
+- **没通过用户审批不要建板/派活。**
+- 子 bot 不在群 / 不 mentionable → 先解决可达性（拉群、/introduce），否则 dispatch 的 @ 唤不起它。
+- 一条话题别塞太多 bot；coder+reviewer 两人一组最顺。
+- 失败别硬重试同一招 ≥3 次；上报用户。
+`;
+
 export const ASK_SKILL_NAME = 'botmux-ask';
 
 export const BUILTIN_SKILLS: SkillDef[] = [
@@ -978,6 +1047,7 @@ export const BUILTIN_SKILLS: SkillDef[] = [
   { name: 'botmux-bots', content: BOTS_SKILL },
   { name: 'botmux-handoff', content: HANDOFF_SKILL },
   { name: 'botmux-workflow-create', content: WORKFLOW_CREATE_SKILL },
+  { name: 'botmux-orchestrate', content: ORCHESTRATE_SKILL },
 ];
 
 /** Skills that earlier botmux versions installed but no longer ship. The
