@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { drainTranscript, joinAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
+import { shouldWriteNow } from './utils/input-gate.js';
 import {
   shouldRunQuietRotation,
   evaluatePidResolverPullback,
@@ -2590,12 +2591,16 @@ function sendToPty(content: string): void {
   // CoCo parks queued submits and writes the user event at dequeue time; Codex
   // parks them but steers into the active turn — CodexBridgeQueue's
   // HOL-block-drop attributes the (possibly merged) result correctly.
-  const typeAheadAllowed = cliAdapter.supportsTypeAhead;
-  if (isPromptReady || isFlushing || typeAheadAllowed) {
+  // Type-ahead lets the message write while the CLI is BUSY — but only once the
+  // TUI has booted. During startup / tmux re-attach (awaitingFirstPrompt) even a
+  // type-ahead write is dropped (no input box yet) — markPromptReady()'s flush
+  // delivers queued messages instead. See input-gate.ts; this fixes dispatch's
+  // brief reaching Codex before its first idle and never landing.
+  if (shouldWriteNow({ isPromptReady, isFlushing, supportsTypeAhead: cliAdapter.supportsTypeAhead === true, awaitingFirstPrompt })) {
     log(`Writing to PTY: "${content.substring(0, 80)}"`);
     flushPending();  // fire-and-forget async; no-op if already flushing
   } else {
-    log(`Queued message (${pendingMessages.length} pending): "${content.substring(0, 80)}" — ${cliName()} is busy`);
+    log(`Queued message (${pendingMessages.length} pending): "${content.substring(0, 80)}" — ${cliName()} ${awaitingFirstPrompt ? 'still booting' : 'is busy'}`);
   }
 }
 
