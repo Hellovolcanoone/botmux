@@ -123,8 +123,6 @@ After confirming the bot can send/receive messages, run:
 botmux autostart enable
 ```
 
-This registers the daemon with your user init system (macOS launchd / Linux user systemd) — **no sudo needed**. It restarts automatically on reboot. See [📖 Docs · CLI Commands](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/cli-commands).
-
 <details>
 <summary><b>Manual Open Platform config: create app / permissions / redirect / publish (fallback)</b> —— handled automatically by botmux setup during the 2nd scan; expand only if auto-config failed or you want to verify manually</summary>
 
@@ -181,7 +179,7 @@ Then restart the daemon: `botmux restart`.
 
 Each conversation turn gets a live-updating Feishu card — your main window for sensing and driving the CLI from phone/Lark:
 
-- **Terminal output rendered as Markdown** in real time, TUI chrome auto-filtered; one-tap "show/hide output", "export text", "page up/down"
+- **Live terminal screenshot streamed to the card** (rendered headlessly via xterm into a PNG, faithfully reproducing the CLI's TUI); one-tap "show/hide output", "export text", "page up/down"
 - **Live status**: Starting → Analyzing → Working / Executing → Idle; marks "limit reached · retryable" when quota runs out
 - **Act right from the card**: open (writable) terminal, 🔑 get write link, restart / close / take over the session, re-send last task
 - **One new card per turn**, the previous one frozen as an archive; after `/relay` moves a session to another group, the old card auto-freezes as an archive
@@ -345,8 +343,6 @@ The full reference — commands, config, best practices, troubleshooting — liv
 | Scenario-based best practices (Oncall / alerting-ops / solo dev / team) | [Best Practices](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/best-practices) |
 | Common pitfalls / FAQ | [Pitfalls](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/pitfalls) · [FAQ](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/faq) |
 | Features: scheduled tasks / Oncall / Dashboard / multi-bot / session relay | [Schedule](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/schedule) · [Oncall](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/oncall) · [Dashboard](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/dashboard) · [Multi-bot](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/multi-bot) · [Relay](https://magic.solutionsuite.cn/html-box/vkWHeJn1Fn2#/relay) |
-
-> The docs site supports `#/<page>` deep links — share a link straight to a specific page.
 
 ## Contributing
 
