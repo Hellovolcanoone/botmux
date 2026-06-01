@@ -1137,6 +1137,51 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   }
 
   // Handle adopt session selection
+  if (action?.value?.key === 'codex_app_thread_select' && option) {
+    const rootId = action?.value?.root_id;
+    if (!rootId) return;
+
+    const sKey = larkAppId ? sessionKey(rootId, larkAppId) : rootId;
+    const ds = activeSessions.get(sKey);
+    if (!ds) return;
+
+    if (!canOperate(ds.larkAppId, ds.chatId, operatorOpenId)) {
+      logger.info(`codex_app_thread_select blocked for non-operator user: ${operatorOpenId} (chat=${ds.chatId})`);
+      return { toast: { type: 'error', content: t('card.grant.toast_no_repo_perm', undefined, localeForBot(ds.larkAppId)) } };
+    }
+
+    let selected: { threadId: string };
+    try { selected = JSON.parse(option); } catch { return; }
+    if (!selected.threadId) return;
+
+    const botCfg = getBot(ds.larkAppId).config;
+    if (botCfg.cliId !== 'codex-app') return;
+
+    const { listCodexAppThreads } = await import('../../services/codex-app-threads.js');
+    let threads: Awaited<ReturnType<typeof listCodexAppThreads>>;
+    try {
+      threads = await listCodexAppThreads({
+        codexBin: botCfg.cliPathOverride,
+        cwd: getSessionWorkingDir(ds),
+        limit: 80,
+      });
+    } catch (err: any) {
+      await sessionReply(rootId, t('cmd.codex_app_adopt.list_failed', { error: err?.message ?? String(err) }, localeForBot(ds.larkAppId)));
+      return;
+    }
+    const target = threads.find(t => t.threadId === selected.threadId);
+    if (!target) {
+      await sessionReply(rootId, t('cmd.codex_app_adopt.thread_not_found', { threadId: selected.threadId }, localeForBot(ds.larkAppId)));
+      if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
+      return;
+    }
+
+    const { startCodexAppThreadSession } = await import('../../core/command-handler.js');
+    await startCodexAppThreadSession(target, ds, { activeSessions, sessionReply: deps.sessionReply, getActiveCount: () => 0, lastRepoScan }, larkAppId);
+    if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
+    return;
+  }
+
   if (action?.value?.key === 'adopt_select' && option) {
     const rootId = action?.value?.root_id;
     if (!rootId) return;

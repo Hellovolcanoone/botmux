@@ -111,6 +111,10 @@ export const messages: Record<string, string> = {
   'card.adopt.title': '📡 选择要接入的 CLI 会话',
   'card.adopt.placeholder_select': '选择 CLI 会话',
   'card.adopt.uptime_unknown': '未知',
+  'card.codex_app_thread.title': '📱 选择要继续的 Codex App 对话',
+  'card.codex_app_thread.subtitle': '从 Codex App 本地历史中恢复一个已有对话；botmux 会用 app-server 协议继续该 thread。',
+  'card.codex_app_thread.placeholder_select': '选择 Codex App 对话',
+  'card.codex_app_thread.updated_unknown': '未知时间',
 
   // ─── /relay picker card (pull mode) ─────────────────────────────────────
   'card.relay.title': '📋 选择要接力到本群的会话',
@@ -191,6 +195,10 @@ export const messages: Record<string, string> = {
   'cmd.adopt.pane_not_found': '未找到 tmux pane {pane}',
   'cmd.adopt.target_exited': '⚠️ 目标 CLI 会话已退出',
   'cmd.adopt.success': '📡 已接入 {cliName} · {project} ({pane})',
+  'cmd.codex_app_adopt.no_threads': '未发现可继续的 Codex App 对话',
+  'cmd.codex_app_adopt.thread_not_found': '未找到 Codex App 对话 {threadId}',
+  'cmd.codex_app_adopt.list_failed': '读取 Codex App 对话失败：{error}',
+  'cmd.codex_app_adopt.success': '📱 已继续 Codex App 对话：{title}',
   'cmd.oncall.need_group': '/oncall 需要在群聊中、以新话题方式使用。',
   'cmd.oncall.not_bound': '当前群尚未绑定 oncall 项目。\n\n用法：\n/oncall bind <path>     — 绑定当前群到某个项目目录，跳过仓库选择卡片\n/oncall unbind          — 解除当前群的 oncall 绑定\n/oncall status          — 查看当前绑定状态\n\n绑定后：群内任何成员都可以 @ 机器人提问；仅 allowedUsers 能点卡片按钮、执行 /cd /restart /close 等命令。',
   'cmd.oncall.bound': '🟢 已绑定 oncall\n工作目录：{dir}\n\n/oncall unbind 可解除绑定；/cd <path> 切换工作目录（仍保留 oncall 模式）。',

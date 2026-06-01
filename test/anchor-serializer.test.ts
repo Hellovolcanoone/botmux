@@ -56,3 +56,32 @@ describe('serializeByAnchor', () => {
     await expect(serializeByAnchor('A', async () => { throw new Error('nope'); })).rejects.toThrow('nope');
   });
 });
+
+describe('serializeByAnchor — wait cap (head-of-line-blocking guard)', () => {
+  beforeEach(() => __resetAnchorQueues());
+
+  it('does NOT let a slow/hung handler block the next same-anchor work past the cap', async () => {
+    const order: string[] = [];
+    // First work hangs well past the cap; with a 30ms cap the second must start
+    // without waiting for the first to finish (else a hung handler = missed @s).
+    const p1 = serializeByAnchor('A', () => new Promise<void>(res => {
+      order.push('start:1');
+      setTimeout(() => { order.push('end:1'); res(); }, 300);
+    }), 30);
+    const p2 = serializeByAnchor('A', async () => { order.push('start:2'); }, 30);
+    await p2;
+    // p2 ran before p1 finished (cap kicked in) — no indefinite block.
+    expect(order).toContain('start:2');
+    expect(order.indexOf('start:2')).toBeLessThan(order.indexOf('end:1') === -1 ? Infinity : order.indexOf('end:1'));
+    await p1;
+  });
+
+  it('still orders fast handlers (cap not reached → strict order preserved)', async () => {
+    const order: string[] = [];
+    const mk = (l: string, ms: number) => () => new Promise<void>(res => { order.push('s:'+l); setTimeout(() => { order.push('e:'+l); res(); }, ms); });
+    const p1 = serializeByAnchor('A', mk('1', 20), 1000);
+    const p2 = serializeByAnchor('A', mk('2', 1), 1000);
+    await Promise.all([p1, p2]);
+    expect(order).toEqual(['s:1', 'e:1', 's:2', 'e:2']);
+  });
+});
