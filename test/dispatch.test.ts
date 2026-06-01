@@ -15,6 +15,7 @@ import {
   buildDispatchMessages,
   buildRepoPrimeText,
   buildReportContent,
+  findSubBotTopic,
 } from '../src/core/dispatch.js';
 
 describe('parseDispatchBotSpec', () => {
@@ -143,5 +144,31 @@ describe('buildReportContent', () => {
 
   it('throws on empty orchestrator open_id', () => {
     expect(() => buildReportContent({ orchOpenId: '  ', content: 'x' })).toThrow();
+  });
+});
+
+describe('findSubBotTopic', () => {
+  const registry = {
+    'om_seedA': { orchChatId: 'oc_main', bots: ['ou_coder', 'ou_reviewer'] },
+    'om_seedB': { orchChatId: 'oc_main', bots: ['ou_other'] },
+    'om_seedC': { orchChatId: 'oc_else', bots: ['ou_coder'] },
+  };
+  const activeSeeds = new Set(['om_seedA', 'om_seedC']); // seedB's topic finished
+
+  it('returns the topic seed when @-ing a dispatched sub-bot in an active topic of this chat', () => {
+    expect(findSubBotTopic({ mentionOpenId: 'ou_coder', chatId: 'oc_main', registry, activeSeeds })).toBe('om_seedA');
+  });
+
+  it('returns null for a bot not dispatched anywhere', () => {
+    expect(findSubBotTopic({ mentionOpenId: 'ou_stranger', chatId: 'oc_main', registry, activeSeeds })).toBeNull();
+  });
+
+  it('returns null when the dispatched topic is no longer active (stale registry entry)', () => {
+    expect(findSubBotTopic({ mentionOpenId: 'ou_other', chatId: 'oc_main', registry, activeSeeds })).toBeNull();
+  });
+
+  it('does not fire across a different chat', () => {
+    // ou_coder is also in seedC, but that topic is in oc_else, not oc_main
+    expect(findSubBotTopic({ mentionOpenId: 'ou_coder', chatId: 'oc_zzz', registry, activeSeeds })).toBeNull();
   });
 });

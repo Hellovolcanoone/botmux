@@ -163,3 +163,30 @@ export function buildReportContent(input: {
   }
   return paras;
 }
+
+/**
+ * Footgun guard for the orchestrator→sub-bot direction. A dispatched sub-bot's
+ * session lives **inside its sub-topic**, so @-mentioning it from the main chat
+ * (e.g. `botmux send --mention <sub-bot>`) doesn't reach that session — it
+ * spawns a fresh, context-less one in the chat (the mirror of the report-back
+ * problem). To talk to a sub-bot the orchestrator must send INTO its sub-topic
+ * (`botmux dispatch --into <seed> --bot <sub-bot>`).
+ *
+ * Given the dispatch registry (seed → {orchChatId, bots}) and the set of seeds
+ * whose sub-topic is still active, return the sub-topic seed to redirect to when
+ * `mentionOpenId` is a sub-bot dispatched into an active topic of `chatId`;
+ * otherwise null. Only fires for live topics so stale entries don't block sends.
+ */
+export function findSubBotTopic(input: {
+  mentionOpenId: string;
+  chatId: string;
+  registry: Record<string, { orchChatId?: string; bots?: string[] }>;
+  activeSeeds: Set<string>;
+}): string | null {
+  for (const [seed, entry] of Object.entries(input.registry)) {
+    if (entry.orchChatId && entry.orchChatId !== input.chatId) continue;
+    if (!input.activeSeeds.has(seed)) continue;
+    if ((entry.bots ?? []).includes(input.mentionOpenId)) return seed;
+  }
+  return null;
+}

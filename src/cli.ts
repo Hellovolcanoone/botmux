@@ -26,7 +26,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
-import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent } from './core/dispatch.js';
+import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, findSubBotTopic } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
@@ -2295,6 +2295,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --card | --text                 强制卡片 / 纯文本（默认按 md 语法自动判断）
        --top-level                     发顶层消息（不回复进当前话题）
        --chat-id <oc_xxx>              指定目标群（默认当前话题所在群）
+       --anyway                        跳过「@ 到活跃子 bot」护栏强发（见下）
     @ 硬门：每条回复须三选一 --mention/--mention-back/--no-mention，否则报错不发。
     按内容价值选：有实质结论要对方看/确认/决策→--mention-back(或--mention点名)；
     纯记录/低优先级进度/简短确认→--no-mention；没信息量的"收到"不如不发。
@@ -2863,6 +2864,40 @@ async function cmdSend(rest: string[]): Promise<void> {
   // reply_in_thread, otherwise Lark would force every reply into a fresh
   // topic — defeating the whole point of chat-scope routing.
   const isChatScope = s.scope === 'chat';
+
+  // ── Footgun guard: orchestrator → sub-bot ──
+  // A dispatched sub-bot's session lives inside its sub-topic. @-ing it from the
+  // main chat (this send) doesn't reach that session — it spawns a fresh,
+  // context-less one (the mirror of the report-back problem). Block and point to
+  // the right command; `--anyway` overrides for a genuinely new session.
+  if (mentions.length > 0 && !rest.includes('--anyway')) {
+    let reg: Record<string, { orchChatId?: string; bots?: string[] }> = {};
+    try {
+      const regPath = join(resolveDataDir(), 'orchestrate-dispatch.json');
+      if (existsSync(regPath)) reg = JSON.parse(readFileSync(regPath, 'utf-8'));
+    } catch { /* no/!corrupt registry → no guard */ }
+    if (Object.keys(reg).length > 0) {
+      const activeSeeds = new Set<string>();
+      for (const sess of loadSessions().values()) {
+        if (sess.status === 'active' && sess.scope !== 'chat' && sess.rootMessageId) {
+          activeSeeds.add(sess.rootMessageId);
+        }
+      }
+      for (const m of mentions) {
+        const seed = findSubBotTopic({ mentionOpenId: m.open_id, chatId: targetChatId, registry: reg, activeSeeds });
+        if (seed) {
+          console.error(
+            `⚠️ ${m.open_id}${m.name ? `（${m.name}）` : ''} 是 botmux dispatch 派进子话题 ${seed} 的子 bot——\n` +
+            `它的会话在那条子话题里：在主群 @ 它收不到，反而会另起一个无上下文的新会话。\n` +
+            `要跟它说，把消息发进它的子话题：\n` +
+            `  botmux dispatch --into ${seed} --bot ${m.open_id} --brief "..."\n` +
+            `（确属新会话/有意为之，加 --anyway 强发。）`);
+          process.exit(2);
+        }
+      }
+    }
+  }
+
   // Oncall addressing only meaningful for replies inside the session's own
   // chat — skip when publishing top-level or to a different chat. Treat
   // oncall as chat-level: in multi-daemon setups this session's bot may not
