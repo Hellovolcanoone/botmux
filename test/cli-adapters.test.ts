@@ -33,7 +33,7 @@ import type { CliAdapter, CliId } from '../src/adapters/cli/types.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ALL_CLI_IDS: CliId[] = ['claude-code', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira'];
+const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira'];
 
 // ---------------------------------------------------------------------------
 // 1. Factory: createCliAdapterSync

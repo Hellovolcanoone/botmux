@@ -49,13 +49,17 @@ import {
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
-import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds } from './adapters/cli/claude-code.js';
+import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
 import { HerdrBackend } from './adapters/backend/herdr-backend.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { TmuxPipeBackend } from './adapters/backend/tmux-pipe-backend.js';
+import { ZellijBackend, ZELLIJ_CONFIG_KDL } from './adapters/backend/zellij-backend.js';
+import { ZellijObserveBackend } from './adapters/backend/zellij-observe-backend.js';
+import { zellijEnv } from './setup/ensure-zellij.js';
+import { isObserveBackend, type ObserveBackend } from './adapters/backend/types.js';
 import { selectSessionBackend } from './adapters/backend/session-backend-selector.js';
 import type { BackendType, SessionBackend } from './adapters/backend/types.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
@@ -84,17 +88,33 @@ let isTmuxMode = false;
  *  of per-WS attach-session PTYs. Set in spawnCli's adopt branch. */
 let isPipeMode = false;
 let effectiveBackendType: BackendType = 'pty';
+/** pty-under-zellij backend (BACKEND_TYPE=zellij). Behaves like the non-tmux
+ *  pty path for the worker (renderer screenshots, relay web terminal) but owns
+ *  a persistent zellij session that survives daemon restart. */
+let isZellijMode = false;
 let httpServer: ReturnType<typeof createHttpServer> | null = null;
 let wss: WebSocketServer | null = null;
 const wsClients = new Set<WebSocket>();
 const authedClients = new WeakSet<WebSocket>();
-/** Per-WS-client tmux attach PTYs (tmux mode only). */
+/** Per-WS-client tmux/zellij attach PTYs. */
 const clientPtys = new Map<WebSocket, pty.IPty>();
 const writeToken = randomBytes(16).toString('hex');
 
+/** Lazily-written locked-mode zellij config for per-WS web-terminal attach
+ *  clients: cleared keybinds + locked mode so every keystroke passes straight
+ *  to the focused (codex) pane, never intercepted as a zellij shortcut. */
+let zellijAttachCfgPath: string | null = null;
+function ensureZellijAttachConfig(): string {
+  if (zellijAttachCfgPath) return zellijAttachCfgPath;
+  const p = join(process.env.SESSION_DATA_DIR ?? '/tmp', '.zellij-web-attach.kdl');
+  try { writeFileSync(p, ZELLIJ_CONFIG_KDL); } catch { /* best effort */ }
+  zellijAttachCfgPath = p;
+  return p;
+}
+
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira' };
 function cliName(): string { return CLI_DISPLAY_NAMES[lastInitConfig?.cliId ?? ''] ?? 'CLI'; }
 let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
@@ -183,6 +203,11 @@ let bridgeJsonlDir: string | undefined;
  *  follow the new jsonl. */
 let bridgeCliPid: number | undefined;
 let bridgeCliCwd: string | undefined;
+/** Claude-family data root the bridge resolves JSONL / pid-state / tasks
+ *  against. `~/.claude` for Claude Code; Seed CLI's `.claude-runtime`. Set at
+ *  bridge start (from the adapter's claudeDataDir); defaults to `~/.claude` so
+ *  the adopt path and any non-seed caller behave exactly as before. */
+let bridgeDataDir: string = DEFAULT_CLAUDE_DATA_DIR;
 /** Last sessionId we observed via the pid resolver — used to detect
  *  rotations cheaply (string compare instead of stat()ing every jsonl). */
 let bridgeObservedCliSessionId: string | undefined;
@@ -483,7 +508,7 @@ function bridgeAbsorbBaseline(): void {
  *  agrees. */
 function bridgeMarkStalePidStateForAcceptedSid(acceptedSid: string): void {
   if (bridgeCliPid === undefined || bridgeCliCwd === undefined) return;
-  const pidResolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd);
+  const pidResolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd, bridgeDataDir);
   if (pidResolved && pidResolved.cliSessionId !== acceptedSid) {
     bridgeStalePidStateSessionId = pidResolved.cliSessionId;
   }
@@ -923,7 +948,7 @@ function maybeFollowQuietRotation(): void {
 
 function maybeFollowSessionRotationViaPid(): PidFollowResult {
   if (!bridgeCliPid || !bridgeCliCwd) return 'unavailable';
-  const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd);
+  const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd, bridgeDataDir);
   if (!resolved) return 'unavailable';
   if (bridgeObservedCliSessionId !== resolved.cliSessionId) {
     bridgeObservedCliSessionId = resolved.cliSessionId;
@@ -1086,11 +1111,12 @@ function performBridgeIngestAndScheduleQuietEmit(): void {
   }
 }
 
-function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?: string; mode?: 'baseline-existing' | 'fresh-empty' }): void {
+function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?: string; mode?: 'baseline-existing' | 'fresh-empty'; dataDir?: string }): void {
   bridgeJsonlPath = jsonlPath;
   bridgeJsonlDir = dirname(jsonlPath);
   bridgeCliPid = opts?.cliPid;
   bridgeCliCwd = opts?.cliCwd;
+  bridgeDataDir = opts?.dataDir ?? DEFAULT_CLAUDE_DATA_DIR;
   const mode = opts?.mode ?? 'baseline-existing';
   // Pid-state record ranks above the path the adopt scan computed. If
   // Claude was launched with `--resume` (or the adopt scan picked a
@@ -1098,7 +1124,7 @@ function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?
   // and we swap to it before baseline so we don't waste a baseline on
   // a frozen file.
   if (bridgeCliPid && bridgeCliCwd) {
-    const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd);
+    const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd, bridgeDataDir);
     if (resolved) {
       bridgeObservedCliSessionId = resolved.cliSessionId;
       bridgeRememberSessionIdForPath(resolved.path);
@@ -1123,10 +1149,10 @@ function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?
   // continuously for the active session, so this catches the rotation
   // even between writes). `findOpenClaudeSessionIds` unions both.
   if (bridgeCliPid !== undefined && bridgeJsonlDir && bridgeCliCwd) {
-    const sids = findOpenClaudeSessionIds(bridgeCliPid);
+    const sids = findOpenClaudeSessionIds(bridgeCliPid, bridgeDataDir);
     const candidates: string[] = [];
     for (const sid of sids) {
-      const path = claudeJsonlPathForSession(sid, bridgeCliCwd);
+      const path = claudeJsonlPathForSession(sid, bridgeCliCwd, bridgeDataDir);
       bridgeRememberSessionIdForPath(path);
       if (existsSyncSafe(path)) candidates.push(path);
     }
@@ -2816,6 +2842,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   if (cfg.adoptMode && cfg.adoptSource === 'herdr' && cfg.adoptHerdrSessionName && (cfg.adoptHerdrPaneId || cfg.adoptHerdrTarget)) {
     isTmuxMode = false;
     isPipeMode = true;
+    isZellijMode = false;
     const cols = cfg.adoptPaneCols ?? PTY_COLS;
     const rows = cfg.adoptPaneRows ?? PTY_ROWS;
     const target = cfg.adoptHerdrTarget ?? cfg.adoptHerdrPaneId!;
@@ -2857,26 +2884,34 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   }
 
   // ── Adopt mode: pipe-pane the user's existing tmux pane (no attach) ──
-  if (cfg.adoptMode && cfg.adoptTmuxTarget) {
+  // ── Adopt mode: observe the user's existing pane (no attach / non-invasive) ──
+  // tmux: pipe-pane (raw stream). zellij: dump-screen poll + action drive.
+  if (cfg.adoptMode && (cfg.adoptTmuxTarget || cfg.adoptZellijPaneId)) {
     // We mark BOTH isTmuxMode and isPipeMode: the former keeps idle/spawn
-    // logic on the tmux track; the latter tells the WS handler to route
+    // logic on the observe track; the latter tells the WS handler to route
     // updates through the shared scrollback fan-out (because there is no
     // PTY-per-WS — we don't attach to anything).
     isTmuxMode = true;
     isPipeMode = true;
+    isZellijMode = !!cfg.adoptZellijPaneId;
     const cols = cfg.adoptPaneCols ?? PTY_COLS;
     const rows = cfg.adoptPaneRows ?? PTY_ROWS;
-    const pipeBe = new TmuxPipeBackend(cfg.adoptTmuxTarget);
-    effectiveBackendType = 'tmux';
-    backend = pipeBe;
-    pipeBe.spawn('', [], {
+    const observeBe: ObserveBackend = cfg.adoptZellijPaneId
+      ? new ZellijObserveBackend(cfg.adoptZellijSession ?? '', cfg.adoptZellijPaneId, { cliPid: cfg.adoptCliPid })
+      : new TmuxPipeBackend(cfg.adoptTmuxTarget!);
+    effectiveBackendType = cfg.adoptZellijPaneId ? 'zellij' : 'tmux';
+    backend = observeBe;
+    observeBe.spawn('', [], {
       cwd: cfg.workingDir,
       cols,
       rows,
       env: process.env as Record<string, string>,
     });
 
-    seedBackendScreen('tmux adopt', pipeBe);
+    // Seed the shared scrollback with the pane's current screen so any
+    // already-connected (or future) WS clients render meaningful content
+    // immediately, instead of waiting for the next observe tick.
+    seedBackendScreen(`${effectiveBackendType} adopt`, observeBe);
 
     setupAdoptTranscriptBridges(cfg);
 
@@ -2894,24 +2929,35 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
 
     awaitingFirstPrompt = false;
     renderer?.markNewTurn();
-    log(`Adopt mode (pipe): observing ${cfg.adoptTmuxTarget} (${cols}x${rows})`);
+    const target = cfg.adoptZellijPaneId ? `${cfg.adoptZellijSession}/${cfg.adoptZellijPaneId}` : cfg.adoptTmuxTarget;
+    log(`Adopt mode (${effectiveBackendType}): observing ${target} (${cols}x${rows})`);
     return;
   }
 
   cliAdapter = createCliAdapterSync(cfg.cliId as any, cfg.cliPathOverride);
-  let backendType = cfg.backendType;
-  if (backendType === 'tmux' && !TmuxBackend.isAvailable()) {
+  // backendType=tmux trust-but-verify: an explicit per-bot config (or
+  // BACKEND_TYPE=tmux env override) bypasses config.ts's auto-detect, so
+  // the worker re-probes here. If tmux can't start a server we silently
+  // fall back to PTY rather than letting attach-session / new-session spam
+  // the daemon error log every poll cycle.
+  let effectiveBackend = cfg.backendType;
+  if (effectiveBackend === 'tmux' && !TmuxBackend.isAvailable()) {
     log('tmux backend requested but functional probe failed — falling back to PTY backend');
-    backendType = 'pty';
+    effectiveBackend = 'pty';
   }
-  if (backendType === 'herdr' && !HerdrBackend.isAvailable()) {
+  if (effectiveBackend === 'herdr' && !HerdrBackend.isAvailable()) {
     log('herdr backend requested but probe failed — falling back to PTY backend');
-    backendType = 'pty';
+    effectiveBackend = 'pty';
   }
-  effectiveBackendType = backendType;
-  const selectedBackend = selectSessionBackend({ sessionId: cfg.sessionId, backendType });
+  if (effectiveBackend === 'zellij' && !ZellijBackend.isAvailable()) {
+    log('zellij backend requested but functional probe failed (need zellij >= 0.44) — falling back to PTY backend');
+    effectiveBackend = 'pty';
+  }
+  effectiveBackendType = effectiveBackend;
+  const selectedBackend = selectSessionBackend({ sessionId: cfg.sessionId, backendType: effectiveBackend });
   isTmuxMode = selectedBackend.isTmuxMode;
   isPipeMode = selectedBackend.isPipeMode;
+  isZellijMode = selectedBackend.isZellijMode;
   backend = selectedBackend.backend;
   const adapterSessionId = cfg.resume
     ? (cfg.originalSessionId ?? cfg.sessionId)
@@ -2922,9 +2968,15 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // actually committed (rather than trusting a fixed sleep), so wire it up now.
   // Codex's adapter uses ~/.codex/history.jsonl (a fixed global path) directly,
   // so it needs no per-session wiring here.
-  if (cfg.cliId === 'claude-code') {
-    (backend as any).claudeJsonlPath =
-      claudeJsonlPathForSession(cfg.cliSessionId ?? adapterSessionId, cfg.workingDir);
+  //
+  // `claudeDataDir` is the Claude-family marker: set for claude-code AND its
+  // forks (Seed → `.claude-runtime`), undefined for everything else. Every
+  // JSONL/pid/bridge gate below keys off it instead of `cliId === 'claude-code'`,
+  // so a fork inherits the whole submit-confirm + bridge-fallback machinery.
+  const claudeDataDir = cliAdapter.claudeDataDir;
+  if (claudeDataDir) {
+    (backend as TmuxBackend | PtyBackend | ZellijBackend).claudeJsonlPath =
+      claudeJsonlPathForSession(cfg.cliSessionId ?? adapterSessionId, cfg.workingDir, claudeDataDir);
   }
 
   const args = cliAdapter.buildArgs({
@@ -2946,13 +2998,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
 
   // Claude Code 在 root/sudo 下会拒绝 --dangerously-skip-permissions 并立即 exit。
   // botmux 必须带这个 flag（话题里没法弹交互式审批），所以为 root 自动注入
-  // IS_SANDBOX=1 走 Claude Code 的受控环境逃生舱。用户显式设了就尊重不覆盖。
+  // IS_SANDBOX=1 走 Claude Code 的受控环境逃生舱。Seed 是 Claude Code fork，同样
+  // 受此限制 → 按 claude 家族判断。用户显式设了就尊重不覆盖。
   const injectClaudeSandbox =
-    cfg.cliId === 'claude-code' &&
+    !!claudeDataDir &&
     process.getuid?.() === 0 &&
     !process.env.IS_SANDBOX;
   if (injectClaudeSandbox) {
-    log('Detected root user — injecting IS_SANDBOX=1 for Claude Code');
+    log('Detected root user — injecting IS_SANDBOX=1 for Claude-family CLI');
   }
 
   // Claude Code 2.1.x：`--resume` 一个「空闲 >70min 且累计 >10 万 token」的会话会弹
@@ -2961,8 +3014,9 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // 而 return null → 菜单不弹、按 full session 原样续（走 summary 会触发 /compact，
   // 破坏 bridge 的会话连续性追踪）。用户显式设了就尊重。注意：该 key 必须同时进
   // BOTMUX_INJECTED_ENV_KEYS 白名单，否则 tmux backend 不会把它透传进 pane。
+  // Seed 是 Claude Code fork，同样有 resume-summary 菜单 → 按 claude 家族判断。
   const claudeResumeTokenThreshold =
-    cfg.cliId === 'claude-code'
+    claudeDataDir
       ? process.env.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD ?? '2147483647'
       : undefined;
 
@@ -2975,11 +3029,15 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     ? TmuxBackend.sessionName(cfg.sessionId)
     : effectiveBackendType === 'herdr'
       ? HerdrBackend.sessionName(cfg.sessionId)
+      : effectiveBackendType === 'zellij'
+        ? ZellijBackend.sessionName(cfg.sessionId)
       : undefined;
   const willReattachPersistent = persistentSessionName
     ? effectiveBackendType === 'tmux'
       ? TmuxBackend.hasSession(persistentSessionName)
-      : HerdrBackend.hasSession(persistentSessionName)
+      : effectiveBackendType === 'zellij'
+        ? ZellijBackend.hasSession(persistentSessionName)
+        : HerdrBackend.hasSession(persistentSessionName)
     : false;
   if (willReattachPersistent) {
     log(`Re-attaching to existing ${effectiveBackendType} session: ${persistentSessionName} (requested CLI: ${cliAdapter.resolvedBin})`);
@@ -3007,6 +3065,11 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   childEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
   if (injectClaudeSandbox) childEnv.IS_SANDBOX = '1';
   if (claudeResumeTokenThreshold) childEnv.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD = claudeResumeTokenThreshold;
+  // Adapter-supplied env: points Claude-family forks at their data root (Seed's
+  // CLAUDE_CONFIG_DIR → `.claude-runtime`). Keys here are also in the tmux
+  // passthrough whitelist (BOTMUX_INJECTED_ENV_KEYS) so the tmux backend forwards
+  // them past the server's global env.
+  if (cliAdapter.spawnEnv) Object.assign(childEnv, cliAdapter.spawnEnv);
 
   backend.spawn(cliAdapter.resolvedBin, args, {
     cwd: cfg.workingDir,
@@ -3039,9 +3102,44 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // "no rotation at all". The pinned claudeJsonlPath above is still the
   // initial guess; the resolver corrects it on first write when Claude was
   // started with `--resume`.
-  if (cfg.cliId === 'claude-code' && cliPid) {
-    (backend as any).cliPid = cliPid;
-    (backend as any).cliCwd = cfg.workingDir;
+  if (claudeDataDir && cliPid) {
+    (backend as TmuxBackend | PtyBackend | ZellijBackend).cliPid = cliPid;
+    (backend as TmuxBackend | PtyBackend | ZellijBackend).cliCwd = cfg.workingDir;
+  }
+
+  // Async pid fallback: tmux/pty resolve the CLI pid synchronously above, but
+  // zellij's CLI subprocess starts AFTER spawn() returns (the zellij server
+  // forks the pane asynchronously), so getChildPid() is null right now. Without
+  // the marker, an in-CLI `botmux send` walks ancestor pids, finds no match,
+  // and reports "无法推断 session-id". Retry briefly (non-blocking — a sync wait
+  // would lose zellij's initial render since node-pty doesn't buffer pre-listener
+  // output) until the pid appears, then write the marker + wire claude-family pid.
+  if (!cliPid) {
+    let attempts = 0;
+    const resolveCliPidLate = () => {
+      if (!backend) return;
+      const pid = backend.getChildPid?.();
+      if (pid) {
+        if (process.env.SESSION_DATA_DIR && !cliPidMarker) {
+          try {
+            const markersDir = join(process.env.SESSION_DATA_DIR, '.botmux-cli-pids');
+            mkdirSync(markersDir, { recursive: true });
+            cliPidMarker = join(markersDir, String(pid));
+            writeFileSync(cliPidMarker, cfg.sessionId);
+            log(`CLI PID marker written (async): ${pid}`);
+          } catch (err: any) {
+            log(`Failed to write CLI PID marker (async): ${err.message}`);
+          }
+        }
+        if (claudeDataDir) {
+          (backend as TmuxBackend | PtyBackend | ZellijBackend).cliPid = pid;
+          (backend as TmuxBackend | PtyBackend | ZellijBackend).cliCwd = cfg.workingDir;
+        }
+        return;
+      }
+      if (++attempts < 25) setTimeout(resolveCliPidLate, 120); // ~3s budget
+    };
+    setTimeout(resolveCliPidLate, 120);
   }
 
   // On tmux re-attach, keep awaitingFirstPrompt = true so screen updates are
@@ -3055,13 +3153,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // the file Claude creates on first submit isn't absorbed as history,
   // and baseline-existing on resume so prior-run turns ARE absorbed (we
   // don't want to re-emit yesterday's conversation as fresh turns).
-  if (cfg.cliId === 'claude-code' && adapterSessionId) {
+  if (claudeDataDir && adapterSessionId) {
     const claudeBridgeSessionId = cfg.cliSessionId ?? adapterSessionId;
-    const claudeJsonl = claudeJsonlPathForSession(claudeBridgeSessionId, cfg.workingDir);
+    const claudeJsonl = claudeJsonlPathForSession(claudeBridgeSessionId, cfg.workingDir, claudeDataDir);
     startBridgeWatcher(claudeJsonl, {
       cliPid: cliPid ?? undefined,
       cliCwd: cfg.workingDir,
       mode: cfg.resume ? 'baseline-existing' : 'fresh-empty',
+      dataDir: claudeDataDir,
     });
   }
 
@@ -3267,6 +3366,71 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
             clientPtys.delete(ws);
           }
         });
+      } else if (lastInitConfig?.adoptMode && lastInitConfig?.adoptZellijPaneId) {
+        // ── Zellij-adopt per-WS attach ──
+        // Each WS client gets its own `zellij attach` PTY sized to the browser.
+        // zellij sizes the (shared) pane to the SMALLEST attached client, so
+        // when the user's terminal is detached the web client governs the size
+        // → fully browser-responsive (申晗's insight, verified), never resizing
+        // the user's terminal beyond min(theirs, browser). Locked-mode config
+        // (cleared keybinds) makes every keystroke reach the codex pane instead
+        // of being swallowed as a zellij shortcut. Bonus: raw byte stream — none
+        // of the dump-screen snapshot / \r\n / fixed-width machinery the relay
+        // needs. (The Lark screenshot card still uses the dump-screen
+        // ObserveBackend; unaffected.) Deferred until first resize, same as tmux.
+        const zSession = lastInitConfig.adoptZellijSession ?? '';
+        const cfgPath = ensureZellijAttachConfig();
+        let cp: pty.IPty | null = null;
+        const pendingInput: string[] = [];
+
+        const startAttach = (cols: number, rows: number) => {
+          if (cp) return;
+          cp = pty.spawn('zellij', ['--config', cfgPath, 'attach', zSession], {
+            name: 'xterm-256color',
+            cols,
+            rows,
+            env: zellijEnv() as { [key: string]: string },
+          });
+          clientPtys.set(ws, cp);
+          cp.onData((d: string) => {
+            if (ws.readyState === WebSocket.OPEN) ws.send(d);
+          });
+          cp.onExit(() => {
+            clientPtys.delete(ws);
+            if (ws.readyState === WebSocket.OPEN) ws.close();
+          });
+          for (const data of pendingInput) cp.write(data);
+          pendingInput.length = 0;
+        };
+
+        const spawnTimer = setTimeout(() => startAttach(150, 40), 500);
+
+        ws.on('message', (raw) => {
+          try {
+            const msg = JSON.parse(String(raw));
+            if (msg.type === 'resize' && msg.cols > 0 && msg.rows > 0) {
+              if (!cp) { clearTimeout(spawnTimer); startAttach(msg.cols, msg.rows); }
+              else cp.resize(msg.cols, msg.rows);
+            } else if (msg.type === 'input' && typeof msg.data === 'string') {
+              if (!authedClients.has(ws)) {
+                // Read-only: only let mouse events (scroll/select) through.
+                if (!/^\x1b\[([<M])/.test(msg.data)) return;
+              }
+              if (cp) cp.write(msg.data);
+              else pendingInput.push(msg.data);
+            }
+          } catch { /* ignore non-JSON or bad messages */ }
+        });
+
+        ws.on('close', () => {
+          clearTimeout(spawnTimer);
+          wsClients.delete(ws);
+          const existing = clientPtys.get(ws);
+          if (existing) {
+            try { existing.kill(); } catch { /* already dead */ }
+            clientPtys.delete(ws);
+          }
+        });
       } else {
         // ── Shared relay (PtyBackend OR tmux pipe mode) ──
         // History seed: prefer tmux's authoritative capture-pane in pipe mode
@@ -3274,9 +3438,20 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         // stream, which scrolls stale Ink redraw/spinner frames into scrollback
         // at any size mismatch and produces the stacked-footer history garble.
         // See chooseWebTerminalSeed for the full rationale.
+        // Adopt observes a pane we CANNOT resize (tmux adopt has
+        // ownsSession=false so resize() is a no-op; zellij drives via
+        // dump-screen). The client's FitAddon sizes its xterm to the browser,
+        // but the snapshot lines carry the PANE's width — any mismatch wraps the
+        // full-width TUI box lines and garbles the layout (the misalignment 申晗
+        // saw). Pin the client xterm to the pane's fixed size via a botmux OSC
+        // (sent BEFORE the seed so the client resizes before rendering it).
+        if (lastInitConfig?.adoptMode && isObserveBackend(backend)) {
+          const sz = (backend as ObserveBackend).getPaneSize();
+          if (sz && sz.cols > 0 && sz.rows > 0) ws.send(`\x1b]1989;${sz.cols};${sz.rows}\x07`);
+        }
         const seed = chooseWebTerminalSeed({
-          canCapture: isPipeMode && backend instanceof TmuxPipeBackend,
-          capture: () => (backend as TmuxPipeBackend).captureCurrentScreen(),
+          canCapture: isPipeMode && isObserveBackend(backend),
+          capture: () => (backend as ObserveBackend).captureCurrentScreen(),
           scrollback,
           onError: log,
         });
@@ -3468,8 +3643,9 @@ term.onData(function(d){
   }
   if(ws_&&ws_.readyState===1)ws_.send(JSON.stringify({type:'input',data:d}));
 });
+var fixedSize=false;
 function sendResize(){if(ws_&&ws_.readyState===1)ws_.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}))}
-window.addEventListener('resize',function(){fit.fit();sendResize()});
+window.addEventListener('resize',function(){if(!fixedSize){fit.fit()}sendResize()});
 (function connect(){
   var t=new URLSearchParams(location.search).get('token')||'';
   // Derive base from the current path so the WS connects to the same prefix the
@@ -3482,6 +3658,10 @@ window.addEventListener('resize',function(){fit.fit();sendResize()});
   ws.onopen=function(){el.textContent='connected';el.className='ok';sendResize()};
   ws.onmessage=function(e){
     var data=typeof e.data==='string'?e.data:new TextDecoder().decode(e.data);
+    // botmux OSC 1989: pin the xterm to the adopted pane's fixed size (the pane
+    // can't be resized, so FitAddon-to-browser would wrap the snapshot lines).
+    var _fs=data.match(/\\x1b\\]1989;(\\d+);(\\d+)\\x07/);
+    if(_fs){fixedSize=true;var _c=+_fs[1],_r=+_fs[2];if(_c>0&&_r>0){try{term.resize(_c,_r)}catch(ex){}}data=data.replace(_fs[0],'')}
     // Intercept OSC 52 clipboard sequence from tmux (set-clipboard on)
     var m=data.match(/\\x1b\\]52;[^;]*;([A-Za-z0-9+/=]+)(?:\\x07|\\x1b\\\\)/);
     if(m){try{_clipBuf=new TextDecoder().decode(Uint8Array.from(atob(m[1]),function(c){return c.charCodeAt(0)}));_doCopy(_clipBuf);_showCopied()}catch(ex){}}

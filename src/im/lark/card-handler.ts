@@ -1137,6 +1137,51 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   }
 
   // Handle adopt session selection
+  if (action?.value?.key === 'codex_app_thread_select' && option) {
+    const rootId = action?.value?.root_id;
+    if (!rootId) return;
+
+    const sKey = larkAppId ? sessionKey(rootId, larkAppId) : rootId;
+    const ds = activeSessions.get(sKey);
+    if (!ds) return;
+
+    if (!canOperate(ds.larkAppId, ds.chatId, operatorOpenId)) {
+      logger.info(`codex_app_thread_select blocked for non-operator user: ${operatorOpenId} (chat=${ds.chatId})`);
+      return { toast: { type: 'error', content: t('card.grant.toast_no_repo_perm', undefined, localeForBot(ds.larkAppId)) } };
+    }
+
+    let selected: { threadId: string };
+    try { selected = JSON.parse(option); } catch { return; }
+    if (!selected.threadId) return;
+
+    const botCfg = getBot(ds.larkAppId).config;
+    if (botCfg.cliId !== 'codex-app') return;
+
+    const { listCodexAppThreads } = await import('../../services/codex-app-threads.js');
+    let threads: Awaited<ReturnType<typeof listCodexAppThreads>>;
+    try {
+      threads = await listCodexAppThreads({
+        codexBin: botCfg.cliPathOverride,
+        cwd: getSessionWorkingDir(ds),
+        limit: 80,
+      });
+    } catch (err: any) {
+      await sessionReply(rootId, t('cmd.codex_app_adopt.list_failed', { error: err?.message ?? String(err) }, localeForBot(ds.larkAppId)));
+      return;
+    }
+    const target = threads.find(t => t.threadId === selected.threadId);
+    if (!target) {
+      await sessionReply(rootId, t('cmd.codex_app_adopt.thread_not_found', { threadId: selected.threadId }, localeForBot(ds.larkAppId)));
+      if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
+      return;
+    }
+
+    const { startCodexAppThreadSession } = await import('../../core/command-handler.js');
+    await startCodexAppThreadSession(target, ds, { activeSessions, sessionReply: deps.sessionReply, getActiveCount: () => 0, lastRepoScan }, larkAppId);
+    if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
+    return;
+  }
+
   if (action?.value?.key === 'adopt_select' && option) {
     const rootId = action?.value?.root_id;
     if (!rootId) return;
@@ -1151,17 +1196,27 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       return { toast: { type: 'error', content: t('card.grant.toast_no_repo_perm', undefined, localeForBot(ds.larkAppId)) } };
     }
 
-    // Parse selected session info
-    let selected: { key?: string; source?: string; tmuxTarget?: string; cliPid?: number };
+    // Parse selected session info (tmux/herdr: key; zellij: zellijSession+zellijPaneId)
+    let selected: { key?: string; source?: string; tmuxTarget?: string; zellijSession?: string; zellijPaneId?: string; cliPid?: number };
     try { selected = JSON.parse(option); } catch { return; }
 
-    // Re-discover to get full session info and validate
-    const { discoverAdoptableSessions, adoptTargetKey } = await import('../../core/session-discovery.js');
-    const botCliId = getBot(ds.larkAppId).config.cliId;
-    const sessions = discoverAdoptableSessions(botCliId);
-    const target = sessions.find(s => selected.key
-      ? adoptTargetKey(s) === selected.key
-      : s.tmuxTarget === selected.tmuxTarget && s.cliPid === selected.cliPid);
+    // Re-discover to get full session info and validate. Backend determines
+    // which discovery to run (re-confirms the pane + pid are still alive).
+    const botCfg = getBot(ds.larkAppId).config;
+    let target: Awaited<ReturnType<typeof resolveAdoptTarget>>;
+    async function resolveAdoptTarget() {
+      if (selected.zellijPaneId) {
+        const { discoverAdoptableZellijSessions } = await import('../../core/zellij-adopt-discovery.js');
+        return discoverAdoptableZellijSessions(botCfg.cliId)
+          .find(s => s.zellijSession === selected.zellijSession && s.zellijPaneId === selected.zellijPaneId && s.cliPid === selected.cliPid);
+      }
+      const { discoverAdoptableSessions, adoptTargetKey } = await import('../../core/session-discovery.js');
+      return discoverAdoptableSessions(botCfg.cliId)
+        .find(s => selected.key
+          ? adoptTargetKey(s) === selected.key
+          : s.tmuxTarget === selected.tmuxTarget && s.cliPid === selected.cliPid);
+    }
+    target = await resolveAdoptTarget();
     if (!target) {
       await sessionReply(rootId, t('cmd.adopt.target_exited', undefined, localeForBot(ds.larkAppId)));
       if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);

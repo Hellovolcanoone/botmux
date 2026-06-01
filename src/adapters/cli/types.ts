@@ -171,6 +171,25 @@ export interface CliAdapter {
    *  presented as-is; the setup prompt always appends an "Other / custom"
    *  free-text option, so this list is curation, not a hard whitelist. */
   readonly modelChoices?: readonly string[];
+
+  /** Claude-family CLIs only (claude-code, seed). The data root holding
+   *  `projects/<hash>/<id>.jsonl`, `sessions/<pid>.json`, `tasks/`,
+   *  `keybindings.json` and `settings.json`. When set, the worker drives the
+   *  JSONL submit-confirmation, bridge fallback and pid resolution against this
+   *  dir (instead of hardcoding `~/.claude`). undefined → not Claude-family. */
+  readonly claudeDataDir?: string;
+
+  /** Claude-family CLIs only. Path to the `.claude.json` folder-trust / state
+   *  file (pre-accepted at spawn so a fresh workingDir doesn't block on the
+   *  interactive trust dialog). `~/.claude.json` for Claude Code; inside the
+   *  data root for forks that set CLAUDE_CONFIG_DIR. */
+  readonly claudeStateJsonPath?: string;
+
+  /** Extra env merged into the spawned child's environment. Used by Claude-family
+   *  forks to point the CLI at its data root (e.g. Seed's `CLAUDE_CONFIG_DIR`).
+   *  Keys placed here are also forwarded through the tmux backend (see
+   *  BOTMUX_INJECTED_ENV_KEYS). undefined → inherit the worker env unchanged. */
+  readonly spawnEnv?: Readonly<Record<string, string>>;
 }
 
-export type CliId = 'claude-code' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr' | 'hermes' | 'mira';
+export type CliId = 'claude-code' | 'seed' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr' | 'hermes' | 'mira';

@@ -108,6 +108,10 @@ export const messages: Record<string, string> = {
   'card.adopt.title': '📡 Choose a CLI session to adopt',
   'card.adopt.placeholder_select': 'Pick a CLI session',
   'card.adopt.uptime_unknown': 'unknown',
+  'card.codex_app_thread.title': '📱 Choose a Codex App conversation',
+  'card.codex_app_thread.subtitle': 'Resume an existing local Codex App thread. botmux will continue it through the app-server protocol.',
+  'card.codex_app_thread.placeholder_select': 'Pick a Codex App conversation',
+  'card.codex_app_thread.updated_unknown': 'unknown time',
 
   // ─── /relay picker card (pull mode) ─────────────────────────────────────
   'card.relay.title': '📋 Pick a session to relay into this chat',
@@ -188,6 +192,10 @@ export const messages: Record<string, string> = {
   'cmd.adopt.pane_not_found': 'tmux pane not found: {pane}',
   'cmd.adopt.target_exited': '⚠️ Target CLI session has exited.',
   'cmd.adopt.success': '📡 Adopted {cliName} · {project} ({pane})',
+  'cmd.codex_app_adopt.no_threads': 'No resumable Codex App conversation found.',
+  'cmd.codex_app_adopt.thread_not_found': 'Codex App conversation not found: {threadId}',
+  'cmd.codex_app_adopt.list_failed': 'Failed to read Codex App conversations: {error}',
+  'cmd.codex_app_adopt.success': '📱 Resumed Codex App conversation: {title}',
   'cmd.oncall.need_group': '/oncall must be used in a group chat (as a new topic).',
   'cmd.oncall.not_bound': 'This group is not bound to an oncall project yet.\n\nUsage:\n/oncall bind <path>     — bind this group to a project directory, skip the repo-selection card\n/oncall unbind          — unbind this group from oncall\n/oncall status          — show current binding\n\nOnce bound: anyone in the group can @ the bot to ask; only allowedUsers can click card buttons or run /cd /restart /close.',
   'cmd.oncall.bound': '🟢 Bound to oncall\nWorking dir: {dir}\n\nUse /oncall unbind to release; /cd <path> changes the working directory (still in oncall mode).',

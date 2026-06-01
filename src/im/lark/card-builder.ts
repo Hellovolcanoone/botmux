@@ -1,12 +1,15 @@
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import type { CliId } from '../../adapters/cli/types.js';
 import { adoptTargetKey, adoptTargetLabel, type AdoptableSession } from '../../core/session-discovery.js';
+import type { ZellijAdoptableSession } from '../../core/zellij-adopt-discovery.js';
+import type { CodexAppThreadSummary } from '../../services/codex-app-threads.js';
 import type { DisplayMode, StreamStatus } from '../../types.js';
 import type { CliUsageLimitState } from '../../utils/cli-usage-limit.js';
 import { t, type Locale } from '../../i18n/index.js';
 
 const cliDisplayNames: Record<CliId, string> = {
   'claude-code': 'Claude',
+  'seed': 'Seed',
   'aiden': 'Aiden',
   'coco': 'CoCo',
   'codex': 'Codex',
@@ -1221,16 +1224,24 @@ function wrapCard(elements: any[], locale?: Locale): any {
   };
 }
 
-export function buildAdoptSelectCard(sessions: AdoptableSession[], rootMessageId?: string, locale?: Locale): string {
+export function buildAdoptSelectCard(
+  sessions: Array<AdoptableSession | ZellijAdoptableSession>,
+  rootMessageId?: string,
+  locale?: Locale,
+): string {
   const unknownUptime = t('card.adopt.uptime_unknown', undefined, locale);
   const options = sessions.map((s) => {
+    const zellij = 'zellijPaneId' in s;
     const project = s.cwd.split('/').pop() || s.cwd;
     const cliName = getCliDisplayName(s.cliId);
     const uptime = s.startedAt ? formatDuration(Date.now() - s.startedAt) : unknownUptime;
-    const targetLabel = adoptTargetLabel(s);
+    const targetLabel = zellij ? `${s.zellijSession}/${s.zellijPaneId}` : adoptTargetLabel(s);
+    const value = zellij
+      ? { zellijSession: s.zellijSession, zellijPaneId: s.zellijPaneId, cliPid: s.cliPid }
+      : { key: adoptTargetKey(s), source: s.source, tmuxTarget: s.tmuxTarget, cliPid: s.cliPid };
     return {
       text: { tag: 'plain_text' as const, content: `${cliName} · ${project} · ${targetLabel} · ${uptime}` },
-      value: JSON.stringify({ key: adoptTargetKey(s), source: s.source }),
+      value: JSON.stringify(value),
     };
   });
 
@@ -1249,6 +1260,60 @@ export function buildAdoptSelectCard(sessions: AdoptableSession[], rootMessageId
             placeholder: { tag: 'plain_text', content: t('card.adopt.placeholder_select', undefined, locale) },
             options,
             value: { key: 'adopt_select', root_id: rootMessageId ?? '' },
+          },
+        ],
+      },
+    ],
+  };
+  return JSON.stringify(card);
+}
+
+function compactPlainText(s: string, max = 72): string {
+  const oneLine = s.replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? oneLine.slice(0, max - 1) + '…' : oneLine;
+}
+
+function formatThreadUpdatedAt(ms: number | undefined, locale?: Locale): string {
+  if (!ms) return t('card.codex_app_thread.updated_unknown', undefined, locale);
+  const loc = locale === 'en' ? 'en-US' : 'zh-CN';
+  return new Date(ms).toLocaleString(loc, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+export function buildCodexAppThreadSelectCard(threads: CodexAppThreadSummary[], rootMessageId?: string, locale?: Locale): string {
+  const options = threads.map((thread) => {
+    const title = compactPlainText(thread.name || thread.preview || thread.threadId, 44);
+    const project = compactPlainText(thread.cwd.split('/').pop() || thread.cwd, 18);
+    const updated = formatThreadUpdatedAt(thread.updatedAtMs, locale);
+    return {
+      text: { tag: 'plain_text' as const, content: `${title} · ${project} · ${updated}` },
+      value: JSON.stringify({ threadId: thread.threadId }),
+    };
+  });
+
+  const card = {
+    config: { wide_screen_mode: true },
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: t('card.codex_app_thread.title', undefined, locale) },
+    },
+    elements: [
+      {
+        tag: 'div',
+        text: { tag: 'lark_md', content: t('card.codex_app_thread.subtitle', undefined, locale) },
+      },
+      {
+        tag: 'action',
+        actions: [
+          {
+            tag: 'select_static',
+            placeholder: { tag: 'plain_text', content: t('card.codex_app_thread.placeholder_select', undefined, locale) },
+            options,
+            value: { key: 'codex_app_thread_select', root_id: rootMessageId ?? '' },
           },
         ],
       },

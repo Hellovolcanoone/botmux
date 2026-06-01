@@ -26,7 +26,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
-import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic } from './core/dispatch.js';
+import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic, resolveReportTarget } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
@@ -252,6 +252,12 @@ function ecosystemConfig(): string {
       // ad-hoc (e.g. `BOTMUX_MEMORY_DIAG_INTERVAL_MS=5000`) when chasing an
       // RSS regression — turned off in master so logs stay quiet.
       BOTMUX_MEMORY_DIAG_INTERVAL_MS: process.env.BOTMUX_MEMORY_DIAG_INTERVAL_MS ?? '0',
+      // Quiet restart (dev): when set, restore registers sessions but skips the
+      // tmux eager re-fork so restarts don't re-push unfinished-session cards.
+      // Pass the shell value through explicitly (default '0') so it overrides
+      // any stale value carried by the long-lived pm2 god daemon — letting an
+      // unset shell var truly turn quiet-restart back off.
+      BOTMUX_QUIET_RESTART: process.env.BOTMUX_QUIET_RESTART ?? '0',
     },
   }));
 
@@ -656,7 +662,7 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   }
   console.log('✅ 凭证有效（tenant_access_token 已成功获取）\n');
 
-  console.log('支持的 CLI: 1) claude-code  2) aiden  3) coco  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira');
+  console.log('支持的 CLI: 1) claude-code  2) aiden  3) coco  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira  13) seed');
   const cliChoice = await ask(rl, 'CLI 适配器 [1]: ');
   let cliId: CliId;
   try {
@@ -756,7 +762,7 @@ async function promptEditBotConfig(
   ]);
   input.larkAppSecret = await ask(rl, `LARK_APP_SECRET [保留当前值]: `);
 
-  console.log('\n支持的 CLI: 1) claude-code  2) aiden  3) coco  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira');
+  console.log('\n支持的 CLI: 1) claude-code  2) aiden  3) coco  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira  13) seed');
   printInputHelp('CLI 适配器', [
     '选择 botmux 需要套用哪一种 CLI 参数协议和会话恢复方式。',
     '留空保留当前值；可以输入序号，也可以直接输入适配器 ID。',
@@ -794,8 +800,8 @@ async function promptEditBotConfig(
   }
 
   printInputHelp('会话后端 backendType', [
-    '可选。pty 更轻量；tmux 支持 adopt 和 Web Terminal 附着；herdr 支持托管持久会话。',
-    '留空保留当前值；输入 - 回到自动检测；只接受 pty、tmux 或 herdr。',
+    '可选。pty 更轻量；tmux 支持 adopt 和 Web Terminal 附着；herdr 支持托管持久会话；zellij 为实验后端（需 zellij >= 0.44）。',
+    '留空保留当前值；输入 - 回到自动检测；接受 pty / tmux / herdr / zellij。',
   ]);
   input.backendType = await ask(rl, `会话后端 backendType [${formatOptionalValue(bot.backendType)}]: `);
 
@@ -3516,24 +3522,26 @@ async function cmdReport(rest: string[]): Promise<void> {
   if (!s) { console.error(`未找到 session ${sid}`); process.exit(1); }
   if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
 
-  // Resolve the orchestrator coords: its thread/chat from the dispatch registry
-  // (keyed by this sub-bot's thread root), its open_id from this session.
+  // Resolve where the report goes + who to @. Same-machine: the dispatch registry
+  // (keyed by this sub-bot's thread root) carries the orchestrator's exact coords.
+  // CROSS-MACHINE: the orchestrator is on another machine, so its registry isn't
+  // on THIS one — resolveReportTarget falls back to this sub-bot's own session
+  // (report top-level into its chat, @ the dispatcher via creatorOpenId). See
+  // resolveReportTarget / Session.creatorOpenId.
   const regPath = join(resolveDataDir(), 'orchestrate-dispatch.json');
   let reg: Record<string, any> = {};
   try { if (existsSync(regPath)) reg = JSON.parse(readFileSync(regPath, 'utf-8')); } catch { /* */ }
   const entry = s.rootMessageId ? reg[s.rootMessageId] : undefined;
-  // The orchestrator's open_id (sub-bot-app-scoped) is whoever created this
-  // session = the dispatcher. Prefer `creatorOpenId` (set on EVERY creation path,
-  // incl. a no-`/repo` foreign-bot kickoff auto-create where ownerOpenId is
-  // nulled), then `ownerOpenId` (older sessions / `/repo` prime). NEVER
-  // quoteTargetSenderOpenId alone: it tracks the *last* sender who @-ed this
-  // sub-bot, so in a coder+reviewer topic it drifts to the reviewer (observed
-  // live: the coder's report @-ed the reviewer, not the orchestrator). Keep it as
-  // a last-ditch fallback only for pre-existing sessions that predate both fields.
-  const orchOpenId = s.creatorOpenId ?? s.ownerOpenId ?? s.quoteTargetSenderOpenId;
-  if (!entry || !orchOpenId) {
+  const tgt = resolveReportTarget({
+    registryEntry: entry,
+    sessionChatId: s.chatId,
+    creatorOpenId: s.creatorOpenId,
+    ownerOpenId: s.ownerOpenId,
+    quoteTargetSenderOpenId: s.quoteTargetSenderOpenId,
+  });
+  if (!tgt.orchOpenId || !tgt.orchChatId) {
     console.error(
-      '当前会话不是被 botmux dispatch 派活的子项目会话（缺少主编排坐标）。\n' +
+      '找不到主编排坐标：本会话没记录派活者（creatorOpenId/ownerOpenId 都空）或缺 chatId——大概不是被 botmux dispatch 派活的会话。\n' +
       '若确需回报，请改用 `botmux send` 或显式 @ 对应的人/ bot。');
     process.exit(1);
   }
@@ -3543,23 +3551,25 @@ async function cmdReport(rest: string[]): Promise<void> {
   const { sendMessage, replyMessage } = await import('./im/lark/client.js');
   const appId = s.larkAppId!;
 
-  const paras = buildReportContent({ orchOpenId, content });
+  const paras = buildReportContent({ orchOpenId: tgt.orchOpenId, content });
   const postJson = JSON.stringify({ zh_cn: { title: '', content: paras } });
 
   try {
     let msgId: string;
-    if (entry.orchScope === 'chat' || !entry.orchRoot) {
-      // Orchestrator runs at chat scope (普通群整群一个会话) → post to the chat.
-      msgId = await sendMessage(appId, entry.orchChatId, postJson, 'post');
+    if (tgt.orchScope === 'chat' || !tgt.orchRoot) {
+      // Orchestrator at chat scope, or cross-machine fallback → post top-level
+      // into the chat (the sub-topic's chat = the orchestrator's chat).
+      msgId = await sendMessage(appId, tgt.orchChatId, postJson, 'post');
     } else {
-      // Orchestrator lives in its own thread → reply into it so its existing
-      // session (anchored on orchRoot) is the one that receives the report.
-      msgId = await replyMessage(appId, entry.orchRoot, postJson, 'post', true);
+      // Same-machine thread-scope orchestrator → reply into its thread so its
+      // existing context-rich session (anchored on orchRoot) receives the report.
+      msgId = await replyMessage(appId, tgt.orchRoot, postJson, 'post', true);
     }
     console.log(JSON.stringify({
       success: true,
-      reportedTo: entry.orchRoot || entry.orchChatId,
-      orchestrator: orchOpenId,
+      reportedTo: tgt.orchRoot || tgt.orchChatId,
+      orchestrator: tgt.orchOpenId,
+      viaRegistry: !!entry,
       messageId: msgId,
     }));
   } catch (err: any) {

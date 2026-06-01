@@ -18,6 +18,7 @@ import {
   findSubBotTopic,
   eligibleAutoMentionAliases,
   offTopicSubBotTopic,
+  resolveReportTarget,
 } from '../src/core/dispatch.js';
 
 describe('parseDispatchBotSpec', () => {
@@ -229,5 +230,26 @@ describe('offTopicSubBotTopic', () => {
 
   it('allows when there is no dispatch registry', () => {
     expect(offTopicSubBotTopic({ mentionOpenId: 'ou_subbot', quoteTargetSenderOpenId: 'ou_human', chatId: 'oc_main', registry: {}, activeSeeds: new Set() })).toBeNull();
+  });
+});
+
+describe('resolveReportTarget', () => {
+  it('uses the registry entry when present (same-machine, precise thread routing)', () => {
+    const r = resolveReportTarget({
+      registryEntry: { orchChatId: 'oc_orch', orchScope: 'thread', orchRoot: 'om_root' },
+      sessionChatId: 'oc_sub', creatorOpenId: 'ou_orch',
+    });
+    expect(r).toEqual({ orchChatId: 'oc_orch', orchScope: 'thread', orchRoot: 'om_root', orchOpenId: 'ou_orch' });
+  });
+
+  it('CROSS-MACHINE: with no registry entry, derives from the session (chatId + chat-scope)', () => {
+    const r = resolveReportTarget({ registryEntry: undefined, sessionChatId: 'oc_sub', creatorOpenId: 'ou_orch' });
+    expect(r).toEqual({ orchChatId: 'oc_sub', orchScope: 'chat', orchRoot: '', orchOpenId: 'ou_orch' });
+  });
+
+  it('orchOpenId prefers creatorOpenId, then ownerOpenId, then quoteTargetSenderOpenId', () => {
+    expect(resolveReportTarget({ creatorOpenId: 'c', ownerOpenId: 'o', quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('c');
+    expect(resolveReportTarget({ ownerOpenId: 'o', quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('o');
+    expect(resolveReportTarget({ quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('q');
   });
 });

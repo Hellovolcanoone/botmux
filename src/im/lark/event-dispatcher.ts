@@ -896,7 +896,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             // Serialize per anchor so back-to-back messages to the same thread
             // (e.g. dispatch's /repo prime + brief kickoff) don't interleave with
             // the first's async session-spawn. See anchor-serializer.ts.
-            serializeByAnchor(ctx.anchor, () =>
+            await serializeByAnchor(ctx.anchor, () =>
               handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId }))
               .catch(err => logger.error(`Error handling message event: ${err}`));
             return;
@@ -936,7 +936,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           logger.info(`Bot-to-bot @mention detected (scope=${ctx.scope}): routing to handleThreadReply`);
           // Serialize per anchor — a sub-bot dispatched a /repo prime + kickoff
           // back-to-back into this thread must be handled in order, not raced.
-          serializeByAnchor(ctx.anchor, () =>
+          await serializeByAnchor(ctx.anchor, () =>
             handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId }))
             .catch(err => logger.error(`Error handling bot @mention: ${err}`));
           return;
@@ -1102,7 +1102,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // processed in arrival order — never concurrently. Without this a fast
         // second message interleaves with the first's async session-spawn and is
         // dropped (worker-not-ready → re-fork branch). See anchor-serializer.ts.
-        serializeByAnchor(ctx.anchor, () => ownsSession
+        await serializeByAnchor(ctx.anchor, () => ownsSession
           ? handlers.handleThreadReply(data, ctx)
           : handlers.handleNewTopic(data, ctx))
           .catch(err => logger.error(`Error handling message event: ${err}`));

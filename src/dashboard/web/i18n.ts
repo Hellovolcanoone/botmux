@@ -162,7 +162,7 @@ const zh: DashboardMessages = {
   'botDefaults.disableStreamingHelp': '不再发实时刷新的会话状态卡（含「打开终端」入口）；任务最终结果仍通过消息送达。适合嫌流式卡片烦的场景。',
   'botDefaults.writableLink': '卡片上直接给可操作（可写）终端链接',
   'botDefaults.writableLinkHelp': '⚠️ 在流式卡片正文直接贴出可写终端链接，群内任何人都能点开并操控终端。不勾＝保持现状（走「获取操作链接」按钮私聊发给点击者）。',
-  'botDefaults.writableLinkMoot': '已关闭流式卡片，本项不生效',
+  'botDefaults.writableLinkMoot': '已关闭流式卡片',
   'botDefaults.privateCard': '/card 发私密卡片（仅授权人可见）',
   'botDefaults.privateCardHelp': '开启后 /card 改用「仅特定人可见」的临时卡片：只发给 owner（allowedUsers），/grant 授权对话的人和群里其他人都看不到。代价：是静态快照、不会实时刷新；且仅普通群可用（话题群 / 单聊会失败，不降级）。只影响 /card 命令，自动流式卡不变。',
   'botDefaults.cardPrefSaved': '已保存',

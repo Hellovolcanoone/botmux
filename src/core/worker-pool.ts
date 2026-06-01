@@ -738,9 +738,9 @@ function cleanupGlobalBotmuxSkillsOnce(): void {
  *  Claude keys trust off realpath(cwd) (its getcwd(3) is already realpath'd),
  *  so seed that path. Merge-safe + best-effort: only ADDS the flag, never
  *  clobbers other keys; any failure is swallowed so it can't block spawn. */
-export function ensureClaudeFolderTrust(workingDir: string): void {
+export function ensureClaudeFolderTrust(workingDir: string, stateJsonPath: string = join(homedir(), '.claude.json')): void {
   try {
-    const configPath = join(homedir(), '.claude.json');
+    const configPath = stateJsonPath;
     let canonical: string;
     try { canonical = realpathSync(workingDir); } catch { canonical = workingDir; }
 
@@ -1115,8 +1115,13 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
   const botCfg = bot.config;
   // worker.js lives in the same directory as daemon.js (src/)
   const workerPath = join(__dirname, '..', 'worker.js');
-  const cwd = cb.getSessionWorkingDir(ds);
   const t = tag(ds);
+  // A fork() whose cwd no longer exists emits an unhandled 'error' (spawn
+  // ENOENT) that crashes the WHOLE daemon (→ pm2 crash-loop). Fall back to
+  // home so a stale session workingDir can never take the daemon down.
+  const rawCwd = cb.getSessionWorkingDir(ds);
+  const cwd = rawCwd && existsSync(rawCwd) ? rawCwd : homedir();
+  if (cwd !== rawCwd) logger.warn(`[${t}] workingDir "${rawCwd}" does not exist — falling back to ${cwd}`);
 
   // Guard against double-fork: if a worker is already running, kill it first
   if (ds.worker && !ds.worker.killed) {
@@ -1131,7 +1136,11 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
   ensureCliEnv(botCfg.cliId, botCfg.cliPathOverride);
   // Claude Code blocks on the interactive folder-trust dialog the first time
   // it runs in an untrusted workingDir; pre-accept it so the spawn doesn't hang.
-  if (botCfg.cliId === 'claude-code') ensureClaudeFolderTrust(cwd);
+  // Seed CLI (Claude Code fork) has the same dialog — drive both off the
+  // adapter's claude-family fields, writing to each variant's own .claude.json
+  // (`~/.claude.json` for claude, `.claude-runtime/.claude.json` for seed).
+  const familyAdapter = createCliAdapterSync(botCfg.cliId, botCfg.cliPathOverride);
+  if (familyAdapter.claudeStateJsonPath) ensureClaudeFolderTrust(cwd, familyAdapter.claudeStateJsonPath);
 
   // Prepend ~/.botmux/bin to PATH so CLIs can call `botmux send` etc.
   // The wrapper script there is written by the daemon at startup.
@@ -1150,6 +1159,12 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
       LARK_APP_ID: botCfg.larkAppId,
       LARK_APP_SECRET: botCfg.larkAppSecret,
     },
+  });
+
+  // A fork-level failure (spawn ENOENT, etc.) emits 'error'; without a handler
+  // the unhandled event crashes the daemon. Log and move on.
+  worker.on('error', (err) => {
+    logger.error(`[${t}] Worker fork error: ${(err as Error)?.message ?? err}`);
   });
 
   // Pipe worker stdout/stderr to daemon logger.
@@ -1897,9 +1912,14 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
 
   // No ensureCliSkills — adopt mode attaches to an existing CLI session
 
+  // Fall back to home if the adopted cwd is gone — a missing fork cwd emits an
+  // unhandled 'error' (spawn ENOENT) that would crash the daemon.
+  const rawAdoptCwd = adopted.cwd ?? ds.workingDir ?? process.cwd();
+  const adoptCwd = rawAdoptCwd && existsSync(rawAdoptCwd) ? rawAdoptCwd : homedir();
+  if (adoptCwd !== rawAdoptCwd) logger.warn(`[${t}] adopt cwd "${rawAdoptCwd}" does not exist — falling back to ${adoptCwd}`);
   const worker = fork(workerPath, [], {
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-    cwd: adopted.cwd ?? ds.workingDir ?? process.cwd(),
+    cwd: adoptCwd,
     env: {
       ...process.env,
       CLAUDECODE: undefined,
@@ -1907,6 +1927,11 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
       LARK_APP_ID: botCfg.larkAppId,
       LARK_APP_SECRET: botCfg.larkAppSecret,
     },
+  });
+
+  // A fork-level failure emits 'error'; without a handler it crashes the daemon.
+  worker.on('error', (err) => {
+    logger.error(`[${t}] Adopt worker fork error: ${(err as Error)?.message ?? err}`);
   });
 
   // Pipe worker stdout/stderr — both go through logger.info (→ daemon.log,
@@ -1954,6 +1979,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
       ? claudeJsonlPathForSession(adopted.sessionId, adopted.cwd)
       : undefined;
   const isStructuredBridge = adoptedCliId === 'codex' || adoptedCliId === 'coco' || adoptedCliId === 'mtr';
+  const adoptBackendType = adopted.source === 'herdr' ? 'herdr' : adopted.zellijPaneId ? 'zellij' : 'tmux';
 
   const initMsg: DaemonToWorker = {
     type: 'init',
@@ -1965,7 +1991,6 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     cliSessionId: isStructuredBridge ? adopted.sessionId : undefined,
     model: botCfg.model,
     disableCliBypass: botCfg.disableCliBypass === true,
-    backendType: adopted.source === 'herdr' ? 'herdr' : 'tmux',
     prompt: '',
     resume: false,
     ownerOpenId: ds.ownerOpenId,
@@ -1975,20 +2000,30 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     botName: bot.botName,
     botOpenId: bot.botOpenId,
     locale: botLocale(botCfg),
+    // Zellij adopt targets carry zellijSession+zellijPaneId (observe via
+    // dump-screen / drive via action); tmux carries tmuxTarget (pipe-pane).
+    // The worker's adopt branch picks the backend from whichever is present.
+    backendType: adoptBackendType,
     adoptMode: true,
-    adoptSource: adopted.source ?? 'tmux',
+    adoptSource: adopted.source ?? adoptBackendType,
     adoptTmuxTarget: adopted.tmuxTarget,
     adoptHerdrSessionName: adopted.herdrSessionName,
     adoptHerdrTarget: adopted.herdrTarget,
     adoptHerdrPaneId: adopted.herdrPaneId,
+    adoptZellijSession: adopted.zellijSession,
+    adoptZellijPaneId: adopted.zellijPaneId,
     adoptPaneCols: adopted.paneCols,
     adoptPaneRows: adopted.paneRows,
     bridgeJsonlPath,
     // PID + cwd: claude uses for `~/.claude/sessions/<pid>.json` resolver;
     // codex uses for `/proc/<pid>/fd` rollout discovery (works even if
-    // session-discovery couldn't probe sessionId up-front).
-    adoptCliPid: hasCliPid && (adoptedCliId === 'claude-code' || isStructuredBridge) ? adopted.originalCliPid : undefined,
-    adoptCwd: hasCliPid && (adoptedCliId === 'claude-code' || isStructuredBridge) ? adopted.cwd : undefined,
+    // session-discovery couldn't probe sessionId up-front). zellij adopt ALSO
+    // needs the pid unconditionally: ZellijObserveBackend's liveness watches
+    // the CLI pid (process.kill(pid,0)) so the worker onExit's when a user-typed
+    // CLI exits back to a shell — without it, aiden/gemini/opencode/hermes would
+    // fall back to pane-only liveness and keep routing input into the shell.
+    adoptCliPid: hasCliPid && (adoptedCliId === 'claude-code' || isStructuredBridge || !!adopted.zellijPaneId) ? adopted.originalCliPid : undefined,
+    adoptCwd: hasCliPid && (adoptedCliId === 'claude-code' || isStructuredBridge || !!adopted.zellijPaneId) ? adopted.cwd : undefined,
     // Restored-from-metadata: this fork is recreating an /adopt session after
     // a daemon restart, NOT a fresh /adopt command. The Lark thread already
     // has every prior turn pushed as cards, so the worker should skip the
@@ -2015,7 +2050,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   ds.worker = worker;
   ds.spawnedAt = Date.now();
   ds.cliVersion = '';
-  logger.info(`[${t}] Adopt worker forked (pid: ${worker.pid}, target: ${adopted.tmuxTarget})`);
+  logger.info(`[${t}] Adopt worker forked (pid: ${worker.pid}, target: ${adopted.tmuxTarget ?? `${adopted.zellijSession}/${adopted.zellijPaneId}`})`);
 
   ds.exitEventEmitted = false;
   dashboardEventBus.publish({

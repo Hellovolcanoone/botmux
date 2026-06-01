@@ -8,6 +8,7 @@ function th(sort: string, label: string): string {
 
 const CLI_FILTER_OPTIONS = [
   'claude-code',
+  'seed',
   'codex',
   'codex-app',
   'cursor',

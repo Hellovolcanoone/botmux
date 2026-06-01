@@ -20,17 +20,37 @@
 const queues = new Map<string, Promise<unknown>>();
 
 /**
+ * Max time the NEXT work waits for the previous same-anchor work before starting
+ * anyway. The ordering we actually need (dispatch's /repo prime → brief kickoff)
+ * completes in ~1s; this only bounds the damage when a handler is slow or hangs.
+ * Without it, one stuck handler blocks the anchor's queue forever — so a busy bot
+ * MISSES every subsequent @ to that chat/thread (observed: a reviewer had to be
+ * re-@-ed because "上一条可能没触发到你"). Past the cap we fall back to the prior
+ * concurrent behavior for that pair (lose strict order, never lose the message).
+ */
+const SERIALIZE_MAX_WAIT_MS = 5000;
+
+/**
  * Queue `work` so it runs only after any previously-queued work for the same
  * `anchor` has settled (resolved OR rejected — a failing handler never blocks
- * the next message). Returns a promise that settles with `work`'s outcome, so
+ * the next message) OR `capMs` elapses (a slow/hung handler must not block the
+ * queue indefinitely). Returns a promise that settles with `work`'s outcome, so
  * callers can still attach `.catch` for logging. Different anchors are
  * independent and run concurrently.
  */
-export function serializeByAnchor(anchor: string, work: () => Promise<void>): Promise<void> {
+export function serializeByAnchor(
+  anchor: string,
+  work: () => Promise<void>,
+  capMs: number = SERIALIZE_MAX_WAIT_MS,
+): Promise<void> {
   const prev = queues.get(anchor) ?? Promise.resolve();
-  // `prev.then(work, work)` runs `work` regardless of whether `prev` resolved or
-  // rejected — one handler's failure must not stall the anchor's queue.
-  const next = prev.then(work, work);
+  // Wait for `prev` to settle, but no longer than `capMs` — `prev.then` swallows
+  // its outcome (one handler's failure must not stall the queue), and the race
+  // with a timer bounds head-of-line blocking when `prev` is slow/hung.
+  const settledOrCapped = capMs > 0
+    ? Promise.race([prev.then(() => {}, () => {}), new Promise<void>(res => setTimeout(res, capMs))])
+    : prev.then(() => {}, () => {});
+  const next = settledOrCapped.then(work);
   queues.set(anchor, next);
   // Garbage-collect the entry once this call is the tail of the chain, so the
   // map doesn't grow unbounded across the daemon's lifetime. Swallow `next`'s

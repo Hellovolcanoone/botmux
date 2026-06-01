@@ -478,6 +478,9 @@ const BOTMUX_INJECTED_ENV_KEYS = [
   // Claude Code 2.1.x resume-summary 菜单的抑制阈值（issue #62）。worker 为
   // claude-code 注入一个极大值绕过菜单；只有进了这条白名单才会被透传进 tmux pane。
   'CLAUDE_CODE_RESUME_TOKEN_THRESHOLD',
+  // Seed CLI（Claude Code fork）的数据根目录。worker 为 seed 注入它指向 seed 自己的
+  // `.claude-runtime`，bridge 才能盯对文件；不进白名单 tmux pane 就拿不到。
+  'CLAUDE_CONFIG_DIR',
 ] as const;
 
 /**

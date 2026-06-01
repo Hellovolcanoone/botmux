@@ -125,6 +125,7 @@ vi.mock('../src/services/project-scanner.js', () => ({
 vi.mock('../src/im/lark/card-builder.js', () => ({
   buildRepoSelectCard: vi.fn(() => '{"card":"json"}'),
   buildAdoptSelectCard: vi.fn(() => '{"card":"adopt-select"}'),
+  buildCodexAppThreadSelectCard: vi.fn(() => '{"card":"codex-app-thread-select"}'),
   buildSessionClosedCard: vi.fn(
     (sid: string) =>
       `{"header":{"title":{"content":"🛑 会话已关闭"}},"action":"resume","cmd":"botmux resume ${sid.substring(0, 12)}"}`,
@@ -241,6 +242,17 @@ vi.mock('../src/core/session-discovery.js', async (importOriginal) => {
   };
 });
 
+// /adopt now merges tmux + zellij discovery; mock zellij so tests don't shell
+// out to a real `zellij` on the host (would surface live sessions and flake).
+vi.mock('../src/core/zellij-adopt-discovery.js', () => ({
+  discoverAdoptableZellijSessions: vi.fn(() => []),
+  validateZellijAdoptTarget: vi.fn(() => true),
+}));
+
+vi.mock('../src/services/codex-app-threads.js', () => ({
+  listCodexAppThreads: vi.fn(async () => []),
+}));
+
 vi.mock('../src/utils/user-token.js', () => ({
   generateAuthUrl: vi.fn(() => ({ authUrl: 'https://open.feishu.cn/auth/v1/test' })),
   getTokenStatus: vi.fn(() => 'User token: active'),
@@ -303,18 +315,33 @@ import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
 import { deleteMessage, sendMessage, listChatBotMembers } from '../src/im/lark/client.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
-import { getAllBots } from '../src/bot-registry.js';
+import { getAllBots, getBot } from '../src/bot-registry.js';
 import { generateAuthUrl, getTokenStatus } from '../src/utils/user-token.js';
 import { bindOncall } from '../src/services/oncall-store.js';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 import { scanMultipleProjects } from '../src/services/project-scanner.js';
 import { discoverAdoptableSessions } from '../src/core/session-discovery.js';
+import { listCodexAppThreads } from '../src/services/codex-app-threads.js';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
 const LARK_APP_ID = 'app-1';
+const CODEX_APP_ID = 'app-codex-app';
 const ROOT_ID = 'om_root_abc123';
 const CHAT_ID = 'oc_chat_xyz';
+
+function defaultGetBot(id: string = 'app-1') {
+  return {
+    botName: id === 'app-2' ? 'Codex' : 'Claude',
+    config: {
+      larkAppId: id,
+      larkAppSecret: 'secret-1',
+      cliId: id === 'app-2' ? ('codex' as const) : ('claude-code' as const),
+      workingDir: '~/projects',
+      workingDirs: ['~/projects'],
+    },
+  };
+}
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -368,7 +395,7 @@ function makeLarkMessage(content: string, overrides: Partial<LarkMessage> = {}):
 function makeDeps(ds?: DaemonSession): CommandHandlerDeps {
   const activeSessions = new Map<string, DaemonSession>();
   if (ds) {
-    activeSessions.set(sessionKey(ROOT_ID, LARK_APP_ID), ds);
+    activeSessions.set(sessionKey(ROOT_ID, ds.larkAppId), ds);
   }
   return {
     activeSessions,
@@ -376,6 +403,25 @@ function makeDeps(ds?: DaemonSession): CommandHandlerDeps {
     getActiveCount: vi.fn(() => activeSessions.size),
     lastRepoScan: new Map(),
   };
+}
+
+function mockCodexAppBot(): void {
+  vi.mocked(getBot).mockImplementation(((id: string = 'app-1') => {
+    if (id === CODEX_APP_ID) {
+      return {
+        botName: 'Codex APP',
+        config: {
+          larkAppId: CODEX_APP_ID,
+          larkAppSecret: 'secret-1',
+          cliId: 'codex-app' as const,
+          cliPathOverride: '/opt/codex',
+          workingDir: '~/projects',
+          workingDirs: ['~/projects'],
+        },
+      };
+    }
+    return defaultGetBot(id);
+  }) as any);
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -540,6 +586,8 @@ describe('parseForceTopicInvocation', () => {
 describe('handleCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getBot).mockImplementation(defaultGetBot as any);
+    vi.mocked(listCodexAppThreads).mockResolvedValue([]);
   });
 
   // ─── /close ─────────────────────────────────────────────────────────────
@@ -1271,6 +1319,68 @@ describe('handleCommand', () => {
       const replyArgs = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(replyArgs[2]).toBe('interactive');
       expect(replyArgs[1] as string).toContain('adopt-select');
+    });
+
+    it('should list Codex App threads instead of scanning tmux for codex-app bots', async () => {
+      mockCodexAppBot();
+      vi.mocked(listCodexAppThreads).mockResolvedValueOnce([
+        {
+          threadId: 'thread-abc',
+          name: 'Existing App Thread',
+          preview: 'hello',
+          cwd: '/repo/app',
+          updatedAtMs: 1780000000000,
+        },
+      ]);
+      const ds = makeDaemonSession({
+        larkAppId: CODEX_APP_ID,
+        session: makeSession({ cliId: 'codex-app' as any }),
+      });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/adopt', ROOT_ID, makeLarkMessage('/adopt'), deps, CODEX_APP_ID);
+
+      expect(discoverAdoptableSessions).not.toHaveBeenCalled();
+      expect(listCodexAppThreads).toHaveBeenCalledWith(expect.objectContaining({
+        codexBin: '/opt/codex',
+        cwd: '/home/testuser/projects',
+      }));
+      const replyArgs = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(replyArgs[2]).toBe('interactive');
+      expect(replyArgs[1] as string).toContain('codex-app-thread-select');
+    });
+
+    it('should resume a selected Codex App thread directly', async () => {
+      mockCodexAppBot();
+      vi.mocked(listCodexAppThreads).mockResolvedValueOnce([
+        {
+          threadId: '019e-thread-full',
+          name: 'Fix botmux',
+          preview: 'fallback preview',
+          cwd: '/repo/botmux',
+          updatedAtMs: 1780000000000,
+        },
+      ]);
+      const ds = makeDaemonSession({
+        larkAppId: CODEX_APP_ID,
+        session: makeSession({ cliId: 'codex-app' as any }),
+      });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/adopt', ROOT_ID, makeLarkMessage('/adopt 019e-thread'), deps, CODEX_APP_ID);
+
+      expect(discoverAdoptableSessions).not.toHaveBeenCalled();
+      expect(ds.adoptedFrom).toBeUndefined();
+      expect(ds.workingDir).toBe('/repo/botmux');
+      expect(ds.session.workingDir).toBe('/repo/botmux');
+      expect(ds.session.cliId).toBe('codex-app');
+      expect(ds.session.cliSessionId).toBe('019e-thread-full');
+      expect(ds.session.adoptedFrom).toBeUndefined();
+      expect(sessionStore.updateSession).toHaveBeenCalledWith(ds.session);
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', true);
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('已继续 Codex App 对话');
+      expect(replyContent).toContain('Fix botmux');
     });
   });
 

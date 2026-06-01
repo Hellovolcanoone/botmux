@@ -194,6 +194,39 @@ export function findSubBotTopic(input: {
 }
 
 /**
+ * Resolve where a `botmux report` should go + who to @, so report-back works
+ * even when the orchestrator is on a DIFFERENT machine.
+ *
+ * Same-machine: the dispatch registry (orchestrate-dispatch.json) is local, so
+ * `registryEntry` carries the orchestrator's exact coords (incl. orchRoot for a
+ * thread-scope orchestrator). Cross-machine: the foreign sub-bot's daemon never
+ * wrote that registry, so `registryEntry` is undefined — but everything needed
+ * for the common case is on the sub-bot's OWN session: the report goes top-level
+ * into the chat the sub-topic lives in (= the orchestrator's chat) and @-s the
+ * orchestrator (creatorOpenId, captured from the dispatch @). So we fall back to
+ * `{ orchChatId: sessionChatId, orchScope: 'chat', orchRoot: '' }`.
+ *
+ * orchOpenId prefers `creatorOpenId` (stable, set on every session-creation path
+ * incl. foreign-bot auto-create), then `ownerOpenId`, then the drifting
+ * `quoteTargetSenderOpenId` as a last resort.
+ */
+export function resolveReportTarget(input: {
+  registryEntry?: { orchChatId?: string; orchScope?: string; orchRoot?: string };
+  sessionChatId?: string;
+  creatorOpenId?: string;
+  ownerOpenId?: string;
+  quoteTargetSenderOpenId?: string;
+}): { orchChatId?: string; orchScope: string; orchRoot: string; orchOpenId?: string } {
+  const e = input.registryEntry;
+  return {
+    orchChatId: e?.orchChatId ?? input.sessionChatId,
+    orchScope: e?.orchScope ?? 'chat',
+    orchRoot: e?.orchRoot ?? '',
+    orchOpenId: input.creatorOpenId ?? input.ownerOpenId ?? input.quoteTargetSenderOpenId,
+  };
+}
+
+/**
  * The footgun check shared by `botmux send`'s explicit-mention guard AND its
  * prose `@Name` auto-injection: returns the sub-topic seed if `mentionOpenId` is
  * a dispatched sub-bot in an active topic that is NOT reachable in the current

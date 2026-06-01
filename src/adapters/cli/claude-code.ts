@@ -1,8 +1,8 @@
 import { existsSync, statSync, openSync, readSync, closeSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { resolveCommand } from './registry.js';
-import type { CliAdapter, PtyHandle } from './types.js';
+import type { CliAdapter, CliId, PtyHandle } from './types.js';
 import { findJsonlContainingFingerprint, jsonlContainsFingerprint, normaliseForFingerprint } from '../../services/claude-transcript.js';
 import { t } from '../../i18n/index.js';
 
@@ -20,13 +20,20 @@ function realpathCwd(cwd: string): string {
   try { return realpathSync(cwd); } catch { return cwd; }
 }
 
+/** The default Claude Code data root (`CLAUDE_CONFIG_DIR` equivalent): where
+ *  `projects/`, `sessions/`, `tasks/`, `keybindings.json` and `settings.json`
+ *  live. Claude-family forks (e.g. Seed CLI) relocate this — every helper below
+ *  takes an optional `dataDir` so the same machinery drives both. Defaulting to
+ *  `~/.claude` keeps all existing call sites byte-for-byte unchanged. */
+export const DEFAULT_CLAUDE_DATA_DIR = join(homedir(), '.claude');
+
 /** Resolve the JSONL transcript path Claude Code writes user/assistant turns to.
  *  Claude Code's project-hash scheme replaces every non-[A-Za-z0-9-] char with `-`
  *  (observed: `/foo/life_workspace` → `-foo-life-workspace`; `/`, `.`, `_` all become `-`).
  *  Always operates on realpath(cwd) — see realpathCwd above. */
-export function claudeJsonlPathForSession(sessionId: string, cwd: string): string {
+export function claudeJsonlPathForSession(sessionId: string, cwd: string, dataDir: string = DEFAULT_CLAUDE_DATA_DIR): string {
   const projectHash = realpathCwd(cwd).replace(/[^A-Za-z0-9-]/g, '-');
-  return join(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`);
+  return join(dataDir, 'projects', projectHash, `${sessionId}.jsonl`);
 }
 
 /** botmux ships its built-in skills as a Claude Code plugin here and injects it
@@ -96,8 +103,8 @@ const SESSION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
  *  rely on this for rotation tracking must therefore treat a "matching
  *  sessionId" answer as "no spawn-time rotation observed", not "no
  *  rotation at all" — the latter requires fingerprint corroboration. */
-export function claudePidStatePath(pid: number): string {
-  return join(homedir(), '.claude', 'sessions', `${pid}.json`);
+export function claudePidStatePath(pid: number, dataDir: string = DEFAULT_CLAUDE_DATA_DIR): string {
+  return join(dataDir, 'sessions', `${pid}.json`);
 }
 
 /** Linux-only: read /proc/<pid>/stat field 22 (starttime). Returns null when
@@ -124,11 +131,11 @@ function readProcStarttime(pid: number): string | null {
  *  also matches procStart against /proc/<pid>/stat to reject PID reuse. If
  *  procStart is present but cannot be verified on Linux, fail closed; callers
  *  fall back to fingerprint detection. */
-export function resolveJsonlFromPid(pid: number, expectedCwd: string): { path: string; cliSessionId: string } | null {
+export function resolveJsonlFromPid(pid: number, expectedCwd: string, dataDir: string = DEFAULT_CLAUDE_DATA_DIR): { path: string; cliSessionId: string } | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   let parsed: any;
   try {
-    parsed = JSON.parse(readFileSync(claudePidStatePath(pid), 'utf8'));
+    parsed = JSON.parse(readFileSync(claudePidStatePath(pid, dataDir), 'utf8'));
   } catch {
     return null;
   }
@@ -157,7 +164,7 @@ export function resolveJsonlFromPid(pid: number, expectedCwd: string): { path: s
   }
   if (!procStartVerified && realpathCwd(parsed.cwd) !== realpathCwd(expectedCwd)) return null;
   return {
-    path: claudeJsonlPathForSession(parsed.sessionId, parsed.cwd),
+    path: claudeJsonlPathForSession(parsed.sessionId, parsed.cwd, dataDir),
     cliSessionId: parsed.sessionId,
   };
 }
@@ -177,7 +184,7 @@ export function resolveJsonlFromPid(pid: number, expectedCwd: string): { path: s
  *  Returns deduplicated sessionIds in arbitrary order; caller picks one
  *  (typically by mtime of the corresponding jsonl). Returns [] on
  *  non-Linux platforms or if /proc lookup fails. */
-export function findOpenClaudeSessionIds(pid: number): string[] {
+export function findOpenClaudeSessionIds(pid: number, dataDir: string = DEFAULT_CLAUDE_DATA_DIR): string[] {
   if (!Number.isInteger(pid) || pid <= 0) return [];
   if (process.platform !== 'linux') return [];
   let entries: string[];
@@ -186,8 +193,12 @@ export function findOpenClaudeSessionIds(pid: number): string[] {
   } catch {
     return [];
   }
-  const tasksPrefix = join(homedir(), '.claude', 'tasks') + '/';
-  const projectsInfix = '/.claude/projects/';
+  const tasksPrefix = join(dataDir, 'tasks') + '/';
+  // Substring (not absolute prefix) so a symlinked dataDir parent — e.g. a
+  // symlinked home — still matches the kernel-realpath'd fd target. Derived
+  // from dataDir's basename: `~/.claude` → `/.claude/projects/` (unchanged);
+  // Seed's `.../.claude-runtime` → `/.claude-runtime/projects/`.
+  const projectsInfix = `/${basename(dataDir)}/projects/`;
   const out = new Set<string>();
   for (const name of entries) {
     let target: string;
@@ -249,7 +260,6 @@ function findJsonlAcrossProjectsRoot(
 }
 
 const COMPLETION_RE = /\u2733\s*(?:Worked|Crunched|Cogitated|Cooked|Churned|Saut[eé]ed|Baked|Brewed) for \d+[smh]/;
-const CLAUDE_KEYBINDINGS_PATH = join(homedir(), '.claude', 'keybindings.json');
 /** Escape hatch: force a specific chat:submit key regardless of
  *  keybindings.json. Accepts the same spellings as the config (e.g.
  *  `meta+enter`, `alt+enter`, `enter`). A value that can't be sent through the
@@ -271,10 +281,10 @@ interface ClaudeChatKeybindings {
   failureReason?: string;
 }
 
-function readClaudeChatBindings(): Record<string, string> | null {
+function readClaudeChatBindings(keybindingsPath: string): Record<string, string> | null {
   let parsed: any;
   try {
-    parsed = JSON.parse(readFileSync(CLAUDE_KEYBINDINGS_PATH, 'utf8'));
+    parsed = JSON.parse(readFileSync(keybindingsPath, 'utf8'));
   } catch {
     return null;
   }
@@ -352,8 +362,8 @@ function bindingActionForKey(bindings: Record<string, string> | null, targetKey:
     .find(([key]) => key.toLowerCase() === normalizedTarget)?.[1];
 }
 
-function resolveClaudeChatKeybindings(): ClaudeChatKeybindings {
-  const bindings = readClaudeChatBindings();
+function resolveClaudeChatKeybindings(keybindingsPath: string): ClaudeChatKeybindings {
+  const bindings = readClaudeChatBindings(keybindingsPath);
   const submitKey = selectSubmitKey(bindings);
   const tmuxSubmitKey = submitKey ? toTmuxSubmitKey(submitKey) : null;
   const rawSubmitSequence = submitKey ? toRawSubmitSequence(submitKey) : null;
@@ -373,18 +383,60 @@ function resolveClaudeChatKeybindings(): ClaudeChatKeybindings {
  *  across multiple adapter instances shares the warmup state. */
 const claudeFirstWriteSeen = new WeakSet<PtyHandle>();
 
+/** A member of the Claude-family CLIs: Claude Code itself and forks that share
+ *  its on-disk session layout (per-project JSONL transcripts, `sessions/<pid>.json`
+ *  pid-state, `tasks/` fd locks, keybindings.json, settings.json hooks) but
+ *  relocate the data root and/or rename the binary. Seed CLI
+ *  (`@bytedance-seed/claude-code`, binary `seed`) is one such fork — it reuses
+ *  this entire adapter, only swapping `dataDir`/`stateJsonPath`/binary. */
+export interface ClaudeFamilyVariant {
+  /** CliId for this variant (`claude-code`, `seed`, …). */
+  readonly id: CliId;
+  /** Binary name printed in the user-facing `buildResumeCommand` handoff. */
+  readonly resumeBin: string;
+  /** Data root: `projects/`, `sessions/`, `tasks/`, `keybindings.json`,
+   *  `settings.json`. `~/.claude` for Claude Code; Seed's `.claude-runtime`. */
+  readonly dataDir: string;
+  /** Path to the `.claude.json` state / folder-trust file. Lives at
+   *  `~/.claude.json` (home) for Claude Code, but *inside* the data root for
+   *  forks that set CLAUDE_CONFIG_DIR — so it can't be derived from dataDir. */
+  readonly stateJsonPath: string;
+  /** Env injected at spawn so the forked CLI actually writes to `dataDir`
+   *  (e.g. Seed's `CLAUDE_CONFIG_DIR`). undefined for Claude Code, which already
+   *  defaults to ~/.claude. */
+  readonly spawnEnv?: Readonly<Record<string, string>>;
+  /** Curated `botmux setup` model candidates. Claude Code lists Anthropic
+   *  aliases; forks whose model set is gateway-defined (e.g. Seed via SuperRelay)
+   *  pass undefined so setup skips the prompt. */
+  readonly modelChoices?: readonly string[];
+}
+
 export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
   const bin = resolveCommand(pathOverride ?? 'claude');
-  return {
+  return createClaudeFamilyAdapter({
     id: 'claude-code',
+    resumeBin: 'claude',
+    dataDir: DEFAULT_CLAUDE_DATA_DIR,
+    stateJsonPath: join(homedir(), '.claude.json'),
+    // alias（opus/sonnet/haiku）会被 Claude Code 解析成当前推荐的具体版本；具体 ID 锁版本。
+    modelChoices: ['opus', 'sonnet', 'haiku', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
+  }, bin);
+}
+
+export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, bin: string): CliAdapter {
+  return {
+    id: variant.id,
     resolvedBin: bin,
     supportsTypeAhead: true,
+    claudeDataDir: variant.dataDir,
+    claudeStateJsonPath: variant.stateJsonPath,
+    spawnEnv: variant.spawnEnv,
 
     buildResumeCommand({ sessionId, cliSessionId }) {
       // Claude resumes by reading <id>.jsonl, so we need the most recently
       // observed CLI-native id (rotation can happen mid-run); fall back to the
       // botmux sessionId for the first-turn case where they coincide.
-      return `claude --resume ${cliSessionId ?? sessionId}`;
+      return `${variant.resumeBin} --resume ${cliSessionId ?? sessionId}`;
     },
 
     buildArgs({ sessionId, resume, resumeSessionId, botName, botOpenId, locale, model, disableCliBypass }) {
@@ -495,7 +547,7 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
       const TYPING_THROTTLE_MS = isFirstWrite ? 80 : 30;
 
       const tick = () => new Promise<void>(r => setTimeout(r, TYPING_THROTTLE_MS));
-      const keybindings = resolveClaudeChatKeybindings();
+      const keybindings = resolveClaudeChatKeybindings(join(variant.dataDir, 'keybindings.json'));
 
       const sendSubmit = (): boolean => {
         if (pty.sendSpecialKeys && keybindings.submitKeys) {
@@ -525,7 +577,7 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
         return false;
       };
       if (pty.cliPid && pty.cliCwd) {
-        const resolved = resolveJsonlFromPid(pty.cliPid, pty.cliCwd);
+        const resolved = resolveJsonlFromPid(pty.cliPid, pty.cliCwd, variant.dataDir);
         if (resolved) applyResolved(resolved);
       }
       // baseByte is recomputed at this point (after any entry-time path swap)
@@ -605,7 +657,7 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
         // the rotated file. For (b), poll from the rotated file's own current
         // size so an older, larger startPath cannot hide a delayed append.
         if (pty.cliPid && pty.cliCwd) {
-          const resolved = resolveJsonlFromPid(pty.cliPid, pty.cliCwd);
+          const resolved = resolveJsonlFromPid(pty.cliPid, pty.cliCwd, variant.dataDir);
           if (resolved) {
             const switched = applyResolved(resolved);
             const newPath = pty.claudeJsonlPath;
@@ -697,7 +749,7 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
         if (!submitFingerprint) return false;
         // Latest pid → path; covers post-failure rotations (/clear, /resume).
         if (pty.cliPid && pty.cliCwd) {
-          const resolved = resolveJsonlFromPid(pty.cliPid, pty.cliCwd);
+          const resolved = resolveJsonlFromPid(pty.cliPid, pty.cliCwd, variant.dataDir);
           if (resolved) applyResolved(resolved);
         }
         const currentPath = pty.claudeJsonlPath;
@@ -728,16 +780,16 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
     // installed into the global ~/.claude/skills — so they never leak into the
     // user's standalone `claude`. pluginDir is consumed by ensurePluginSkills.
     pluginDir: CLAUDE_PLUGIN_DIR,
-    // 候选 model：alias（opus/sonnet/haiku）会被 Claude Code 解析成当前推荐的具体
-    // 版本；具体 ID 锁版本。setup 选 Other 可自由填，比如要回退或试 canary 模型。
-    modelChoices: ['opus', 'sonnet', 'haiku', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
-    // askUserQuestion hook 写全局 ~/.claude/settings.json（matcher='AskUserQuestion' 的 PreToolUse），
-    // 把 AskUserQuestion 事件转发到 `botmux hook claude-code`。
-    // 选全局而非进程级 --settings：adopt 模式接管的是 botmux 没启动、拿不到 --settings
-    // 的已有 claude 会话，只有全局配置那条会话才读得到。代价是会作用于非 botmux 的
-    // claude 会话，但 hook 客户端在缺 BOTMUX_* env 时直接 passthrough 放行，不破坏它们。
+    // 候选 model 由 variant 决定（Claude 给 Anthropic alias；Seed 走网关交给 setup 跳过）。
+    // setup 选 Other 可自由填，比如要回退或试 canary 模型。
+    modelChoices: variant.modelChoices,
+    // askUserQuestion hook 写各 variant 的 settings.json（matcher='AskUserQuestion' 的
+    // PreToolUse），把事件转发到 `botmux hook <id>`。Claude 用全局 ~/.claude/settings.json
+    // 是为了 adopt 模式（接管的 claude 会话拿不到进程级 --settings，只读全局那条）；hook
+    // 客户端缺 BOTMUX_* env 时直接 passthrough 放行，不破坏非 botmux 的会话。Seed 写自己
+    // 的 .claude-runtime/settings.json，只作用于走该 CLAUDE_CONFIG_DIR 的 seed 会话。
     hookInstall: {
-      configPath: '~/.claude/settings.json',
+      configPath: join(variant.dataDir, 'settings.json'),
       format: 'claude-settings',
     },
     asksViaHook: true,
