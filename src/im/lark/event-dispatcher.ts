@@ -902,17 +902,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             return;
           }
           // Foreign bot: only route on @mention of us.
-          if (!isBotMentioned(larkAppId, message, undefined)) {
-            // Observability: a foreign bot @'d someone but we didn't recognize
-            // it as us. Cross-deployment @s can carry an UNRESOLVED mention
-            // (open_id undefined / inline `at` user_id is a placeholder key like
-            // "@_user_2"), so open_id-only matching misses them and the drop is
-            // otherwise silent. Log the mention shape to make these visible.
-            if ((message.mentions?.length ?? 0) > 0) {
-              logger.info(`[foreign-@-miss] from=${senderOpenId} type=${message.message_type} chat=${chatId} self=${getBot(larkAppId).botOpenId} mentions=${JSON.stringify((message.mentions || []).map((m: any) => ({ k: m.key, oid: m.id?.open_id, name: m.name })))}`);
-            }
-            return;
-          }
+          if (!isBotMentioned(larkAppId, message, undefined)) return;
           const ctx = await decideRouting(larkAppId, message);
           // Chat-scope foreign-bot @mention without an existing session: gate to
           // vetted botmux peers (registered in our bot-openids cross-ref). This
