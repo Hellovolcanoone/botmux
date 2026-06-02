@@ -53,6 +53,9 @@ export function shouldUseCardForSend(opts: {
   return opts.forceCard || (!opts.forceText && opts.hasMarkdown);
 }
 
+export function shouldWithdrawPreviousPendingOnNewTurn(_session: Pick<Session, 'pendingResponseCardId' | 'pendingResponseCardState'>): boolean {
+  return false;
+}
 
 /** A patched marker means the Feishu PATCH returned, but session save may not have. */
 export function shouldTreatPendingCardAsPatchedByMarker(

@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config } from './config.js';
 import { statSync } from 'node:fs';
-import { deleteMessage, getChatMode, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage } from './im/lark/client.js';
+import { getChatMode, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage } from './im/lark/client.js';
 import { chatHasAllowedUser, resolveGroupJoinPrompt } from './core/auto-start.js';
 import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
@@ -33,7 +33,7 @@ import type { CliId } from './adapters/cli/types.js';
 import * as scheduler from './core/scheduler.js';
 import { scanProjects, scanMultipleProjects } from './services/project-scanner.js';
 import { buildPendingResponseCard, buildQuotaExhaustedCard, buildRepoSelectCard, buildStreamingCard, getCliDisplayName } from './im/lark/card-builder.js';
-import { createPendingResponseQueue, isPendingResponseCardOpen, markPendingResponseCardPatched, shouldTreatPendingCardAsPatchedByMarker, startPendingResponseTurn, syncPendingResponseState } from './core/pending-response.js';
+import { createPendingResponseQueue, markPendingResponseCardPatched, shouldTreatPendingCardAsPatchedByMarker, startPendingResponseTurn, syncPendingResponseState } from './core/pending-response.js';
 import { readPendingResponsePatchMarker } from './services/pending-response-transaction-store.js';
 import { t as tr, botLocale, localeForBot } from './i18n/index.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
@@ -313,18 +313,6 @@ async function postPendingResponseCard(ds: DaemonSession, replyToMessageId: stri
       markPendingResponseCardPatched(ds);
     }
     syncPendingResponseState(ds.session, ds);
-    const previousCardId = ds.pendingResponseCardId;
-    // If a PATCH for the previous card is already in flight (`patching` marker),
-    // skip the merged-card update intentionally: writing "merged" could race
-    // with the final-answer PATCH and replace the real reply.  A stale
-    // `patching` marker (crash between PATCH success and marker promotion) will
-    // suppress merge for one turn; that is safer than overwriting a card that may
-    // already carry the final answer.
-    const previousCardPatchInFlight = marker?.state === 'patching' && marker.cardId === previousCardId;
-    if (isPendingResponseCardOpen(ds) && !previousCardPatchInFlight) {
-      deleteMessage(ds.larkAppId, previousCardId!)
-        .catch(err => logger.warn(`[${tag(ds)}] failed to withdraw previous pending response card: ${err instanceof Error ? err.message : String(err)}`));
-    }
     const card = buildPendingResponseCard(localeForBot(ds.larkAppId));
     try {
       const messageId = await replyMessage(ds.larkAppId, replyToMessageId, card, 'interactive', false);

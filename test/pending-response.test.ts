@@ -7,6 +7,7 @@ import {
   isPendingResponseCardOpen,
   markPendingResponseCardPatched,
   markPendingResponseCardPatchedIfCurrent,
+  shouldWithdrawPreviousPendingOnNewTurn,
   shouldUseCardForSend,
   startPendingResponseTurn,
   syncPendingResponseState,
@@ -77,6 +78,12 @@ describe('pending response state', () => {
     expect(session.pendingResponseCardId).toBe('om_b');
     expect(session.pendingResponseCardState).toBe('open');
     expect(session.lastPatchedResponseCardId).toBeUndefined();
+  });
+
+  it('does not withdraw an older pending card when a newer turn starts', () => {
+    const session = { pendingResponseCardId: 'om_a', pendingResponseCardState: 'open' as const };
+
+    expect(shouldWithdrawPreviousPendingOnNewTurn(session)).toBe(false);
   });
 
   it('does not clear pending response state when reading the pending id', () => {
