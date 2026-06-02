@@ -252,6 +252,17 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
     // submit immediately and never spuriously reports a mid-turn send failure.
     supportsTypeAhead: true,
     altScreen: false,   // --no-alt-screen disables alternate screen
+    // Codex has no per-session skill injection like Claude's `--plugin-dir`.
+    // Verified empirically on codex 0.136.0 (via `codex debug prompt-input`,
+    // which dumps the model-visible skill list): config keys
+    // (skills.directories/paths/dirs/extra_dirs/...), env vars
+    // (CODEX_SKILLS_DIR/...), and `[[skills.config]]`'s `path` (enable/disable
+    // only — can't register an arbitrary path) all fail to add a scan root.
+    // Codex only reads hard-coded roots, so — like gemini/opencode/cursor — we
+    // install into the global ~/.codex/skills. This is visible to a standalone
+    // `codex` too, but every botmux-* skill's description is tightly bound to
+    // "当前飞书话题", so implicit mis-fire risk is negligible.
+    skillsDir: '~/.codex/skills',
     modelChoices: ['gpt-5', 'gpt-5-codex', 'o3', 'o3-mini'],
   };
 }
