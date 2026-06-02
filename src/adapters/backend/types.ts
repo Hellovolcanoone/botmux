@@ -1,3 +1,5 @@
+export type BackendType = 'pty' | 'tmux' | 'herdr' | 'zellij';
+
 export interface SpawnOpts {
   cwd: string;
   cols: number;
@@ -18,6 +20,9 @@ export interface SessionBackend {
   getAttachInfo?(): { type: 'tmux'; sessionName: string } | null;
   /** PID of the CLI process running inside the backend. */
   getChildPid?(): number | null;
+  captureCurrentScreen?(): string;
+  captureViewport?(): string;
+  getPaneSize?(): { cols: number; rows: number } | null;
 }
 
 /**

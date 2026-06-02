@@ -1,8 +1,9 @@
+import { HerdrBackend } from './herdr-backend.js';
 import { PtyBackend } from './pty-backend.js';
 import { TmuxBackend } from './tmux-backend.js';
 import { TmuxPipeBackend } from './tmux-pipe-backend.js';
 import { ZellijBackend } from './zellij-backend.js';
-import type { SessionBackend } from './types.js';
+import type { BackendType, SessionBackend } from './types.js';
 
 export interface SelectedSessionBackend {
   backend: SessionBackend;
@@ -14,7 +15,7 @@ export interface SelectedSessionBackend {
   isZellijMode: boolean;
 }
 
-export function selectSessionBackend(opts: { sessionId: string; backendType: 'pty' | 'tmux' | 'zellij' }): SelectedSessionBackend {
+export function selectSessionBackend(opts: { sessionId: string; backendType: BackendType }): SelectedSessionBackend {
   if (opts.backendType === 'zellij') {
     const sessionName = ZellijBackend.sessionName(opts.sessionId);
     const reattach = ZellijBackend.hasSession(sessionName);
@@ -26,11 +27,30 @@ export function selectSessionBackend(opts: { sessionId: string; backendType: 'pt
     };
   }
 
-  if (opts.backendType !== 'tmux') {
+  if (opts.backendType === 'pty') {
     return {
       backend: new PtyBackend(),
       isTmuxMode: false,
       isPipeMode: false,
+      isZellijMode: false,
+    };
+  }
+
+  if (opts.backendType === 'herdr') {
+    const sessionName = HerdrBackend.sessionName(opts.sessionId);
+    if (HerdrBackend.hasSession(sessionName)) {
+      return {
+        backend: new HerdrBackend(sessionName, { isReattach: true }),
+        isTmuxMode: false,
+        isPipeMode: true,
+        isZellijMode: false,
+      };
+    }
+
+    return {
+      backend: new HerdrBackend(sessionName, { createSession: true }),
+      isTmuxMode: false,
+      isPipeMode: true,
       isZellijMode: false,
     };
   }

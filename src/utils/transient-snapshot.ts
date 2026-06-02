@@ -34,9 +34,9 @@ export interface TransientSnapshot {
   ansi: string;
 }
 
-/** Attempt to capture a fresh ANSI snapshot from a TmuxPipeBackend. Returns
- *  null if the backend isn't a pipe backend, the pane has gone away, or
- *  tmux refuses to answer. Callers should fall back to the legacy renderer
+/** Attempt to capture a fresh ANSI snapshot from an observe backend. Returns
+ *  null if the backend isn't observe-capable, the pane has gone away, or
+ *  the external backend refuses to answer. Callers should fall back to the legacy renderer
  *  path on null. */
 export function tryCapturePipeSnapshot(
   backend: unknown,

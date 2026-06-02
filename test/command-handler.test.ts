@@ -229,10 +229,18 @@ vi.mock('../src/core/session-manager.js', () => ({
   getAvailableBots: vi.fn(async () => []),
 }));
 
-vi.mock('../src/core/session-discovery.js', () => ({
-  discoverAdoptableSessions: vi.fn(() => []),
-  validateAdoptTarget: vi.fn(() => true),
-}));
+// Only the two discovery/validation entrypoints are stubbed; keep the real
+// pure helpers (adoptTargetLabel / adoptTargetKey, and any future exports)
+// so the /adopt reply still surfaces the actual pane label and the mock can't
+// silently drop newly-imported symbols.
+vi.mock('../src/core/session-discovery.js', async (importOriginal) => {
+  const actual = await importOriginal() as typeof import('../src/core/session-discovery.js');
+  return {
+    ...actual,
+    discoverAdoptableSessions: vi.fn(() => []),
+    validateAdoptTarget: vi.fn(() => true),
+  };
+});
 
 // /adopt now merges tmux + zellij discovery; mock zellij so tests don't shell
 // out to a real `zellij` on the host (would surface live sessions and flake).

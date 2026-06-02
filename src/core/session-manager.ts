@@ -15,11 +15,13 @@ import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, resto
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
+import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
+import { adoptTargetLabel, validateAdoptTargetState } from './session-discovery.js';
 import { ZellijBackend } from '../adapters/backend/zellij-backend.js';
 import { getBot, getAllBots } from '../bot-registry.js';
 import type { CliId } from '../adapters/cli/types.js';
-import { validateAdoptTarget } from './session-discovery.js';
 import { validateZellijAdoptTarget } from './zellij-adopt-discovery.js';
+import type { BackendType } from '../adapters/backend/types.js';
 import type { LarkAttachment, LarkMention, ScheduledTask } from '../types.js';
 import type { MessageResource } from '../im/lark/message-parser.js';
 import type { ResolvedSender } from '../im/lark/identity-cache.js';
@@ -545,10 +547,10 @@ export function rememberLastCliInput(ds: DaemonSession, userPrompt: string, cliI
  * via `selectSessionBackend` — exactly like the pty backend already does.
  */
 export function shouldAutoForkOnRestore(
-  backendType: 'pty' | 'tmux' | 'zellij',
+  backendType: BackendType,
   quietRestart: boolean,
 ): boolean {
-  return (backendType === 'tmux' || backendType === 'zellij') && !quietRestart;
+  return backendType !== 'pty' && !quietRestart;
 }
 
 export async function restoreActiveSessions(activeSessions: Map<string, DaemonSession>): Promise<void> {
@@ -572,13 +574,17 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
 
     // Adopt sessions: restore if original CLI is still alive, otherwise close
     if (session.title?.startsWith('Adopt:') && session.adoptedFrom) {
-      const adopted = session.adoptedFrom;
-      const stillAlive = adopted.zellijPaneId
-        ? validateZellijAdoptTarget(adopted.zellijSession ?? '', adopted.zellijPaneId, adopted.originalCliPid)
-        : validateAdoptTarget(adopted.tmuxTarget ?? '', adopted.originalCliPid);
-      if (!stillAlive) {
-        logger.info(`Closing adopt session ${session.sessionId} (original CLI exited)`);
+      const adopted = session.adoptedFrom as NonNullable<DaemonSession['adoptedFrom']>;
+      const validation = adopted.zellijPaneId
+        ? (typeof adopted.originalCliPid === 'number' && validateZellijAdoptTarget(adopted.zellijSession ?? '', adopted.zellijPaneId, adopted.originalCliPid) ? 'alive' : 'missing')
+        : validateAdoptTargetState(adopted);
+      if (validation === 'missing') {
+        logger.info(`Closing adopt session ${session.sessionId} (adopted target exited: ${adoptTargetLabel(adopted)})`);
         sessionStore.closeSession(session.sessionId);
+        continue;
+      }
+      if (validation === 'unknown') {
+        logger.warn(`Keeping adopt session ${session.sessionId} closed until next resume (target validation failed: ${adoptTargetLabel(adopted)})`);
         continue;
       }
       // Original CLI still alive — re-register and fork adopt worker
@@ -597,7 +603,7 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
         lastMessageAt: sessionLastMessageAtMs(session),
         hasHistory: false,
         workingDir: adopted.cwd,
-        adoptedFrom: adopted as DaemonSession['adoptedFrom'],
+        adoptedFrom: adopted,
         streamCardId: session.streamCardId,
         streamCardNonce: session.streamCardNonce,
         displayMode: session.displayMode === 'screenshot' || session.displayMode === 'hidden'
@@ -622,7 +628,7 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       // rather than silently overwriting it.
       await setActiveSessionSafe(activeSessions, sessionKey(anchor, larkAppId), ds);
       forkAdoptWorker(ds, { restoredFromMetadata: true });
-      logger.info(`[${session.sessionId.substring(0, 8)}] Restored adopt session (target: ${adopted.tmuxTarget ?? `${adopted.zellijSession}/${adopted.zellijPaneId}`}, scope: ${scope})`);
+      logger.info(`[${session.sessionId.substring(0, 8)}] Restored adopt session (target: ${adoptTargetLabel(adopted)}, scope: ${scope})`);
       continue;
     }
     // Adopt sessions without persisted metadata — close (legacy)
@@ -673,48 +679,66 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     logger.debug(`Registered session ${session.sessionId} (scope: ${scope}, anchor: ${anchor})`);
   }
 
-  // Tmux mode: auto-fork workers for sessions with surviving tmux sessions.
-  // Skipped under quiet-restart (dev) — sessions resume lazily on the next
-  // message instead of re-pushing their cards on every restart.
-  if (shouldAutoForkOnRestore(config.daemon.backendType, config.daemon.quietRestart)) {
-    // Both persistent backends expose the same static surface; pick by the
-    // daemon's backend so zellij sessions also eager-reattach on restart.
-    const isZellij = config.daemon.backendType === 'zellij';
-    const sessionNameFor = (sid: string) =>
-      isZellij ? ZellijBackend.sessionName(sid) : TmuxBackend.sessionName(sid);
-    const hasSession = (n: string) =>
-      isZellij ? ZellijBackend.hasSession(n) : TmuxBackend.hasSession(n);
-    const killSession = (n: string) =>
-      isZellij ? ZellijBackend.killSession(n) : TmuxBackend.killSession(n);
-    const kind = isZellij ? 'zellij' : 'tmux';
+  // Persistent backends: auto-fork workers for sessions whose backing session survived daemon restart.
+  for (const [, ds] of activeSessions) {
+    const backendType = getSessionPersistentBackendType(ds);
+    if (!backendType) continue;
+    if (!shouldAutoForkOnRestore(backendType, config.daemon.quietRestart)) continue;
 
-    for (const [, ds] of activeSessions) {
-      const sessName = sessionNameFor(ds.session.sessionId);
-      if (!hasSession(sessName)) continue;
+    const backendName = persistentSessionName(backendType, ds.session.sessionId);
+    if (!persistentSessionExists(backendType, backendName)) continue;
 
-      // Guard against re-attaching to a session started with a different CLI
-      // than the bot is currently configured for. attach ignores the bin/args
-      // we hand to backend.spawn(), so without this check, changing a bot's
-      // cliId in bots.json would silently resurrect the OLD CLI on restart.
-      // Compare persisted session.cliId (stamped at fork time) against the
-      // bot's current config; mismatch ⇒ kill the stale session, let the next
-      // message trigger a fresh spawn.
-      const tag = ds.session.sessionId.substring(0, 8);
-      const sessionCliId = ds.session.cliId;
-      let botCliId: CliId | undefined;
-      try { botCliId = getBot(ds.larkAppId).config.cliId; } catch { /* bot deregistered */ }
-      if (sessionCliId && botCliId && sessionCliId !== botCliId) {
-        logger.warn(`[${tag}] CLI mismatch (session=${sessionCliId}, bot=${botCliId}), killing stale ${kind} ${sessName}`);
-        killSession(sessName);
-        continue;
-      }
-
-      logger.info(`[${tag}] ${kind} session alive, auto-forking worker to re-attach`);
-      forkWorker(ds, '', true);
+    // Guard against re-attaching to a persistent session that was started with a
+    // different CLI than the bot is currently configured for. Persistent backend
+    // reattach ignores the bin/args handed to backend.spawn(), so changing a
+    // bot's cliId in bots.json should kill the stale backing session instead of
+    // silently resurrecting the old CLI on restart.
+    const tag = ds.session.sessionId.substring(0, 8);
+    const sessionCliId = ds.session.cliId;
+    let botCliId: CliId | undefined;
+    try { botCliId = getBot(ds.larkAppId).config.cliId; } catch { /* bot deregistered */ }
+    if (sessionCliId && botCliId && sessionCliId !== botCliId) {
+      logger.warn(`[${tag}] CLI mismatch (session=${sessionCliId}, bot=${botCliId}), killing stale ${backendType} ${backendName}`);
+      killPersistentSession(backendType, backendName);
+      continue;
     }
+
+    logger.info(`[${tag}] ${backendType} session alive, auto-forking worker to re-attach`);
+    forkWorker(ds, '', true);
   }
 
-  logger.info(`Restored ${active.length} session(s)${shouldAutoForkOnRestore(config.daemon.backendType, config.daemon.quietRestart) ? '' : ', waiting for messages to resume'}`);
+  const hasPersistentBackend = [...activeSessions.values()].some(ds => !!getSessionPersistentBackendType(ds));
+  const autoForkEnabled = [...activeSessions.values()].some(ds => {
+    const backendType = getSessionPersistentBackendType(ds);
+    return !!backendType && shouldAutoForkOnRestore(backendType, config.daemon.quietRestart);
+  });
+  logger.info(`Restored ${active.length} session(s)${hasPersistentBackend && autoForkEnabled ? '' : ', waiting for messages to resume'}`);
+}
+
+function getSessionPersistentBackendType(ds: DaemonSession): Exclude<BackendType, 'pty'> | undefined {
+  let backendType = config.daemon.backendType;
+  try {
+    backendType = getBot(ds.larkAppId).config.backendType ?? backendType;
+  } catch { /* bot deregistered */ }
+  return backendType === 'tmux' || backendType === 'herdr' || backendType === 'zellij' ? backendType : undefined;
+}
+
+function persistentSessionName(backendType: Exclude<BackendType, 'pty'>, sessionId: string): string {
+  if (backendType === 'tmux') return TmuxBackend.sessionName(sessionId);
+  if (backendType === 'zellij') return ZellijBackend.sessionName(sessionId);
+  return HerdrBackend.sessionName(sessionId);
+}
+
+function persistentSessionExists(backendType: Exclude<BackendType, 'pty'>, name: string): boolean {
+  if (backendType === 'tmux') return TmuxBackend.hasSession(name);
+  if (backendType === 'zellij') return ZellijBackend.hasSession(name);
+  return HerdrBackend.hasSession(name);
+}
+
+function killPersistentSession(backendType: Exclude<BackendType, 'pty'>, name: string): void {
+  if (backendType === 'tmux') TmuxBackend.killSession(name);
+  else if (backendType === 'zellij') ZellijBackend.killSession(name);
+  else HerdrBackend.killSession(name);
 }
 
 /**

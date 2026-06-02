@@ -103,10 +103,17 @@ export interface DaemonSession {
   /** Present when this session was created via /adopt (shared observation mode).
    *  Either tmuxTarget (tmux) OR zellijSession+zellijPaneId (zellij) is set. */
   adoptedFrom?: {
-    tmuxTarget?: string;      // e.g. "0:2.0" — user's original tmux pane
-    zellijSession?: string;   // zellij session name (zellij backend)
-    zellijPaneId?: string;    // e.g. "terminal_1" — observe/drive target
-    originalCliPid: number;   // CLI process PID in the user's pane
+    /** Source backend of the external session. Absent means legacy tmux metadata. */
+    source?: 'tmux' | 'herdr' | 'zellij';
+    tmuxTarget?: string;       // e.g. "0:2.0" — user's original tmux pane
+    zellijSession?: string;    // zellij session name (zellij backend)
+    zellijPaneId?: string;     // e.g. "terminal_1" — observe/drive target
+    herdrSessionName?: string;
+    herdrTarget?: string;
+    herdrPaneId?: string;
+    herdrAgentName?: string;
+    herdrTerminalId?: string;
+    originalCliPid?: number;   // CLI process PID in the user's pane, when the source exposes one
     sessionId?: string;       // CLI session ID (for takeover/resume)
     cliId?: import('../adapters/cli/types.js').CliId;  // recognized CLI type
     cwd: string;              // CLI working directory

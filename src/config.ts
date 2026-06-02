@@ -1,4 +1,5 @@
 import { networkInterfaces } from 'node:os';
+import type { BackendType } from './adapters/backend/types.js';
 import { probeTmuxFunctional } from './setup/ensure-tmux.js';
 
 /** Get the first non-loopback IPv4 address, fallback to localhost. */
@@ -31,7 +32,7 @@ export function getDashboardExternalHost(): string {
  * connecting to /tmp/tmux-UID/default" forever. The functional probe filters
  * those out so we silently fall back to PTY.
  */
-function detectDefaultBackend(): 'pty' | 'tmux' {
+function detectDefaultBackend(): Exclude<BackendType, 'herdr'> {
   return probeTmuxFunctional().ok ? 'tmux' : 'pty';
 }
 
@@ -66,9 +67,7 @@ export const config = {
   daemon: {
     cliId: (process.env.CLI_ID ?? 'claude-code') as import('./adapters/cli/types.js').CliId,
     cliPathOverride: process.env.CLI_PATH,
-    // tmux stays the auto-detected default; 'zellij' is opt-in via
-    // BACKEND_TYPE=zellij (pty-under-zellij backend, see zellij-backend.ts).
-    backendType: (process.env.BACKEND_TYPE ?? detectDefaultBackend()) as 'pty' | 'tmux' | 'zellij',
+    backendType: (process.env.BACKEND_TYPE ?? detectDefaultBackend()) as BackendType,
     /** Quiet restart (dev): skip the tmux backend's eager re-fork of restored
      *  sessions on startup, so repeated local restarts don't re-push streaming
      *  cards for unfinished sessions. Sessions resume lazily on the next

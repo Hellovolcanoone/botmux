@@ -1243,8 +1243,8 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       return { toast: { type: 'error', content: t('card.grant.toast_no_repo_perm', undefined, localeForBot(ds.larkAppId)) } };
     }
 
-    // Parse selected session info (tmux: tmuxTarget; zellij: zellijSession+zellijPaneId)
-    let selected: { tmuxTarget?: string; zellijSession?: string; zellijPaneId?: string; cliPid: number };
+    // Parse selected session info (tmux/herdr: key; zellij: zellijSession+zellijPaneId)
+    let selected: { key?: string; source?: string; tmuxTarget?: string; zellijSession?: string; zellijPaneId?: string; cliPid?: number };
     try { selected = JSON.parse(option); } catch { return; }
 
     // Re-discover to get full session info and validate. Backend determines
@@ -1262,9 +1262,11 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         return discoverAdoptableZellijSessions(botCfg.cliId)
           .find(s => s.zellijSession === selected.zellijSession && s.zellijPaneId === selected.zellijPaneId);
       }
-      const { discoverAdoptableSessions } = await import('../../core/session-discovery.js');
+      const { discoverAdoptableSessions, adoptTargetKey } = await import('../../core/session-discovery.js');
       return discoverAdoptableSessions(botCfg.cliId)
-        .find(s => s.tmuxTarget === selected.tmuxTarget && s.cliPid === selected.cliPid);
+        .find(s => selected.key
+          ? adoptTargetKey(s) === selected.key
+          : s.tmuxTarget === selected.tmuxTarget && s.cliPid === selected.cliPid);
     }
     // Discovery scans a live process tree and can transiently miss a pane under
     // load (a racing `ps` snapshot); retry a few times before giving up so a

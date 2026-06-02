@@ -19,7 +19,7 @@ import { logger } from '../utils/logger.js';
 import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience } from './worker-pool.js';
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
 import { validateWorkingDir } from './working-dir.js';
-import { discoverAdoptableSessions, validateAdoptTarget, type AdoptableSession } from './session-discovery.js';
+import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
 import { generateAuthUrl, getTokenStatus } from '../utils/user-token.js';
@@ -849,8 +849,7 @@ export async function handleCommand(
           const cliName = getCliDisplayName(adopted.cliId ?? 'claude-code');
           const project = adopted.cwd ? (adopted.cwd.split('/').pop() || adopted.cwd) : '';
           const label = project ? `${cliName} · ${project}` : cliName;
-          const pane = adopted.tmuxTarget ?? `${adopted.zellijSession}/${adopted.zellijPaneId}`;
-          await sessionReply(rootId, t('cmd.adopt.already_adopted', { label, pane }, loc));
+          await sessionReply(rootId, t('cmd.adopt.already_adopted', { label, pane: adoptTargetLabel(adopted) }, loc));
           break;
         }
         const botCfgForAdopt = ds ? getBot(ds.larkAppId).config : (larkAppId ? getBot(larkAppId).config : undefined);
@@ -889,7 +888,7 @@ export async function handleCommand(
           const target = sessions.find(s =>
             'zellijPaneId' in s
               ? `${s.zellijSession}:${s.zellijPaneId}` === zellijNorm
-              : s.tmuxTarget === directTarget,
+              : adoptTargetLabel(s) === directTarget || adoptTargetKey(s) === directTarget || s.tmuxTarget === directTarget || s.herdrPaneId === directTarget,
           );
           if (!target) {
             await sessionReply(rootId, t('cmd.adopt.pane_not_found', { pane: directTarget }, loc));
@@ -1776,7 +1775,7 @@ async function handleCodexAppAdoptCommand(
 
 // ─── Adopt session helper ────────────────────────────────────────────────────
 
-/** Discriminate a zellij adopt candidate from a tmux one. */
+/** Discriminate a zellij adopt candidate from tmux/herdr candidates. */
 function isZellijTarget(t: AdoptableSession | ZellijAdoptableSession): t is ZellijAdoptableSession {
   return 'zellijPaneId' in t;
 }
@@ -1823,22 +1822,28 @@ export async function startAdoptSession(
   const zellij = isZellijTarget(target);
   const valid = zellij
     ? validateZellijAdoptTarget(target.zellijSession, target.zellijPaneId, target.cliPid)
-    : validateAdoptTarget(target.tmuxTarget, target.cliPid);
+    : validateAdoptTarget(target);
   if (!valid) {
     await sessionReply(sessionAnchorId(ds), t('cmd.adopt.target_exited', undefined, loc));
     return;
   }
 
   const project = target.cwd.split('/').pop() || target.cwd;
-  const pane = zellij ? `${target.zellijSession}/${target.zellijPaneId}` : target.tmuxTarget;
+  const pane = zellij ? `${target.zellijSession}/${target.zellijPaneId}` : adoptTargetLabel(target);
 
   ds.workingDir = target.cwd;
   ds.session.workingDir = target.cwd;
   ds.session.title = `Adopt: ${project}`;
   ds.adoptedFrom = {
+    source: zellij ? 'zellij' : target.source,
     tmuxTarget: zellij ? undefined : target.tmuxTarget,
     zellijSession: zellij ? target.zellijSession : undefined,
     zellijPaneId: zellij ? target.zellijPaneId : undefined,
+    herdrSessionName: zellij ? undefined : target.herdrSessionName,
+    herdrTarget: zellij ? undefined : target.herdrTarget,
+    herdrPaneId: zellij ? undefined : target.herdrPaneId,
+    herdrAgentName: zellij ? undefined : target.herdrAgentName,
+    herdrTerminalId: zellij ? undefined : target.herdrTerminalId,
     originalCliPid: target.cliPid,
     sessionId: target.sessionId,
     cliId: target.cliId,

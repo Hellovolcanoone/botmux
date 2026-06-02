@@ -18,6 +18,14 @@ vi.mock('../src/adapters/backend/tmux-pipe-backend.js', () => ({
   },
 }));
 
+vi.mock('../src/adapters/backend/herdr-backend.js', () => ({
+  HerdrBackend: class MockHerdrBackend {
+    static sessionName = vi.fn((id: string) => `bmx-${id.slice(0, 8)}`);
+    static hasSession = vi.fn(() => false);
+    constructor(public sessionName: string, public opts?: unknown) {}
+  },
+}));
+
 vi.mock('../src/adapters/backend/zellij-backend.js', () => ({
   ZellijBackend: class MockZellijBackend {
     static sessionName = vi.fn((id: string) => `bmx-${id.slice(0, 8)}`);

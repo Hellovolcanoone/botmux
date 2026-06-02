@@ -1,6 +1,6 @@
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import type { CliId } from '../../adapters/cli/types.js';
-import type { AdoptableSession } from '../../core/session-discovery.js';
+import { adoptTargetKey, adoptTargetLabel, type AdoptableSession } from '../../core/session-discovery.js';
 import type { ZellijAdoptableSession } from '../../core/zellij-adopt-discovery.js';
 import type { CodexAppThreadSummary } from '../../services/codex-app-threads.js';
 import type { DisplayMode, StreamStatus } from '../../types.js';
@@ -1288,10 +1288,10 @@ export function buildAdoptSelectCard(
     const project = s.cwd.split('/').pop() || s.cwd;
     const cliName = getCliDisplayName(s.cliId);
     const uptime = s.startedAt ? formatDuration(Date.now() - s.startedAt) : unknownUptime;
-    const targetLabel = zellij ? `${s.zellijSession}/${s.zellijPaneId}` : s.tmuxTarget;
+    const targetLabel = zellij ? `${s.zellijSession}/${s.zellijPaneId}` : adoptTargetLabel(s);
     const value = zellij
       ? { zellijSession: s.zellijSession, zellijPaneId: s.zellijPaneId, cliPid: s.cliPid }
-      : { tmuxTarget: s.tmuxTarget, cliPid: s.cliPid };
+      : { key: adoptTargetKey(s), source: s.source, tmuxTarget: s.tmuxTarget, cliPid: s.cliPid };
     return {
       text: { tag: 'plain_text' as const, content: `${cliName} · ${project} · ${targetLabel} · ${uptime}` },
       value: JSON.stringify(value),

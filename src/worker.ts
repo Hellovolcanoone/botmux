@@ -53,6 +53,7 @@ import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionId
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
+import { HerdrBackend } from './adapters/backend/herdr-backend.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { TmuxPipeBackend } from './adapters/backend/tmux-pipe-backend.js';
 import { ZellijBackend, ZELLIJ_CONFIG_KDL } from './adapters/backend/zellij-backend.js';
@@ -60,7 +61,7 @@ import { ZellijObserveBackend } from './adapters/backend/zellij-observe-backend.
 import { zellijEnv } from './setup/ensure-zellij.js';
 import { isObserveBackend, type ObserveBackend } from './adapters/backend/types.js';
 import { selectSessionBackend } from './adapters/backend/session-backend-selector.js';
-import type { SessionBackend } from './adapters/backend/types.js';
+import type { BackendType, SessionBackend } from './adapters/backend/types.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { IdleDetector } from './utils/idle-detector.js';
 import { ScreenAnalyzer } from './utils/screen-analyzer.js';
@@ -86,6 +87,7 @@ let isTmuxMode = false;
  *  web-terminal updates flow through the shared scrollback fan-out instead
  *  of per-WS attach-session PTYs. Set in spawnCli's adopt branch. */
 let isPipeMode = false;
+let effectiveBackendType: BackendType = 'pty';
 /** pty-under-zellij backend (BACKEND_TYPE=zellij). Behaves like the non-tmux
  *  pty path for the worker (renderer screenshots, relay web terminal) but owns
  *  a persistent zellij session that survives daemon restart. */
@@ -241,6 +243,8 @@ let bridgePendingTail = '';
 const bridgeQueue = new BridgeTurnQueue();
 let bridgeWatcher: FSWatcher | null = null;
 let bridgeFallbackTimer: NodeJS.Timeout | null = null;
+let herdrAdoptBridgeQuietTimer: NodeJS.Timeout | null = null;
+const HERDR_ADOPT_BRIDGE_QUIET_MS = 3_000;
 /** True once we successfully baselined the transcript file. Until then,
  *  any data we see is treated as history — absorbed into the queue's seen
  *  set without being attributed to a pending Lark turn. This protects the
@@ -444,6 +448,36 @@ function bridgeProbeOpenSessionIds(): void {
   for (const path of opened) bridgeRememberSessionIdForPath(path);
 }
 
+function bridgeShouldEmitAfterTranscriptQuiet(): boolean {
+  return lastInitConfig?.adoptMode === true
+    && lastInitConfig?.adoptSource === 'herdr'
+    && lastInitConfig?.cliId === 'claude-code'
+    && !!bridgeJsonlPath;
+}
+
+function clearHerdrAdoptBridgeQuietTimer(): void {
+  if (!herdrAdoptBridgeQuietTimer) return;
+  clearTimeout(herdrAdoptBridgeQuietTimer);
+  herdrAdoptBridgeQuietTimer = null;
+}
+
+function scheduleHerdrAdoptBridgeQuietEmit(): void {
+  if (!bridgeShouldEmitAfterTranscriptQuiet()) return;
+  clearHerdrAdoptBridgeQuietTimer();
+  herdrAdoptBridgeQuietTimer = setTimeout(() => {
+    herdrAdoptBridgeQuietTimer = null;
+    if (!bridgeShouldEmitAfterTranscriptQuiet()) return;
+    try {
+      bridgeDrainAndMaybeEmit();
+      markPromptReady();
+      log('Bridge quiet emit attempted — herdr adopt mode');
+    } catch (err: any) {
+      log(`Bridge quiet emit error: ${err.message}`);
+    }
+  }, HERDR_ADOPT_BRIDGE_QUIET_MS);
+  herdrAdoptBridgeQuietTimer.unref?.();
+}
+
 function bridgeAbsorbBaseline(): void {
   if (!bridgeJsonlPath) return;
   if (!lastInitConfig?.adoptMode) {
@@ -539,7 +573,7 @@ function bridgeApplyFingerprintSwitch(matched: string, reason: string, cutoffMs:
   bridgeMarkStalePidStateForAcceptedSid(sessionIdFromJsonlPath(matched));
   try {
     bridgeWatcher = fsWatch(matched, { persistent: false }, () => {
-      try { bridgeIngest(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
+      try { performBridgeIngestAndScheduleQuietEmit(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
     });
   } catch (err: any) {
     log(`Bridge fs.watch unavailable on new target (${err.message}); relying on fallback poller`);
@@ -807,7 +841,7 @@ function performRotationSwitch(newPath: string, cutoffMs: number, reason: string
 
   try {
     bridgeWatcher = fsWatch(newPath, { persistent: false }, () => {
-      try { bridgeIngest(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
+      try { performBridgeIngestAndScheduleQuietEmit(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
     });
   } catch (err: any) {
     log(`Bridge fs.watch unavailable on rotated target (${err.message}); relying on fallback poller`);
@@ -976,7 +1010,7 @@ function maybeFollowSessionRotationViaPid(): PidFollowResult {
   bridgeBaselineDone = true;
   try {
     bridgeWatcher = fsWatch(resolved.path, { persistent: false }, () => {
-      try { bridgeIngest(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
+      try { performBridgeIngestAndScheduleQuietEmit(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
     });
   } catch (err: any) {
     log(`Bridge fs.watch unavailable on rotated target (${err.message}); relying on fallback poller`);
@@ -1068,6 +1102,15 @@ function bridgeIngest(): void {
   bridgeQueue.ingest(result.events, bridgeJsonlPath);
 }
 
+function performBridgeIngestAndScheduleQuietEmit(): void {
+  const beforePath = bridgeJsonlPath;
+  const beforeOffset = bridgeOffset;
+  bridgeIngest();
+  if (bridgeJsonlPath && (bridgeJsonlPath !== beforePath || bridgeOffset > beforeOffset)) {
+    scheduleHerdrAdoptBridgeQuietEmit();
+  }
+}
+
 function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?: string; mode?: 'baseline-existing' | 'fresh-empty'; dataDir?: string }): void {
   bridgeJsonlPath = jsonlPath;
   bridgeJsonlDir = dirname(jsonlPath);
@@ -1153,17 +1196,18 @@ function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?
   // and also drives lazy baseline when the file shows up after attach.
   try {
     bridgeWatcher = fsWatch(bridgeJsonlPath, { persistent: false }, () => {
-      try { bridgeIngest(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
+      try { performBridgeIngestAndScheduleQuietEmit(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
     });
   } catch (err: any) {
     log(`Bridge fs.watch unavailable (${err.message}); relying on fallback poller`);
   }
   bridgeFallbackTimer = setInterval(() => {
-    try { bridgeIngest(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
+    try { performBridgeIngestAndScheduleQuietEmit(); } catch (err: any) { log(`Bridge ingest error: ${err.message}`); }
   }, 1000);
 }
 
 function stopBridgeWatcher(): void {
+  clearHerdrAdoptBridgeQuietTimer();
   if (bridgeWatcher) {
     try { bridgeWatcher.close(); } catch { /* ignore */ }
     bridgeWatcher = null;
@@ -2702,7 +2746,155 @@ function stopScreenUpdates(): void {
 
 // ─── PTY Management ──────────────────────────────────────────────────────────
 
+function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
+  if (cfg.bridgeJsonlPath) {
+    startBridgeWatcher(cfg.bridgeJsonlPath, {
+      cliPid: cfg.adoptCliPid,
+      cliCwd: cfg.adoptCwd,
+    });
+  } else if (cfg.cliId === 'codex') {
+    const adoptStartMs = Date.now();
+    codexAdoptStartMs = adoptStartMs;
+    codexBridgeQueue.setLocalTurns(true, adoptStartMs);
+    let rolloutPath: string | undefined;
+    if (cfg.cliSessionId) rolloutPath = findCodexRolloutBySessionId(cfg.cliSessionId);
+    if (!rolloutPath && cfg.adoptCliPid) {
+      const probed = findCodexRolloutByPid(cfg.adoptCliPid);
+      if (probed) rolloutPath = probed.path;
+    }
+    if (rolloutPath) {
+      codexBridgeAttach(rolloutPath, 'split-live');
+    } else {
+      if (cfg.cliSessionId) codexBridgePendingSessionId = cfg.cliSessionId;
+      codexAdoptPendingPid = cfg.adoptCliPid;
+      codexBridgeStartTimer();
+    }
+  } else if (cfg.cliId === 'coco') {
+    const adoptStartMs = Date.now();
+    codexAdoptStartMs = adoptStartMs;
+    codexBridgeQueue.setLocalTurns(true, adoptStartMs);
+    let eventsPath: string | undefined;
+    if (cfg.cliSessionId) eventsPath = cocoEventsPathForSession(cfg.cliSessionId);
+    if (!eventsPath && cfg.adoptCliPid) {
+      const probed = findCocoSessionByPid(cfg.adoptCliPid);
+      if (probed) eventsPath = probed.eventsPath;
+    }
+    if (eventsPath) {
+      const sessionDir = dirname(eventsPath);
+      if (!existsSync(sessionDir)) {
+        send({
+          type: 'final_output',
+          content: '⚠️ 当前 CoCo 进程的会话目录已被删除（可能是 e2e 测试清理或手动 rm），写到 events.jsonl 的内容会落到一个失效 inode 上，桥接读不到。请重启 CoCo 后重新 /adopt。',
+          lastUuid: `coco-adopt-stale-${randomBytes(4).toString('hex')}`,
+          turnId: 'coco-adopt-stale',
+        });
+        log(`CoCo adopt: session dir missing, bridge disabled (${sessionDir})`);
+      } else {
+        codexBridgeAttach(eventsPath, 'split-live');
+      }
+    } else {
+      codexAdoptPendingPid = cfg.adoptCliPid;
+    }
+    codexBridgeStartTimer();
+  } else if (cfg.cliId === 'mtr') {
+    const adoptStartMs = Date.now();
+    codexAdoptStartMs = adoptStartMs;
+    codexBridgeQueue.setLocalTurns(true, adoptStartMs);
+    if (cfg.cliSessionId) codexBridgePendingSessionId = cfg.cliSessionId;
+    const source =
+      findMtrSessionById(cfg.cliSessionId)
+      ?? findLatestMtrSessionByDirectory(cfg.adoptCwd ?? cfg.workingDir);
+    if (source) {
+      codexBridgePendingSessionId = undefined;
+      mtrBridgeAttach(source, 'split-live');
+    } else {
+      codexBridgeStartTimer();
+    }
+  }
+}
+
+function adoptIdleAdapter(cfg: Extract<DaemonToWorker, { type: 'init' }>): CliAdapter {
+  return cfg.bridgeJsonlPath
+    ? createCliAdapterSync('claude-code', undefined)
+    : cfg.cliId === 'codex' || cfg.cliId === 'coco' || cfg.cliId === 'mtr'
+      ? createCliAdapterSync(cfg.cliId, undefined)
+      : ({ completionPattern: undefined, readyPattern: undefined } as CliAdapter);
+}
+
+function setupAdoptInputAdapter(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
+  if (cfg.cliId === 'codex') {
+    cliAdapter = createCliAdapterSync('codex', cfg.cliPathOverride);
+  } else if (cfg.cliId === 'mtr') {
+    cliAdapter = createCliAdapterSync('mtr', cfg.cliPathOverride);
+  }
+}
+
+function setupAdoptIdleDetection(cfg: Extract<DaemonToWorker, { type: 'init' }>, label: string): void {
+  idleDetector = new IdleDetector(adoptIdleAdapter(cfg));
+  idleDetector.onIdle(() => {
+    log(`Prompt detected (idle) — ${label} adopt mode`);
+    try { bridgeDrainAndMaybeEmit(); } catch (err: any) { log(`Bridge emit error: ${err.message}`); }
+    try { codexBridgeDrainAndMaybeEmit(); } catch (err: any) { log(`Codex bridge emit error: ${err.message}`); }
+    markPromptReady();
+  });
+}
+
+function seedBackendScreen(source: string, be: Pick<SessionBackend, 'captureCurrentScreen'>): void {
+  try {
+    const initial = be.captureCurrentScreen?.() ?? '';
+    if (initial.length > 0) onPtyData(initial);
+  } catch (err: any) {
+    log(`${source} captureCurrentScreen failed: ${err.message}`);
+  }
+}
+
 function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
+  // ── Adopt mode: observe the user's existing terminal backend (no attach) ──
+  if (cfg.adoptMode && cfg.adoptSource === 'herdr' && cfg.adoptHerdrSessionName && (cfg.adoptHerdrPaneId || cfg.adoptHerdrTarget)) {
+    isTmuxMode = false;
+    isPipeMode = true;
+    isZellijMode = false;
+    const cols = cfg.adoptPaneCols ?? PTY_COLS;
+    const rows = cfg.adoptPaneRows ?? PTY_ROWS;
+    const target = cfg.adoptHerdrTarget ?? cfg.adoptHerdrPaneId!;
+    const herdrBe = new HerdrBackend(cfg.adoptHerdrSessionName, {
+      externalTarget: {
+        sessionName: cfg.adoptHerdrSessionName,
+        target,
+        paneId: cfg.adoptHerdrPaneId,
+      },
+    });
+    effectiveBackendType = 'herdr';
+    backend = herdrBe;
+    herdrBe.spawn('', [], {
+      cwd: cfg.workingDir,
+      cols,
+      rows,
+      env: process.env as Record<string, string>,
+    });
+
+    seedBackendScreen('herdr adopt', herdrBe);
+
+    setupAdoptTranscriptBridges(cfg);
+    setupAdoptInputAdapter(cfg);
+    setupAdoptIdleDetection(cfg, 'herdr');
+
+    backend.onData(onPtyData);
+    backend.onExit((code, signal) => {
+      log(`Adopted herdr stream ended (code: ${code}, signal: ${signal})`);
+      backend = null;
+      isPromptReady = false;
+      stopBridgeWatcher();
+      send({ type: 'claude_exit', code, signal });
+    });
+
+    awaitingFirstPrompt = false;
+    renderer?.markNewTurn();
+    log(`Adopt mode (herdr): observing ${cfg.adoptHerdrSessionName}:${target} (${cols}x${rows})`);
+    return;
+  }
+
+  // ── Adopt mode: pipe-pane the user's existing tmux pane (no attach) ──
   // ── Adopt mode: observe the user's existing pane (no attach / non-invasive) ──
   // tmux: pipe-pane (raw stream). zellij: dump-screen poll + action drive.
   if (cfg.adoptMode && (cfg.adoptTmuxTarget || cfg.adoptZellijPaneId)) {
@@ -2712,11 +2904,13 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     // PTY-per-WS — we don't attach to anything).
     isTmuxMode = true;
     isPipeMode = true;
+    isZellijMode = !!cfg.adoptZellijPaneId;
     const cols = cfg.adoptPaneCols ?? PTY_COLS;
     const rows = cfg.adoptPaneRows ?? PTY_ROWS;
     const observeBe: ObserveBackend = cfg.adoptZellijPaneId
       ? new ZellijObserveBackend(cfg.adoptZellijSession ?? '', cfg.adoptZellijPaneId, { cliPid: cfg.adoptCliPid })
       : new TmuxPipeBackend(cfg.adoptTmuxTarget!);
+    effectiveBackendType = cfg.adoptZellijPaneId ? 'zellij' : 'tmux';
     backend = observeBe;
     observeBe.spawn('', [], {
       cwd: cfg.workingDir,
@@ -2728,139 +2922,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     // Seed the shared scrollback with the pane's current screen so any
     // already-connected (or future) WS clients render meaningful content
     // immediately, instead of waiting for the next observe tick.
-    try {
-      const initial = observeBe.captureCurrentScreen();
-      if (initial.length > 0) onPtyData(initial);
-    } catch (err: any) {
-      log(`captureCurrentScreen failed: ${err.message}`);
-    }
+    seedBackendScreen(`${effectiveBackendType} adopt`, observeBe);
 
-    // Bridge mode: tail the adopted CLI's transcript to harvest assistant
-    // turns out-of-band. Two paths:
-    //   - claude-code: cfg.bridgeJsonlPath is set when adopt knew the sid.
-    //   - codex: locate rollout via cliSessionId (daemon's discovery probe)
-    //     or by reading /proc/<pid>/fd. Both modes enable adopt-only local
-    //     turn synthesis so iTerm-typed conversation also reaches Lark.
-    if (cfg.bridgeJsonlPath) {
-      startBridgeWatcher(cfg.bridgeJsonlPath, {
-        cliPid: cfg.adoptCliPid,
-        cliCwd: cfg.adoptCwd,
-      });
-    } else if (cfg.cliId === 'codex') {
-      const adoptStartMs = Date.now();
-      codexAdoptStartMs = adoptStartMs;
-      codexBridgeQueue.setLocalTurns(true, adoptStartMs);
-      let rolloutPath: string | undefined;
-      if (cfg.cliSessionId) rolloutPath = findCodexRolloutBySessionId(cfg.cliSessionId);
-      if (!rolloutPath && cfg.adoptCliPid) {
-        const probed = findCodexRolloutByPid(cfg.adoptCliPid);
-        if (probed) rolloutPath = probed.path;
-      }
-      if (rolloutPath) {
-        // Adopt-time attach: split-live so any iTerm activity that
-        // happened in the brief window between adopt detection and worker
-        // spawn (or between codex's own startup writes and now) lands as
-        // live, not absorbed history.
-        codexBridgeAttach(rolloutPath, 'split-live');
-      } else {
-        // Couldn't locate yet — start poller. The 1s timer keeps trying
-        // both findCodexRolloutBySessionId (if cliSessionId is set) and
-        // findCodexRolloutByPid (passed via the discovery hooks below).
-        if (cfg.cliSessionId) codexBridgePendingSessionId = cfg.cliSessionId;
-        codexAdoptPendingPid = cfg.adoptCliPid;
-        codexBridgeStartTimer();
-      }
-    } else if (cfg.cliId === 'coco') {
-      // CoCo adopt: parallel to codex, but the events.jsonl path is
-      // deterministic from cliSessionId, so once the daemon-side discovery
-      // surfaced an sid we know the path immediately. The file may not
-      // exist yet (CoCo creates it on first event); codexBridgeAttach's
-      // split-live-with-missing-file branch degrades to fresh, and the
-      // late-attach poller catches re-creation.
-      const adoptStartMs = Date.now();
-      codexAdoptStartMs = adoptStartMs;
-      codexBridgeQueue.setLocalTurns(true, adoptStartMs);
-      let eventsPath: string | undefined;
-      if (cfg.cliSessionId) eventsPath = cocoEventsPathForSession(cfg.cliSessionId);
-      if (!eventsPath && cfg.adoptCliPid) {
-        const probed = findCocoSessionByPid(cfg.adoptCliPid);
-        if (probed) eventsPath = probed.eventsPath;
-      }
-      if (eventsPath) {
-        // If the session DIRECTORY is missing (not just events.jsonl), CoCo
-        // is operating on an unlinked inode — common after an e2e test or
-        // manual cleanup wiped the dir while CoCo kept its fds open. The
-        // bridge file will never appear, so warn the user once via Lark
-        // instead of polling forever in silence.
-        const sessionDir = dirname(eventsPath);
-        if (!existsSync(sessionDir)) {
-          send({
-            type: 'final_output',
-            content: '⚠️ 当前 CoCo 进程的会话目录已被删除（可能是 e2e 测试清理或手动 rm），写到 events.jsonl 的内容会落到一个失效 inode 上，桥接读不到。请重启 CoCo 后重新 /adopt。',
-            lastUuid: `coco-adopt-stale-${randomBytes(4).toString('hex')}`,
-            turnId: 'coco-adopt-stale',
-          });
-          log(`CoCo adopt: session dir missing, bridge disabled (${sessionDir})`);
-        } else {
-          codexBridgeAttach(eventsPath, 'split-live');
-        }
-      } else {
-        // No sid known yet — fall back to PID-walk in the late-attach
-        // poller. Reuses codexAdoptPendingPid since the timer dispatches
-        // by cliId at probe time (see codexBridgeStartTimer).
-        codexAdoptPendingPid = cfg.adoptCliPid;
-      }
-      // Always run the bridge poller for CoCo adopt — events.jsonl is created
-      // lazily on first event, so fs.watch typically ENOENTs at attach time.
-      // The 1s timer covers ingest + emit even when the watcher never armed,
-      // and is idempotent (no-op if already started).
-      codexBridgeStartTimer();
-    } else if (cfg.cliId === 'mtr') {
-      const adoptStartMs = Date.now();
-      codexAdoptStartMs = adoptStartMs;
-      codexBridgeQueue.setLocalTurns(true, adoptStartMs);
-      if (cfg.cliSessionId) codexBridgePendingSessionId = cfg.cliSessionId;
-      const source =
-        findMtrSessionById(cfg.cliSessionId)
-        ?? findLatestMtrSessionByDirectory(cfg.adoptCwd ?? cfg.workingDir);
-      if (source) {
-        codexBridgePendingSessionId = undefined;
-        mtrBridgeAttach(source, 'split-live');
-      } else {
-        codexBridgeStartTimer();
-      }
-    }
+    setupAdoptTranscriptBridges(cfg);
 
-    // Idle detection. In bridge mode we use the adopted CLI's real
-    // completion/ready patterns (e.g. "Worked for Xs") so tool-execution
-    // pauses don't trigger a premature emit. Other adopt cases keep the
-    // minimal output-quiescence-only detector.
-    const idleAdapter = cfg.bridgeJsonlPath
-      ? createCliAdapterSync('claude-code', undefined)
-      : cfg.cliId === 'codex' || cfg.cliId === 'coco' || cfg.cliId === 'mtr'
-        ? createCliAdapterSync(cfg.cliId, undefined)
-        : ({ completionPattern: undefined, readyPattern: undefined } as any);
-    idleDetector = new IdleDetector(idleAdapter);
-    // Codex adopt write path: route Lark messages through the codex
-    // adapter's writeInput so they pick up the 200 ms paste-detection
-    // delay + Enter-retry + ~/.codex/history.jsonl verification loop
-    // (see src/adapters/cli/codex.ts:125-178). Without it, Codex TUI's
-    // "\n treated as Enter" handling leaves multi-line submits stuck
-    // in the input box. Other adopt CLIs keep the simpler raw
-    // sendText+Enter path — claude-code adopt has its own bridge
-    // verify path; gemini / coco / opencode / aiden haven't surfaced
-    // this failure mode and we don't want to risk regressing them.
-    if (cfg.cliId === 'codex') {
-      cliAdapter = createCliAdapterSync('codex', cfg.cliPathOverride);
-    } else if (cfg.cliId === 'mtr') {
-      cliAdapter = createCliAdapterSync('mtr', cfg.cliPathOverride);
-    }
-    idleDetector.onIdle(() => {
-      log('Prompt detected (idle) — adopt mode');
-      try { bridgeDrainAndMaybeEmit(); } catch (err: any) { log(`Bridge emit error: ${err.message}`); }
-      try { codexBridgeDrainAndMaybeEmit(); } catch (err: any) { log(`Codex bridge emit error: ${err.message}`); }
-      markPromptReady();
-    });
+    setupAdoptIdleDetection(cfg, 'pipe');
+    setupAdoptInputAdapter(cfg);
 
     backend.onData(onPtyData);
     backend.onExit((code, signal) => {
@@ -2873,7 +2940,8 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
 
     awaitingFirstPrompt = false;
     renderer?.markNewTurn();
-    log(`Adopt mode (pipe): observing ${cfg.adoptTmuxTarget} (${cols}x${rows})`);
+    const target = cfg.adoptZellijPaneId ? `${cfg.adoptZellijSession}/${cfg.adoptZellijPaneId}` : cfg.adoptTmuxTarget;
+    log(`Adopt mode (${effectiveBackendType}): observing ${target} (${cols}x${rows})`);
     return;
   }
 
@@ -2888,10 +2956,15 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     log('tmux backend requested but functional probe failed — falling back to PTY backend');
     effectiveBackend = 'pty';
   }
+  if (effectiveBackend === 'herdr' && !HerdrBackend.isAvailable()) {
+    log('herdr backend requested but probe failed — falling back to PTY backend');
+    effectiveBackend = 'pty';
+  }
   if (effectiveBackend === 'zellij' && !ZellijBackend.isAvailable()) {
     log('zellij backend requested but functional probe failed (need zellij >= 0.44) — falling back to PTY backend');
     effectiveBackend = 'pty';
   }
+  effectiveBackendType = effectiveBackend;
   const selectedBackend = selectSessionBackend({ sessionId: cfg.sessionId, backendType: effectiveBackend });
   isTmuxMode = selectedBackend.isTmuxMode;
   isPipeMode = selectedBackend.isPipeMode;
@@ -2963,12 +3036,22 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // just `tmux attach-session`s — logging `Spawning: <new bin>` in that case
   // is misleading and has cost real debugging time. (CliId-mismatch reattach
   // is now blocked upstream in restoreActiveSessions / killStalePids.)
-  const willReattachTmux = isTmuxMode && TmuxBackend.hasSession(TmuxBackend.sessionName(cfg.sessionId));
-  const willReattachZellij = isZellijMode && ZellijBackend.hasSession(ZellijBackend.sessionName(cfg.sessionId));
-  if (willReattachTmux) {
-    log(`Re-attaching to existing tmux session: ${TmuxBackend.sessionName(cfg.sessionId)} (requested CLI: ${cliAdapter.resolvedBin})`);
-  } else if (willReattachZellij) {
-    log(`Re-attaching to existing zellij session: ${ZellijBackend.sessionName(cfg.sessionId)} (requested CLI: ${cliAdapter.resolvedBin})`);
+  const persistentSessionName = effectiveBackendType === 'tmux'
+    ? TmuxBackend.sessionName(cfg.sessionId)
+    : effectiveBackendType === 'herdr'
+      ? HerdrBackend.sessionName(cfg.sessionId)
+      : effectiveBackendType === 'zellij'
+        ? ZellijBackend.sessionName(cfg.sessionId)
+      : undefined;
+  const willReattachPersistent = persistentSessionName
+    ? effectiveBackendType === 'tmux'
+      ? TmuxBackend.hasSession(persistentSessionName)
+      : effectiveBackendType === 'zellij'
+        ? ZellijBackend.hasSession(persistentSessionName)
+        : HerdrBackend.hasSession(persistentSessionName)
+    : false;
+  if (willReattachPersistent) {
+    log(`Re-attaching to existing ${effectiveBackendType} session: ${persistentSessionName} (requested CLI: ${cliAdapter.resolvedBin})`);
   } else {
     log(`Spawning fresh CLI: ${cliAdapter.resolvedBin} ${args.join(' ')} (cwd: ${cfg.workingDir})`);
   }
@@ -3152,14 +3235,9 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     send({ type: 'claude_exit', code, signal });
   });
 
-  if (isPipeMode && backend instanceof TmuxPipeBackend && backend.isReattach) {
-    log(`Re-attached to existing tmux session via pipe-pane: ${TmuxBackend.sessionName(cfg.sessionId)}`);
-    try {
-      const initial = backend.captureCurrentScreen();
-      if (initial.length > 0) onPtyData(initial);
-    } catch (err: any) {
-      log(`captureCurrentScreen failed: ${err.message}`);
-    }
+  if (isPipeMode && backend && 'isReattach' in backend && backend.isReattach) {
+    log(`Re-attached to existing ${effectiveBackendType} session via pipe backend: ${persistentSessionName}`);
+    seedBackendScreen(`${effectiveBackendType} reattach`, backend);
   }
 
   // Fallback: if the CLI takes too long to show its prompt (e.g. slow
@@ -3884,6 +3962,13 @@ process.on('message', async (raw: unknown) => {
         break;
       }
       log('Restart requested');
+      // Must destroySession(), not kill(): for persistent backends (tmux/herdr)
+      // kill() only detaches — the backing session + CLI process keep running,
+      // so the resume:true spawnCli below would re-attach to the SAME live CLI
+      // (selectSessionBackend reattaches whenever hasSession() is true) and the
+      // process would never actually restart. destroySession() tears the session
+      // down so the respawn starts a fresh CLI. (PTY has no destroySession, so
+      // the ?. no-ops and killCli()'s kill() does the teardown.)
       backend?.destroySession?.();
       killCli();
       awaitingFirstPrompt = true;
