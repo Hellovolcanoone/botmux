@@ -19,6 +19,7 @@ import {
   eligibleAutoMentionAliases,
   offTopicSubBotTopic,
   resolveReportTarget,
+  resolveSendTarget,
 } from '../src/core/dispatch.js';
 
 describe('parseDispatchBotSpec', () => {
@@ -251,5 +252,22 @@ describe('resolveReportTarget', () => {
     expect(resolveReportTarget({ creatorOpenId: 'c', ownerOpenId: 'o', quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('c');
     expect(resolveReportTarget({ ownerOpenId: 'o', quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('o');
     expect(resolveReportTarget({ quoteTargetSenderOpenId: 'q' }).orchOpenId).toBe('q');
+  });
+});
+
+describe('resolveSendTarget — destination routing', () => {
+  const base = { topLevel: false, chatScope: false, chatId: 'oc_chat', rootMessageId: 'om_root' };
+  it('defaults to replying in the session thread (thread scope, no flags)', () => {
+    expect(resolveSendTarget(base)).toEqual({ mode: 'reply', root: 'om_root' });
+  });
+  it('chat-scope session posts plain at the chat top', () => {
+    expect(resolveSendTarget({ ...base, chatScope: true })).toEqual({ mode: 'plain', chatId: 'oc_chat' });
+  });
+  it('--top-level posts plain at the chat top even from a thread session', () => {
+    expect(resolveSendTarget({ ...base, topLevel: true })).toEqual({ mode: 'plain', chatId: 'oc_chat' });
+  });
+  it('--into <root> replies into that topic (overrides everything)', () => {
+    expect(resolveSendTarget({ ...base, into: 'om_topic' })).toEqual({ mode: 'reply', root: 'om_topic' });
+    expect(resolveSendTarget({ ...base, into: 'om_topic', topLevel: true, chatScope: true })).toEqual({ mode: 'reply', root: 'om_topic' });
   });
 });

@@ -26,7 +26,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
-import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic, resolveReportTarget } from './core/dispatch.js';
+import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic, resolveReportTarget, resolveSendTarget } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
@@ -2790,6 +2790,10 @@ async function cmdSend(rest: string[]): Promise<void> {
   // for streaming-card / progress UI.
   const sendTopLevel = rest.includes('--top-level');
   const overrideChatId = argValue(rest, '--chat-id');
+  // --into <话题根id>: reply this send into a specific topic (a sub-bot's topic,
+  // another thread, etc.) instead of the session's own location. Wins over the
+  // auto/scope default; `dispatch` opens topics, `send --into` posts into them.
+  const sendInto = argValue(rest, '--into');
   // Quote chain (chat scope): --quote <message_id> overrides the auto target,
   // --no-quote forces a plain (un-quoted) send.
   const explicitQuote = argValue(rest, '--quote');
@@ -2908,18 +2912,15 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Explicit --mention / --mention-back of an off-topic sub-bot → block + point to
   // the right command (--anyway overrides). Prose @Name injection is filtered
   // (dropped, not blocked) at its own site below.
-  if (!rest.includes('--anyway')) {
-    for (const m of mentions) {
-      const seed = offTopicSubBotSeed(m.open_id);
-      if (seed) {
-        console.error(
-          `⚠️ ${m.open_id}${m.name ? `（${m.name}）` : ''} 是 botmux dispatch 派进子话题 ${seed} 的子 bot——\n` +
-          `它的会话在那条子话题里：在主群 @ 它收不到，反而会另起一个无上下文的新会话。\n` +
-          `要跟它说，把消息发进它的子话题：\n` +
-          `  botmux dispatch --into ${seed} --bot ${m.open_id} --brief "..."\n` +
-          `（确属新会话/有意为之，加 --anyway 强发。）`);
-        process.exit(2);
-      }
+  // Inform, don't block: if @-ing a bot whose session lives in a sub-topic, this
+  // send lands a NEW conversation at the current location. To reply into that
+  // topic instead, use `--into <seed>`. The model picks the destination — no hard
+  // block (that was too aggressive; @-ing a bot in the group to start a fresh
+  // conversation is a legitimate, common intent).
+  for (const m of mentions) {
+    const seed = offTopicSubBotSeed(m.open_id);
+    if (seed) {
+      console.error(`ℹ️ ${m.open_id}${m.name ? `（${m.name}）` : ''} 在子话题 ${seed} 里也有会话；本条发到当前位置（新对话）。要发进那个话题改用 --into ${seed}。`);
     }
   }
 
@@ -2928,14 +2929,15 @@ async function cmdSend(rest: string[]): Promise<void> {
   // oncall as chat-level: in multi-daemon setups this session's bot may not
   // be the one that persisted the binding, but users still expect footer
   // addressing to go to the last caller in the shared oncall workspace.
-  const oncallEntry = !sendTopLevel && !overrideChatId && s.chatId
+  const oncallEntry = !sendTopLevel && !overrideChatId && !sendInto && s.chatId
     ? findOncallChatForAnyBot(s.chatId) : undefined;
   // Dispatch helper: top-level / chat-scope send vs reply-in-thread, single
   // decision point. Used for file attachments (always plain in chat scope).
+  const sendTarget = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: isChatScope, chatId: targetChatId, rootMessageId: s.rootMessageId });
   const dispatch = (content: string, msgType: string): Promise<string> =>
-    (sendTopLevel || isChatScope)
-      ? sendMessage(appId, targetChatId, content, msgType)
-      : replyMessage(appId, s.rootMessageId, content, msgType, true);
+    sendTarget.mode === 'plain'
+      ? sendMessage(appId, sendTarget.chatId, content, msgType)
+      : replyMessage(appId, sendTarget.root, content, msgType, true);
   const recordBridgeSendMarker = (sentAtMs: number, messageId: string): void => {
     try {
       const markerDir = join(resolveDataDir(), 'turn-sends');
@@ -2945,7 +2947,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     } catch { /* best-effort: marker miss only causes a redundant fallback message */ }
   };
 
-  const shouldRecordBridgeMarker = !sendTopLevel && !overrideChatId;
+  const shouldRecordBridgeMarker = !sendTopLevel && !overrideChatId && !sendInto;
 
   const dispatchOrPatchPending = async (content: string, msgType: string): Promise<string> => {
     const pendingCardId = msgType === 'interactive' ? claimPendingResponseCard(s) : undefined;
@@ -2962,7 +2964,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Quote chain (普通群): the primary message replies to the turn's target so
   // Lark renders a 引用 chain. --quote overrides, --no-quote opts out. Thread
   // scope and --top-level never quote. Withdrawn target → fall back to plain.
-  const quoteTargetId = resolveQuoteTarget({
+  const quoteTargetId = sendInto ? undefined : resolveQuoteTarget({
     isChatScope, sendTopLevel, noQuote, explicitQuote,
     sessionQuoteTargetId: s.quoteTargetId,
   });
@@ -3087,16 +3089,9 @@ async function cmdSend(rest: string[]): Promise<void> {
             break;
           }
           if (alreadyMentioned.has(senderScopedId)) break;
-          // Footgun guard at the auto-injection source: don't turn a prose
-          // `@OtherSubBot` into a real @ for a dispatched sub-bot that's off-topic
-          // here — that would spawn a context-less session in the main chat (the
-          // explicit guard above only saw --mention/--mention-back). Drop the
-          // injection (don't block the whole send); --anyway forces it through.
-          const injOffSeed = rest.includes('--anyway') ? null : offTopicSubBotSeed(senderScopedId);
-          if (injOffSeed) {
-            console.error(`[botmux send] 跳过正文 @${entry.botName} 自动注入：它是 dispatch 派进子话题 ${injOffSeed} 的子 bot、不在本会话——避免在主群另起无上下文会话（要强发加 --anyway）。`);
-            break;
-          }
+          // Prose `@OtherBot` auto-injection: inject normally. (The off-topic
+          // sub-bot guard used to DROP this; we now let the model @ freely and
+          // pick the destination with --into instead of being silently dropped.)
           mentions.push({ open_id: senderScopedId, name: entry.botName });
           alreadyMentioned.add(senderScopedId);
           break;

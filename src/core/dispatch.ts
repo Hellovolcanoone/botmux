@@ -291,3 +291,25 @@ export function eligibleAutoMentionAliases(input: {
   }
   return out;
 }
+
+/**
+ * Decide where a `botmux send` message lands. The destination is auto-determined
+ * from the session's own location (thread session → reply in its thread; chat
+ * session → plain message at the chat top), with explicit overrides:
+ *   --into <root>   → reply into a specific topic (any chat the bot is in)
+ *   --top-level     → plain message at the current chat's top
+ * --into wins over everything (you asked for a specific topic). This replaces
+ * the old "block @-ing a sub-bot unless --anyway" guard: the model just picks
+ * the destination instead of being stopped.
+ */
+export function resolveSendTarget(opts: {
+  into?: string;
+  topLevel: boolean;
+  chatScope: boolean;
+  chatId: string;
+  rootMessageId: string;
+}): { mode: 'reply'; root: string } | { mode: 'plain'; chatId: string } {
+  if (opts.into) return { mode: 'reply', root: opts.into };
+  if (opts.topLevel || opts.chatScope) return { mode: 'plain', chatId: opts.chatId };
+  return { mode: 'reply', root: opts.rootMessageId };
+}
