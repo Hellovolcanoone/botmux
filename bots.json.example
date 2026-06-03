@@ -27,5 +27,12 @@
     "cliId": "mtr",
     "allowedUsers": ["dana@company.com"],
     "workingDir": "~/projects"
+  },
+  {
+    "larkAppId": "cli_xxx_bot5",
+    "larkAppSecret": "your_secret_5",
+    "cliId": "pi",
+    "allowedUsers": ["erin@company.com"],
+    "workingDir": "~/projects"
   }
 ]

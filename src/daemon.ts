@@ -410,7 +410,8 @@ function refreshCliVersion(cliId: CliId, cliPathOverride?: string): boolean {
 
   try {
     const adapter = createCliAdapterSync(cliId, cliPathOverride);
-    const raw = execFileSync(adapter.resolvedBin, ['--version'], {
+    const versionCommand = adapter.versionCommand?.() ?? { bin: adapter.resolvedBin, args: ['--version'] };
+    const raw = execFileSync(versionCommand.bin, versionCommand.args, {
       encoding: 'utf-8',
       timeout: 5_000,
     }).trim();

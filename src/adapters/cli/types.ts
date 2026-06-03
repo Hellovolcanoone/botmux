@@ -131,6 +131,9 @@ export interface CliAdapter {
 
   /** Whether CLI uses alternate screen buffer */
   readonly altScreen: boolean;
+
+  /** Optional CLI version command override. Defaults to `[resolvedBin, '--version']`. */
+  versionCommand?(): { bin: string; args: string[] };
 }
 
-export type CliId = 'claude-code' | 'aiden' | 'coco' | 'codex' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr';
+export type CliId = 'claude-code' | 'aiden' | 'coco' | 'codex' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr' | 'pi' | 'pi-rpc';

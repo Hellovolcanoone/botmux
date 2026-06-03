@@ -329,6 +329,21 @@ describe('discoverAdoptableSessions', () => {
     expect(results[0]!.cwd).toBe('/workspace/mtr');
   });
 
+  it('should detect Pi CLI process', () => {
+    setupMocks({
+      paneLines: 'pisession:0.0 1000\n',
+      commMap: { 1000: 'pi' },
+      cwdMap: { 1000: '/workspace/pi' },
+      dimsMap: { 'pisession:0.0': '120 40' },
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('pi');
+    expect(results[0]!.cwd).toBe('/workspace/pi');
+  });
+
   it('should not include sessionId for non-claude CLI types', () => {
     setupMocks({
       paneLines: 'mysession:0.0 1000\n',

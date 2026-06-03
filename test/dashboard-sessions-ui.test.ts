@@ -8,7 +8,11 @@ describe('dashboard sessions filters', () => {
     expect(html).toContain('type="checkbox"');
     expect(html).toContain('name="cli"');
     expect(html).toContain('value="codex"');
+    expect(html).toContain('value="pi"');
+    expect(html).toContain('value="pi-rpc"');
     expect(html).toMatch(/value="codex" checked/);
+    expect(html).toMatch(/value="pi" checked/);
+    expect(html).toMatch(/value="pi-rpc" checked/);
     expect(html).not.toContain('<select');
   });
 });

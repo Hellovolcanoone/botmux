@@ -63,6 +63,14 @@ describe('getCliDisplayName', () => {
   it('should return "MTR" for mtr', () => {
     expect(getCliDisplayName('mtr')).toBe('MTR');
   });
+
+  it('should return "Pi" for pi', () => {
+    expect(getCliDisplayName('pi')).toBe('Pi');
+  });
+
+  it('should return "Pi RPC" for pi-rpc', () => {
+    expect(getCliDisplayName('pi-rpc')).toBe('Pi RPC');
+  });
 });
 
 // ─── buildSessionCard ─────────────────────────────────────────────────────
