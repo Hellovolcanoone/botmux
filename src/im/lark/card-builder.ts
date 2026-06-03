@@ -32,6 +32,28 @@ function escapeMd(s: string): string {
   return s.replace(/[*_~`\[\]\\]/g, c => `\\${c}`);
 }
 
+function sidebarUrl(url: string): string {
+  const qs = new URLSearchParams({
+    mode: 'sidebar-semi',
+    min_width: '350',
+    width: '800',
+    max_width: '1200',
+    reload: 'false',
+    url,
+  });
+  return `https://applink.feishu.cn/client/web_url/open?${qs.toString()}`;
+}
+
+function sidebarMultiUrl(url: string): Record<string, string> {
+  const pcUrl = sidebarUrl(url);
+  return {
+    url: pcUrl,
+    pc_url: pcUrl,
+    android_url: url,
+    ios_url: url,
+  };
+}
+
 /**
  * Build a Feishu interactive card with terminal button + action buttons.
  * @param showManageButtons - When true, include restart & close buttons (used in the private write-link card — delivered as a "visible-to-you" ephemeral card in plain groups, or DM'd as fallback).
@@ -54,12 +76,7 @@ export function buildSessionCard(
       tag: 'button',
       text: { tag: 'plain_text', content: t(showManageButtons ? 'card.btn.open_writable_terminal' : 'card.btn.open_terminal', undefined, locale) },
       type: 'primary',
-      multi_url: {
-        url: terminalUrl,
-        pc_url: terminalUrl,
-        android_url: terminalUrl,
-        ios_url: terminalUrl,
-      },
+      multi_url: sidebarMultiUrl(terminalUrl),
     },
   ];
   if (!showManageButtons) {
@@ -420,7 +437,7 @@ export function buildStreamingCard(
     tag: 'button',
     text: { tag: 'plain_text', content: t('card.btn.open_terminal', undefined, locale) },
     type: 'primary',
-    multi_url: { url: terminalUrl, pc_url: terminalUrl, android_url: terminalUrl, ios_url: terminalUrl },
+    multi_url: sidebarMultiUrl(terminalUrl),
   });
   if (status === 'limited' && usageLimit?.retryReady) {
     headerActions.push({
@@ -584,7 +601,7 @@ export function buildPrivateSnapshotCard(
         tag: 'button',
         text: { tag: 'plain_text', content: t('card.btn.open_terminal', undefined, locale) },
         type: 'primary',
-        multi_url: { url: terminalUrl, pc_url: terminalUrl, android_url: terminalUrl, ios_url: terminalUrl },
+        multi_url: sidebarMultiUrl(terminalUrl),
       },
       {
         tag: 'button',
