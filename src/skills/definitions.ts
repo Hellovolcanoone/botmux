@@ -341,6 +341,8 @@ botmux send --mention ou_xxx "帮忙看下这段代码"
 | \`--mention-back\` | @ 回**本轮触发消息的发送者**（open_id 自动从会话取，你不用记） |
 | \`--no-mention\` | 明确声明本条不 @ 任何人 |
 
+> ⚠️ \`--mention-back\` / \`--no-mention\` 是开关，后面不跟任何参数；要 @ 具体的人用 \`--mention <open_id:名字>\`。正文来源按 \`--content-file > 位置参数 > stdin\` 选择，多行正文推荐只放在 heredoc/stdin 中。
+
 决策规则（**按内容价值判断，不是按"人还是 bot"**）：
 - **有实质结论、需要对方继续看 / 确认 / 决策** → \`--mention-back\`（@回触发者）或 \`--mention\` 点名，确保对方看到。
 - **纯记录 / 低优先级进度 / 简短确认（"收到""在看"）** → \`--no-mention\`，别打扰。

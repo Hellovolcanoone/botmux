@@ -14,6 +14,17 @@ describe('built-in botmux-send skill', () => {
     expect(skill!.content).toContain('botmux send "第一行\\n第二行"');
     expect(skill!.content).toContain('字面量');
   });
+
+  it('warns that mention-back/no-mention are switches without values', () => {
+    const skill = BUILTIN_SKILLS.find(s => s.name === 'botmux-send');
+    expect(skill).toBeDefined();
+    expect(skill!.content).toContain('--mention-back');
+    expect(skill!.content).toContain('--no-mention');
+    expect(skill!.content).toContain('是开关，后面不跟任何参数');
+    expect(skill!.content).toContain('--mention <open_id:名字>');
+    expect(skill!.content).toContain('--content-file > 位置参数 > stdin');
+    expect(skill!.content).toContain('多行正文推荐只放在 heredoc/stdin 中');
+  });
 });
 
 describe('built-in botmux-history skill', () => {
