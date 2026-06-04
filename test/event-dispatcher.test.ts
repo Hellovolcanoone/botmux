@@ -43,6 +43,7 @@ const mockListChatBotMembers = vi.fn(async () => [] as Array<{ openId: string; n
 const mockGetChatMode = vi.fn(async () => 'topic' as 'group' | 'topic' | 'p2p');
 const mockGetChatInfo = vi.fn(async () => ({ userCount: 1, botCount: 1 }));
 const mockReplyMessage = vi.fn(async () => 'msg-id');
+const mockUpdateMessage = vi.fn(async () => true);
 // 默认所有 open_id 都判为「非真人」（bot）→ 保持既有用例「全部登记」的预期；
 // 需要模拟真人的用例用 mockResolvedValueOnce(true)。
 const mockIsHumanOpenId = vi.fn(async () => false);
@@ -51,6 +52,7 @@ vi.mock('../src/im/lark/client.js', () => ({
   getChatMode: (...args: any[]) => mockGetChatMode(...args),
   listChatBotMembers: (...args: any[]) => mockListChatBotMembers(...args),
   replyMessage: (...args: any[]) => mockReplyMessage(...args),
+  updateMessage: (...args: any[]) => mockUpdateMessage(...args),
   isHumanOpenId: (...args: any[]) => mockIsHumanOpenId(...args),
 }));
 
@@ -87,7 +89,8 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 // ─── Imports (must be after mocks) ──────────────────────────────────────────
 
-import { canOperate, canTalk, ensureBotOpenId, isBotMentioned, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
+import { __resetAnchorQueues } from '../src/utils/anchor-serializer.js';
+import { __resetEventClaimsForTest, canOperate, canTalk, ensureBotOpenId, isBotMentioned, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -95,6 +98,11 @@ const MY_APP_ID = 'app-bot-a';
 const MY_OPEN_ID = 'ou_bot_a_open_id';
 const OTHER_BOT_OPEN_ID = 'ou_bot_b_open_id';
 const USER_OPEN_ID = 'ou_user_123';
+
+async function flushEventWork() {
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setTimeout(resolve, 0));
+}
 
 function setupBotState(opts?: { botOpenId?: string | undefined; chatGrants?: Record<string, string[]>; globalGrants?: string[]; allowedUsers?: string[]; restrictGrantCommands?: boolean }) {
   mockGetBot.mockReturnValue({
@@ -249,6 +257,8 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
 
   beforeEach(() => {
     capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
     mockReplyMessage.mockClear();
     mockRecordObservedBots.mockClear();
     setupBotState();
@@ -274,7 +284,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockReplyMessage).toHaveBeenCalledWith(
       MY_APP_ID,
@@ -306,7 +316,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     const handler = capturedHandlers['im.message.receive_v1'];
     expect(handler).toBeDefined();
     await handler(event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       anchor: 'root-thread-1',
@@ -324,7 +334,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       anchor: 'root-thread-2',
@@ -341,7 +351,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
@@ -366,7 +376,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     handlers.isSessionOwner.mockReturnValue(false);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
@@ -389,7 +399,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     handlers.isSessionOwner.mockReturnValue(false);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'chat',
@@ -417,7 +427,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     handlers.isSessionOwner.mockReturnValue(false);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'chat',
@@ -448,7 +458,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     handlers.isSessionOwner.mockReturnValue(false);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
@@ -472,7 +482,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     handlers.isSessionOwner.mockReturnValue(false);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'chat',
@@ -498,7 +508,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     handlers.isSessionOwner.mockReturnValue(false);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
@@ -522,7 +532,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     handlers.isSessionOwner.mockReturnValue(false);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'chat',
@@ -554,7 +564,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     handlers.isSessionOwner.mockReturnValue(false);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'chat',
@@ -579,7 +589,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     event.message.root_id = undefined as any;
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
@@ -597,7 +607,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       anchor: 'root-thread-oncall-close',
@@ -629,7 +639,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -695,7 +705,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'chat',
@@ -713,7 +723,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       anchor: 'root-thread-4',
@@ -730,7 +740,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
@@ -747,7 +757,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       anchor: 'root-thread-6',
@@ -774,7 +784,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     ]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     // No @mention → should NOT be routed even though bot owns session
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -797,7 +807,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     ]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       anchor: 'root-thread-8',
@@ -827,7 +837,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'chat',
@@ -857,7 +867,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -881,7 +891,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -906,7 +916,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     ]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
@@ -962,6 +972,8 @@ describe('im.message.receive_v1 — stale chat-scope detection (group → topic 
 
   beforeEach(() => {
     capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
     setupBotState();
     handlers = makeHandlers();
     mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
@@ -986,7 +998,7 @@ describe('im.message.receive_v1 — stale chat-scope detection (group → topic 
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     // Reroutes: scope='thread', anchor=messageId → handleNewTopic seeds a new
     // thread session, NOT handleThreadReply on the stale chat-scope owner.
@@ -1014,7 +1026,7 @@ describe('im.message.receive_v1 — stale chat-scope detection (group → topic 
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'chat',
@@ -1042,7 +1054,7 @@ describe('im.message.receive_v1 — stale chat-scope detection (group → topic 
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     const forceRefreshCalls = mockGetChatMode.mock.calls.filter(
       ([, , options]) => (options as { forceRefresh?: boolean } | undefined)?.forceRefresh === true,
@@ -1066,6 +1078,8 @@ describe('im.message.receive_v1 — stale topic detection (topic → group conve
 
   beforeEach(() => {
     capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
     setupBotState();
     handlers = makeHandlers();
     mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
@@ -1090,7 +1104,7 @@ describe('im.message.receive_v1 — stale topic detection (topic → group conve
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     // Reroutes: scope='chat', anchor=chatId → bot replies via sendMessage(chatId),
     // not replyMessage(messageId, reply_in_thread=true).
@@ -1119,7 +1133,7 @@ describe('im.message.receive_v1 — stale topic detection (topic → group conve
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -1149,7 +1163,7 @@ describe('im.message.receive_v1 — stale topic detection (topic → group conve
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     const forceRefreshCalls = mockGetChatMode.mock.calls.filter(
       ([, , options]) => (options as { forceRefresh?: boolean } | undefined)?.forceRefresh === true,
@@ -1181,7 +1195,7 @@ describe('im.message.receive_v1 — stale topic detection (topic → group conve
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -1196,6 +1210,8 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
 
   beforeEach(() => {
     capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
     setupBotState();
     handlers = makeHandlers();
     mockGetChatMode.mockResolvedValue('group'); // 普通群
@@ -1215,7 +1231,7 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -1241,7 +1257,7 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -1274,7 +1290,7 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -1296,7 +1312,7 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     // No /t → routing stays chat-scope (anchor = chatId)
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
@@ -1320,7 +1336,7 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     // Already thread-scope → keep anchor = root_id, do NOT change to messageId.
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
@@ -1346,7 +1362,7 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -1375,7 +1391,7 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     ]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -1402,7 +1418,7 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -1427,6 +1443,8 @@ describe('im.message.receive_v1 — 主动开工 场景② (autoStartOnNewTopic)
 
   beforeEach(() => {
     capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
     setupBotState();
     handlers = makeHandlers();
     handlers.isSessionOwner.mockReturnValue(false);
@@ -1445,7 +1463,7 @@ describe('im.message.receive_v1 — 主动开工 场景② (autoStartOnNewTopic)
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
       scope: 'thread',
@@ -1466,7 +1484,7 @@ describe('im.message.receive_v1 — 主动开工 场景② (autoStartOnNewTopic)
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -1484,7 +1502,7 @@ describe('im.message.receive_v1 — 主动开工 场景② (autoStartOnNewTopic)
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
@@ -1503,7 +1521,7 @@ describe('im.message.receive_v1 — 主动开工 场景② (autoStartOnNewTopic)
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -1516,6 +1534,8 @@ describe('im.message.receive_v1 — /introduce command', () => {
 
   beforeEach(() => {
     capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
     setupBotState();
     handlers = makeHandlers();
     mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
@@ -1552,7 +1572,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
     const [, larkAppIdArg, chatIdArg, botsArg, sourceArg] = mockRecordObservedBots.mock.calls[0];
@@ -1577,7 +1597,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
     const [, , , botsArg] = mockRecordObservedBots.mock.calls[0];
@@ -1597,7 +1617,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockReplyMessage).toHaveBeenCalledTimes(1);
     const [larkAppIdArg, messageIdArg, contentArg] = mockReplyMessage.mock.calls[0];
@@ -1615,7 +1635,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -1629,7 +1649,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).not.toHaveBeenCalled();
     expect(mockReplyMessage).not.toHaveBeenCalled();
@@ -1641,7 +1661,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).not.toHaveBeenCalled();
     expect(mockReplyMessage).not.toHaveBeenCalled();
@@ -1655,7 +1675,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -1671,7 +1691,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).not.toHaveBeenCalled();
     expect(mockReplyMessage).not.toHaveBeenCalled();
@@ -1689,7 +1709,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
@@ -1706,7 +1726,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     const [, , , botsArg] = mockRecordObservedBots.mock.calls[0];
     expect((botsArg as Array<{ openId: string }>).map(b => b.openId).sort())
@@ -1727,7 +1747,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).toHaveBeenCalled();   // 任何人都能登记
     expect(mockReplyMessage).toHaveBeenCalled();          // 仍然回执 ack
@@ -1749,7 +1769,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).not.toHaveBeenCalled();
   });
@@ -1768,7 +1788,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).not.toHaveBeenCalled();
     expect(mockReplyMessage).not.toHaveBeenCalled();
@@ -1788,7 +1808,7 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
   });
@@ -1819,11 +1839,194 @@ describe('im.message.receive_v1 — /introduce command', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
 
     expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+});
+
+describe('card.action.trigger — ack-safe slow handlers', () => {
+  let handlers: ReturnType<typeof makeHandlers>;
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
+    mockUpdateMessage.mockClear();
+    setupBotState();
+    handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  });
+
+  it('preserves immediate card action responses when the handler is fast', async () => {
+    handlers.handleCardAction.mockResolvedValue({ type: 'updated-card' });
+
+    const result = await capturedHandlers['card.action.trigger']({
+      action: { value: { action: 'toggle_stream', root_id: 'root-fast' } },
+      operator: { open_id: USER_OPEN_ID },
+      context: { open_message_id: 'om_fast_card' },
+    });
+
+    expect(result).toEqual({ card: { type: 'raw', data: { type: 'updated-card' } } });
+    expect(mockUpdateMessage).not.toHaveBeenCalled();
+  });
+
+  it('returns a toast before a slow handler settles, then patches the card in background', async () => {
+    let release!: () => void;
+    const slow = new Promise(resolve => { release = () => resolve({ type: 'late-card' }); });
+    handlers.handleCardAction.mockReturnValue(slow as any);
+
+    vi.useFakeTimers();
+    const call = capturedHandlers['card.action.trigger']({
+      action: { value: { action: 'toggle_stream', root_id: 'root-slow' } },
+      operator: { open_id: USER_OPEN_ID },
+      context: { open_message_id: 'om_slow_card' },
+    });
+    await vi.advanceTimersByTimeAsync(2500);
+    await expect(call).resolves.toEqual({ toast: { type: 'info', content: '操作已收到，后台处理中' } });
+
+    release();
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
+
+    expect(mockUpdateMessage).toHaveBeenCalledWith(MY_APP_ID, 'om_slow_card', JSON.stringify({ type: 'late-card' }));
+  });
+
+  it('dedupes a repeated card action while the first copy is still running', async () => {
+    let release!: () => void;
+    handlers.handleCardAction.mockReturnValue(new Promise(resolve => { release = () => resolve(undefined); }) as any);
+    const event = {
+      action: { value: { action: 'restart', root_id: 'root-dup' } },
+      operator: { open_id: USER_OPEN_ID },
+      context: { open_message_id: 'om_dup_card' },
+    };
+
+    const first = capturedHandlers['card.action.trigger'](event);
+    const second = await capturedHandlers['card.action.trigger']({ ...event });
+
+    expect(second).toEqual({ toast: { type: 'info', content: '操作正在处理中，请稍候' } });
+    expect(handlers.handleCardAction).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+  });
+
+  it('dedupes a same-event_id redelivery that arrives AFTER the first copy completed', async () => {
+    handlers.handleCardAction.mockResolvedValue({ type: 'done-card' });
+    const event = {
+      event_id: 'evt-card-claim',
+      action: { value: { action: 'restart', root_id: 'root-claim' } },
+      operator: { open_id: USER_OPEN_ID },
+      context: { open_message_id: 'om_claim_card' },
+    };
+
+    const first = await capturedHandlers['card.action.trigger'](event);
+    expect(first).toEqual({ card: { type: 'raw', data: { type: 'done-card' } } });
+
+    // In-flight Set has already cleared in finally(); only the durable claim can
+    // still stop a redelivery from re-firing a non-idempotent action (restart).
+    const redelivery = await capturedHandlers['card.action.trigger']({ ...event });
+    expect(redelivery).toEqual({ toast: { type: 'info', content: '操作已收到，请勿重复点击' } });
+    expect(handlers.handleCardAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT durably dedupe distinct clicks without an event_id (legitimate repeat)', async () => {
+    handlers.handleCardAction.mockResolvedValue({ type: 'toggled' });
+    const event = {
+      action: { value: { action: 'toggle_stream', root_id: 'root-toggle' } },
+      operator: { open_id: USER_OPEN_ID },
+      context: { open_message_id: 'om_toggle_card' },
+    };
+
+    const first = await capturedHandlers['card.action.trigger'](event);
+    const second = await capturedHandlers['card.action.trigger']({ ...event });
+
+    // No stable id to claim + in-flight guard cleared between clicks, so a repeat
+    // (e.g. toggling stream on then off) is NOT suppressed.
+    expect(first).toEqual({ card: { type: 'raw', data: { type: 'toggled' } } });
+    expect(second).toEqual({ card: { type: 'raw', data: { type: 'toggled' } } });
+    expect(handlers.handleCardAction).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('im.message.receive_v1 — ack-safe duplicate delivery', () => {
+  let handlers: ReturnType<typeof makeHandlers>;
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
+    mockReplyMessage.mockClear();
+    mockRecordObservedBots.mockClear();
+    setupBotState({ allowedUsers: [USER_OPEN_ID] });
+    handlers = makeHandlers();
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
+    mockFindOncallChat.mockReturnValue(undefined);
+    mockGetChatMode.mockResolvedValue('group');
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  });
+
+  it('returns before slow message processing settles so Lark can ACK promptly', async () => {
+    let release!: () => void;
+    const slowWork = new Promise<void>(resolve => { release = resolve; });
+    handlers.handleNewTopic.mockImplementation(async () => slowWork);
+
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA slow work' }),
+      messageId: 'msg-ack-fast',
+      chatId: 'chat-ack-fast',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    const call = capturedHandlers['im.message.receive_v1'](event);
+    await expect(Promise.resolve(call)).resolves.toBeUndefined();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+
+    await new Promise(resolve => setImmediate(resolve));
+    expect(handlers.handleNewTopic).toHaveBeenCalledTimes(1);
+    release();
+    await flushEventWork();
+  });
+
+  it('dedupes timeout redelivery of the same message_id', async () => {
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA handle once' }),
+      messageId: 'msg-dedupe-once',
+      chatId: 'chat-dedupe-once',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    capturedHandlers['im.message.receive_v1'](event);
+    capturedHandlers['im.message.receive_v1']({ ...event, uuid: undefined, event_id: undefined });
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledTimes(1);
+  });
+
+  it('processes two id-less events instead of dropping one (fallback key never collides)', async () => {
+    const makeIdless = (text: string) => {
+      const e = makeUserMessageEvent({
+        senderOpenId: USER_OPEN_ID,
+        content: JSON.stringify({ text }),
+        chatId: 'chat-unkeyable',
+        chatType: 'group',
+        mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+      });
+      // Strip every id so both events take the unkeyable fallback path. A
+      // content-prefix fallback key would collide here and silently drop one.
+      return { ...e, uuid: undefined, event_id: undefined, message: { ...e.message, message_id: undefined } };
+    };
+
+    capturedHandlers['im.message.receive_v1'](makeIdless('@BotA first'));
+    capturedHandlers['im.message.receive_v1'](makeIdless('@BotA second'));
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1905,6 +2108,8 @@ describe('im.message.receive_v1 — botOpenId startup race', () => {
 
   beforeEach(() => {
     capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
     mockReplyMessage.mockClear();
     mockRecordObservedBots.mockClear();
     setupBotState();
@@ -1931,7 +2136,7 @@ describe('im.message.receive_v1 — botOpenId startup race', () => {
     const event = makeBotMessageEvent({ senderOpenId: OTHER_BOT_OPEN_ID, content: postContent, rootId: 'root-race-1' });
 
     await capturedHandlers['im.message.receive_v1'](event);
-    await new Promise(r => setTimeout(r, 0));
+    await flushEventWork();
     // Routing runs through serializeByAnchor (fire-and-forget); let its
     // microtask chain settle before asserting.
     await new Promise(resolve => setTimeout(resolve, 0));
