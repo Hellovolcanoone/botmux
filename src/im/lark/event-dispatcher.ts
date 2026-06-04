@@ -752,28 +752,27 @@ export async function decideRouting(
  * Create and start the Lark WSClient with event dispatching.
  * Returns the WSClient instance for lifecycle management.
  */
-export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: string, handlers: EventHandlers): Lark.WSClient {
-  const eventDispatcher = new Lark.EventDispatcher({}).register({
-    'card.action.trigger': async (data: any) => {
-      try {
-        const result = await handlers.handleCardAction(data, larkAppId);
-        // The handler may return:
-        //   - an already-shaped Lark response ({toast} and/or {card}) → pass through
-        //     so toasts (e.g. "仅 owner 可操作") and explicit card payloads render;
-        //   - a raw card body (e.g. toggle_stream) → wrap as an in-place card patch
-        //     so Lark updates the clicked card without waiting for an API PATCH.
-        if (result && (result.toast || result.card)) return result;
-        if (result) return { card: { type: 'raw', data: result } };
-      } catch (err) {
-        logger.error(`Error handling card action: ${err}`);
-      }
-      return undefined;
-    },
-    'im.message.receive_v1': async (data: any) => {
-      try {
-        const message = data.message;
-        const sender = data.sender;
-        if (!message) return;
+export async function dispatchLarkCardAction(data: any, larkAppId: string, handlers: EventHandlers): Promise<any> {
+  try {
+    const result = await handlers.handleCardAction(data, larkAppId);
+    // The handler may return:
+    //   - an already-shaped Lark response ({toast} and/or {card}) → pass through
+    //     so toasts (e.g. "仅 owner 可操作") and explicit card payloads render;
+    //   - a raw card body (e.g. toggle_stream) → wrap as an in-place card patch
+    //     so Lark updates the clicked card without waiting for an API PATCH.
+    if (result && (result.toast || result.card)) return result;
+    if (result) return { card: { type: 'raw', data: result } };
+  } catch (err) {
+    logger.error(`Error handling card action: ${err}`);
+  }
+  return undefined;
+}
+
+export async function dispatchLarkMessageEvent(data: any, larkAppId: string, handlers: EventHandlers): Promise<void> {
+  try {
+    const message = data.message;
+    const sender = data.sender;
+    if (!message) return;
 
         // Learn other bots' open_ids from @mentions in this event.
         // Lark open_id is per-app: these IDs are correct for our app context.
@@ -987,10 +986,19 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           ? handlers.handleThreadReply(data, ctx)
           : handlers.handleNewTopic(data, ctx);
         promise.catch(err => logger.error(`Error handling message event: ${err}`));
-      } catch (err) {
-        logger.error(`Error handling message event: ${err}`);
-      }
-    },
+  } catch (err) {
+    logger.error(`Error handling message event: ${err}`);
+  }
+}
+
+/**
+ * Create and start the Lark WSClient with event dispatching.
+ * Returns the WSClient instance for lifecycle management.
+ */
+export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: string, handlers: EventHandlers): Lark.WSClient {
+  const eventDispatcher = new Lark.EventDispatcher({}).register({
+    'card.action.trigger': async (data: any) => dispatchLarkCardAction(data, larkAppId, handlers),
+    'im.message.receive_v1': async (data: any) => dispatchLarkMessageEvent(data, larkAppId, handlers),
   });
 
   // Start WSClient

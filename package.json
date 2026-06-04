@@ -24,6 +24,7 @@
     "daemon:logs": "node dist/cli.js logs",
     "daemon:status": "node dist/cli.js status",
     "test": "vitest run",
+    "gateway": "tsx src/lark-gateway.ts",
     "test:codex": "vitest run test/codex-input.e2e.ts",
     "test:gemini": "vitest run test/gemini-input.e2e.ts",
     "test:agy": "vitest run test/agy-input.e2e.ts",

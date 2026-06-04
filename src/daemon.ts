@@ -88,7 +88,7 @@ import {
 } from './im/lark/workflow-progress-card.js';
 import { EventLog as WorkflowEventLog } from './workflows/events/append.js';
 import { replay as replayWorkflow } from './workflows/events/replay.js';
-import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, isKnownPeerBot, checkRequiredScopes, type RoutingContext } from './im/lark/event-dispatcher.js';
+import { dispatchLarkCardAction, dispatchLarkMessageEvent, isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, isKnownPeerBot, checkRequiredScopes, type EventHandlers, type RoutingContext } from './im/lark/event-dispatcher.js';
 import { learnFromMentions, resolveSender, flushIdentityCacheSync } from './im/lark/identity-cache.js';
 import { renderSenderTag } from './core/session-manager.js';
 import { markSessionActivity } from './core/session-activity.js';
@@ -2537,8 +2537,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       logger.debug(`[${cfg.larkAppId}] required-scope check failed: ${err?.message ?? err}`);
     });
 
-    // Start event dispatcher for this bot
-    startLarkEventDispatcher(cfg.larkAppId, cfg.larkAppSecret, {
+    const larkHandlers: EventHandlers = {
       handleCardAction: (data, appId) => handleCardAction(data, cardDeps, appId),
       handleNewTopic: (data, ctx) => handleNewTopic(data, ctx),
       handleThreadReply: (data, ctx) => handleThreadReply(data, ctx),
@@ -2556,7 +2555,28 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         const evicted = deleteActiveSession(activeSessions, key);
         logger.info(`[chat-mode-converted] ${chatId.substring(0, 12)} evicted=${evicted}; worker (if any) keeps running until /close`);
       },
+    };
+
+    ipcRoute('POST', '/api/lark/events', async (req, res) => {
+      const body = await readJsonBody<any>(req);
+      if (body.larkAppId && body.larkAppId !== cfg.larkAppId) return jsonRes(res, 400, { ok: false, error: 'lark_app_mismatch' });
+      await dispatchLarkMessageEvent(body.rawEvent ?? body.event ?? body, cfg.larkAppId, larkHandlers);
+      jsonRes(res, 200, { ok: true });
     });
+
+    ipcRoute('POST', '/api/lark/card-actions', async (req, res) => {
+      const body = await readJsonBody<any>(req);
+      if (body.larkAppId && body.larkAppId !== cfg.larkAppId) return jsonRes(res, 400, { ok: false, error: 'lark_app_mismatch' });
+      const response = await dispatchLarkCardAction(body.rawEvent ?? body.event ?? body, cfg.larkAppId, larkHandlers);
+      jsonRes(res, 200, { ok: true, response });
+    });
+
+    // Start event dispatcher for this bot unless a gateway owns Lark ingress.
+    if (process.env.BOTMUX_DISABLE_LARK_WS === '1') {
+      logger.info(`[${cfg.larkAppId}] Lark WSClient disabled by BOTMUX_DISABLE_LARK_WS=1; expecting gateway injection`);
+    } else {
+      startLarkEventDispatcher(cfg.larkAppId, cfg.larkAppSecret, larkHandlers);
+    }
   }
 
   // Restore active sessions from previous run
