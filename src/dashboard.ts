@@ -10,6 +10,7 @@ import { logger } from './utils/logger.js';
 import { config } from './config.js';
 import {
   generateToken, parseCookie, buildSetCookie, verifyHmac, decideDashboardAuth,
+  loadPersistedToken, persistToken,
 } from './dashboard/auth.js';
 import { DaemonRegistry } from './dashboard/registry.js';
 import { Aggregator, subscribeDaemon } from './dashboard/aggregator.js';
@@ -30,10 +31,9 @@ import type { ConnectorDefinition } from './services/connector-store.js';
 import type { WebhookLifecycleRecord } from './services/webhook-lifecycle-store.js';
 
 const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
+const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
 const BOTS_JSON_PATH = join(homedir(), '.botmux', 'bots.json');
 const REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemons');
-
-let activeToken: string | null = null;
 
 function loadOrCreateSecret(): string {
   if (existsSync(SECRET_PATH)) return readFileSync(SECRET_PATH, 'utf8').trim();
@@ -44,6 +44,11 @@ function loadOrCreateSecret(): string {
   logger.info(`[dashboard] Generated dashboard secret at ${SECRET_PATH}`);
   return s;
 }
+
+// The active dashboard token is persisted to disk so a previously-issued
+// dashboard URL survives `botmux restart`; only `botmux dashboard` (the
+// /__cli/rotate endpoint) rotates it and thereby invalidates the old link.
+let activeToken: string | null = loadPersistedToken(TOKEN_PATH);
 
 const SECRET = loadOrCreateSecret();
 mkdirSync(REGISTRY_DIR, { recursive: true });
@@ -355,6 +360,11 @@ const server = createServer(async (req, res) => {
       const r = verifyHmac(SECRET, { ts, nonce, sig }, remote);
       if (!r.ok) return jsonRes(res, 401, { error: 'unauthorized', reason: r.reason });
       activeToken = generateToken();
+      try {
+        persistToken(TOKEN_PATH, activeToken);
+      } catch (e) {
+        logger.warn(`[dashboard] Failed to persist token to ${TOKEN_PATH}: ${(e as Error).message}`);
+      }
       const fullUrl = `http://${config.dashboard.externalHost}:${config.dashboard.port}/?t=${activeToken}`;
       return jsonRes(res, 200, { url: fullUrl });
     }

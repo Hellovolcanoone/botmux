@@ -1,4 +1,8 @@
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync,
+} from 'node:fs';
+import { dirname } from 'node:path';
 
 const NONCE_TTL_MS = 60_000;
 const TS_WINDOW_S = 30;
@@ -52,6 +56,30 @@ export function verifyHmac(
 /** 32 random bytes base64url-encoded (43 characters, no padding). */
 export function generateToken(): string {
   return randomBytes(32).toString('base64url');
+}
+
+/**
+ * Load the persisted active dashboard token from `tokenPath`, or `null` when
+ * the file is absent / empty / unreadable.
+ *
+ * Persisting the active token lets a previously-issued dashboard URL survive a
+ * `botmux restart`: on startup the dashboard hydrates `activeToken` from this
+ * file instead of starting blank.  Only `botmux dashboard` rotates the token
+ * (via `persistToken` with a fresh value), which is what invalidates the old
+ * link.
+ */
+export function loadPersistedToken(tokenPath: string): string | null {
+  try {
+    if (existsSync(tokenPath)) return readFileSync(tokenPath, 'utf8').trim() || null;
+  } catch { /* unreadable token file → behave as if none persisted */ }
+  return null;
+}
+
+/** Persist the active dashboard token to `tokenPath` with 0600 perms. */
+export function persistToken(tokenPath: string, token: string): void {
+  mkdirSync(dirname(tokenPath), { recursive: true });
+  writeFileSync(tokenPath, token, { mode: 0o600 });
+  chmodSync(tokenPath, 0o600);
 }
 
 /** Extract `botmux_dashboard_token` value from a Cookie header. */

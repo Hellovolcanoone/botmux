@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
+  mkdtempSync, rmSync, writeFileSync, existsSync, statSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
   verifyHmac, generateToken, parseCookie, decideDashboardAuth,
+  loadPersistedToken, persistToken,
 } from '../src/dashboard/auth.js';
 
 const SECRET = 'a'.repeat(43); // base64url 32 bytes
@@ -52,6 +58,66 @@ describe('generateToken', () => {
   it('returns 43-char base64url (32 bytes)', () => {
     const t = generateToken();
     expect(t).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+});
+
+describe('token persistence (survives restart, rotates only on `botmux dashboard`)', () => {
+  let dir: string;
+  let tokenPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'botmux-token-'));
+    tokenPath = join(dir, 'nested', '.dashboard-token');
+  });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it('loadPersistedToken returns null when the file is absent', () => {
+    expect(loadPersistedToken(tokenPath)).toBeNull();
+  });
+
+  it('persistToken then loadPersistedToken round-trips the token (creates dirs)', () => {
+    const tok = generateToken();
+    persistToken(tokenPath, tok);
+    expect(loadPersistedToken(tokenPath)).toBe(tok);
+  });
+
+  it('persisted token survives a simulated restart (same file, new process)', () => {
+    const tok = generateToken();
+    persistToken(tokenPath, tok);
+    // A "restart" re-reads from disk — the previously-issued token is still active.
+    expect(loadPersistedToken(tokenPath)).toBe(tok);
+  });
+
+  it('re-running `botmux dashboard` overwrites the old token (old link invalidated)', () => {
+    const first = generateToken();
+    persistToken(tokenPath, first);
+    const second = generateToken();
+    persistToken(tokenPath, second);
+    expect(second).not.toBe(first);
+    expect(loadPersistedToken(tokenPath)).toBe(second);
+  });
+
+  it('persistToken writes the file with 0600 perms', () => {
+    persistToken(tokenPath, generateToken());
+    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('loadPersistedToken trims surrounding whitespace/newlines', () => {
+    const p = join(dir, 'spaced-token');
+    writeFileSync(p, '  tok-with-space\n');
+    expect(loadPersistedToken(p)).toBe('tok-with-space');
+  });
+
+  it('loadPersistedToken returns null for an empty file', () => {
+    const p = join(dir, 'empty-token');
+    writeFileSync(p, '   \n');
+    expect(loadPersistedToken(p)).toBeNull();
+    expect(existsSync(p)).toBe(true);
+  });
+
+  it('loadPersistedToken returns null when path is a directory (unreadable)', () => {
+    // dir itself exists but is not a file — read throws, helper swallows.
+    expect(loadPersistedToken(dir)).toBeNull();
   });
 });
 
