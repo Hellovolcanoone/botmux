@@ -9,8 +9,14 @@ export function getConfiguredWorkerHttpHost(env: EnvLike = process.env): string 
 }
 
 export function resolveWorkerHttpHost(env: EnvLike = process.env): string {
-  const webHost = env.WEB_HOST?.trim();
-  return (getConfiguredWorkerHttpHost(env) ?? webHost) || '0.0.0.0';
+  // Default to all-interfaces (matches the historical hardcoded worker bind)
+  // and only narrow when an explicit worker-host knob is set. Deliberately does
+  // NOT inherit WEB_HOST: the daemon terminal reverse proxy always dials the
+  // worker at 127.0.0.1, so binding the worker to a specific non-loopback
+  // WEB_HOST IP would make every `/s/{sessionId}` terminal (and the direct
+  // workflow terminal) unreachable. To confine the worker, set an explicit
+  // BOTMUX_WORKER_HTTP_HOST instead.
+  return getConfiguredWorkerHttpHost(env) ?? '0.0.0.0';
 }
 
 export function parseWorkerRequestUrl(req: Pick<IncomingMessage, 'url' | 'headers'>): URL | null {

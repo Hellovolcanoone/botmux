@@ -36,8 +36,11 @@ describe('resolveWorkerHttpHost', () => {
     expect(resolveWorkerHttpHost({})).toBe('0.0.0.0');
   });
 
-  it('follows WEB_HOST when worker HTTP host is not configured', () => {
-    expect(resolveWorkerHttpHost({ WEB_HOST: '192.0.2.10' })).toBe('192.0.2.10');
+  it('ignores WEB_HOST — the worker bind is decoupled from the daemon HTTP host', () => {
+    // The daemon terminal proxy always dials the worker at 127.0.0.1, so the
+    // worker must stay reachable on loopback regardless of WEB_HOST. Binding to
+    // a specific WEB_HOST IP would break `/s/{sessionId}` terminals.
+    expect(resolveWorkerHttpHost({ WEB_HOST: '192.0.2.10' })).toBe('0.0.0.0');
   });
 
   it('allows explicit worker HTTP host override', () => {
@@ -48,7 +51,19 @@ describe('resolveWorkerHttpHost', () => {
     expect(resolveWorkerHttpHost({ BOTMUX_WORKER_HOST: '::1' })).toBe('::1');
   });
 
+  it('explicit worker HTTP host wins over WEB_HOST', () => {
+    expect(resolveWorkerHttpHost({ BOTMUX_WORKER_HTTP_HOST: '127.0.0.1', WEB_HOST: '192.0.2.10' })).toBe('127.0.0.1');
+  });
+
+  it('BOTMUX_WORKER_HTTP_HOST wins over the BOTMUX_WORKER_HOST alias', () => {
+    expect(resolveWorkerHttpHost({ BOTMUX_WORKER_HTTP_HOST: '1.1.1.1', BOTMUX_WORKER_HOST: '2.2.2.2' })).toBe('1.1.1.1');
+  });
+
   it('ignores blank overrides', () => {
     expect(resolveWorkerHttpHost({ BOTMUX_WORKER_HTTP_HOST: '  ' })).toBe('0.0.0.0');
+  });
+
+  it('a blank override does not let WEB_HOST shadow the all-interfaces default', () => {
+    expect(resolveWorkerHttpHost({ BOTMUX_WORKER_HTTP_HOST: '  ', WEB_HOST: '192.0.2.10' })).toBe('0.0.0.0');
   });
 });
