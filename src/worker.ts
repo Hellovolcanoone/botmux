@@ -3044,11 +3044,12 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
   } else if (cfg.cliId === 'cursor') {
     const adoptStartMs = Date.now();
     codexAdoptStartMs = adoptStartMs;
-    // Cursor transcript events do not carry per-event timestamps. Lark
-    // fingerprint attribution is still safe, but unmatched user events cannot
-    // be reliably classified as fresh local terminal input after restore or
-    // late attach, so disable local-turn synthesis for Cursor.
-    codexBridgeQueue.setLocalTurns(false, adoptStartMs);
+    // Cursor JSONL lacks per-event timestamps, but adopt still needs parity
+    // with other structured bridges: direct terminal input should be surfaced
+    // as a local-turn card in Lark. Baseline/offset handling above keeps
+    // pre-adopt history out of the queue; worst-case mirror replay is a
+    // duplicate local-turn message rather than lost local input.
+    codexBridgeQueue.setLocalTurns(true, adoptStartMs);
     // Resolve the transcript: cliSessionId (= Cursor chatId) when discovery
     // captured it, else the adopt pid via its open store.db fd. Cursor lacks
     // per-event timestamps, so cursorBridgeAttach baselines by byte offset
