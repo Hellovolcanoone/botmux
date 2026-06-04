@@ -272,6 +272,52 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
 export const CHAT_CACHE_TTL = 5 * 60_000; // 5 minutes
 const chatStatsCache = new Map<string, { userCount: number; botCount: number; fetchedAt: number }>();
 
+// ─── Event callback ACK safety ──────────────────────────────────────────────
+//
+// Feishu/Lark expects event callbacks to return quickly. The message path below
+// can spend seconds doing OpenAPI lookups and spawning/dispatching a CLI
+// session; if the SDK waits for this async work before ACKing, Open Platform
+// retries the same event and may enqueue the same prompt twice. Claim a stable
+// event key, move heavy work behind setImmediate, and return from the callback
+// immediately so the transport can ACK promptly.
+
+const EVENT_CLAIM_TTL_MS = 60 * 60_000;
+const eventClaims = new Map<string, number>();
+
+function pruneEventClaims(now = Date.now()): void {
+  for (const [key, expiresAt] of eventClaims) {
+    if (expiresAt <= now) eventClaims.delete(key);
+  }
+}
+
+function claimEventOnce(key: string): boolean {
+  const now = Date.now();
+  if (eventClaims.size > 5000) pruneEventClaims(now);
+  const expiresAt = eventClaims.get(key);
+  if (expiresAt && expiresAt > now) return false;
+  eventClaims.set(key, now + EVENT_CLAIM_TTL_MS);
+  return true;
+}
+
+function scheduleAckSafeEvent(key: string, work: () => Promise<void>, label: string): void {
+  if (!claimEventOnce(key)) {
+    logger.info(`[event-dedupe] duplicate ${label} ignored: ${key}`);
+    return;
+  }
+  setImmediate(() => {
+    void work().catch(err => logger.error(`Error handling ${label}: ${err}`));
+  });
+}
+
+function eventIdForKey(data: any): string | undefined {
+  return data?.event_id ?? data?.uuid ?? data?.header?.event_id ?? data?.event?.event_id;
+}
+
+/** Test-only: clear callback dedupe claims between cases. */
+export function __resetEventClaimsForTest(): void {
+  eventClaims.clear();
+}
+
 export async function getGroupStats(larkAppId: string, chatId: string): Promise<{ userCount: number; botCount: number }> {
   const cacheKey = `${larkAppId}:${chatId}`;
   const cached = chatStatsCache.get(cacheKey);
@@ -849,7 +895,11 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
     // 主动开工 — 场景①: the bot was added to a chat. Hand off to the daemon,
     // which gates on the autoStartOnGroupJoin toggle + allowedUser membership.
     // Requires this event to be subscribed for the app in the Feishu console.
-    'im.chat.member.bot.added_v1': async (data: any) => {
+    'im.chat.member.bot.added_v1': (data: any) => {
+      const chatIdForKey: string | undefined = data?.chat_id;
+      const operatorForKey: string | undefined = data?.operator_id?.open_id;
+      const eventKey = `im.chat.member.bot.added_v1:${larkAppId}:${eventIdForKey(data) ?? `${chatIdForKey ?? 'unknown'}:${operatorForKey ?? 'unknown'}`}`;
+      scheduleAckSafeEvent(eventKey, async () => {
       try {
         const chatId: string | undefined = data?.chat_id;
         const operatorOpenId: string | undefined = data?.operator_id?.open_id;
@@ -859,6 +909,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       } catch (err) {
         logger.error(`Error handling bot-added event: ${err}`);
       }
+      }, 'bot-added event');
     },
     'card.action.trigger': async (data: any) => {
       try {
@@ -875,7 +926,10 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       }
       return undefined;
     },
-    'im.message.receive_v1': async (data: any) => {
+    'im.message.receive_v1': (data: any) => {
+      const messageIdForKey = data?.message?.message_id;
+      const eventKey = `im.message.receive_v1:${larkAppId}:${eventIdForKey(data) ?? messageIdForKey ?? JSON.stringify(data).slice(0, 200)}`;
+      scheduleAckSafeEvent(eventKey, async () => {
       try {
         const message = data.message;
         const sender = data.sender;
@@ -1141,6 +1195,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       } catch (err) {
         logger.error(`Error handling message event: ${err}`);
       }
+      }, 'message event');
     },
   });
 
