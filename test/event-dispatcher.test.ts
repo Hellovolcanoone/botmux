@@ -1911,6 +1911,43 @@ describe('card.action.trigger — ack-safe slow handlers', () => {
     release();
     await first;
   });
+
+  it('dedupes a same-event_id redelivery that arrives AFTER the first copy completed', async () => {
+    handlers.handleCardAction.mockResolvedValue({ type: 'done-card' });
+    const event = {
+      event_id: 'evt-card-claim',
+      action: { value: { action: 'restart', root_id: 'root-claim' } },
+      operator: { open_id: USER_OPEN_ID },
+      context: { open_message_id: 'om_claim_card' },
+    };
+
+    const first = await capturedHandlers['card.action.trigger'](event);
+    expect(first).toEqual({ card: { type: 'raw', data: { type: 'done-card' } } });
+
+    // In-flight Set has already cleared in finally(); only the durable claim can
+    // still stop a redelivery from re-firing a non-idempotent action (restart).
+    const redelivery = await capturedHandlers['card.action.trigger']({ ...event });
+    expect(redelivery).toEqual({ toast: { type: 'info', content: '操作已收到，请勿重复点击' } });
+    expect(handlers.handleCardAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT durably dedupe distinct clicks without an event_id (legitimate repeat)', async () => {
+    handlers.handleCardAction.mockResolvedValue({ type: 'toggled' });
+    const event = {
+      action: { value: { action: 'toggle_stream', root_id: 'root-toggle' } },
+      operator: { open_id: USER_OPEN_ID },
+      context: { open_message_id: 'om_toggle_card' },
+    };
+
+    const first = await capturedHandlers['card.action.trigger'](event);
+    const second = await capturedHandlers['card.action.trigger']({ ...event });
+
+    // No stable id to claim + in-flight guard cleared between clicks, so a repeat
+    // (e.g. toggling stream on then off) is NOT suppressed.
+    expect(first).toEqual({ card: { type: 'raw', data: { type: 'toggled' } } });
+    expect(second).toEqual({ card: { type: 'raw', data: { type: 'toggled' } } });
+    expect(handlers.handleCardAction).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('im.message.receive_v1 — ack-safe duplicate delivery', () => {
@@ -1969,6 +2006,27 @@ describe('im.message.receive_v1 — ack-safe duplicate delivery', () => {
     await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledTimes(1);
+  });
+
+  it('processes two id-less events instead of dropping one (fallback key never collides)', async () => {
+    const makeIdless = (text: string) => {
+      const e = makeUserMessageEvent({
+        senderOpenId: USER_OPEN_ID,
+        content: JSON.stringify({ text }),
+        chatId: 'chat-unkeyable',
+        chatType: 'group',
+        mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+      });
+      // Strip every id so both events take the unkeyable fallback path. A
+      // content-prefix fallback key would collide here and silently drop one.
+      return { ...e, uuid: undefined, event_id: undefined, message: { ...e.message, message_id: undefined } };
+    };
+
+    capturedHandlers['im.message.receive_v1'](makeIdless('@BotA first'));
+    capturedHandlers['im.message.receive_v1'](makeIdless('@BotA second'));
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledTimes(2);
   });
 });
 
