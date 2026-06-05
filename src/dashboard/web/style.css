@@ -295,6 +295,7 @@ a { color: inherit; }
 .tm-item {
   display: flex;
   align-items: center;
+  justify-content: flex-start; /* override the base button{justify-content:center} */
   gap: 9px;
   width: 100%;
   padding: 7px 9px;
@@ -392,6 +393,11 @@ main {
   color: var(--muted);
   font-size: 13px;
 }
+
+/* Keep the "View all →" action on one line; let the title block shrink instead
+   (narrow cards like Next Runs were wrapping the button onto two lines). */
+.panel-header > div { min-width: 0; }
+.panel-header .btn-link { white-space: nowrap; flex: 0 0 auto; }
 
 .metric-grid {
   display: grid;
@@ -1962,26 +1968,27 @@ input.row-select,
 /* ── 极光底（dark 专属氛围；紫色只允许出现在这里）─────────────────────────── */
 .aurora { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
 .aurora i { position: absolute; border-radius: 50%; filter: blur(110px); opacity: 0.30; }
-.aurora .a1 { width: 560px; height: 420px; left: -130px; top: -150px; background: #1b4dff; }
+.aurora .a1 { width: 520px; height: 420px; left: -20px; top: -200px; background: #1b4dff; opacity: 0.18; }
 .aurora .a2 { width: 520px; height: 440px; right: -90px; top: -80px; background: #00c2d8; opacity: 0.17; }
 .aurora .a3 { width: 620px; height: 420px; left: 38%; bottom: -280px; background: #6b3df0; opacity: 0.13; }
 :root[data-theme="light"] .aurora { display: none; }
 
 .app-shell { position: relative; z-index: 1; }
 
-/* ── 玻璃浮岛侧边栏 ─────────────────────────────────────────────────────── */
+/* ── 固定侧栏（标准后台布局：齐顶到底、直角、细分割线，背景与主区连续）─────── */
 .sidebar {
-  margin: 14px 0 14px 14px;
-  height: calc(100vh - 28px);
-  top: 14px;
-  border-radius: 18px;
-  border: 1px solid var(--border-soft);
+  margin: 0;
+  top: 0;
+  height: 100vh;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
   background: var(--surface);
 }
 :root[data-theme="dark"] .sidebar {
-  background: rgba(255, 255, 255, 0.045);
+  background: rgba(255, 255, 255, 0.03);
   backdrop-filter: blur(20px);
-  border-color: rgba(255, 255, 255, 0.09);
+  border-right-color: var(--border);
 }
 
 /* 品牌：发光的数字生命球 */
@@ -2015,11 +2022,13 @@ input.row-select,
   color: var(--accent-strong);
 }
 
-/* ── 顶栏：透明玻璃 ─────────────────────────────────────────────────────── */
+/* ── 顶栏：透明玻璃，仅右侧操作区（品牌只在侧栏出现一次，顶栏不重复）──────── */
 .topbar {
   background: color-mix(in srgb, var(--bg) 70%, transparent);
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border);
+  justify-content: flex-end;
 }
+.topbar-title { display: none; }
 
 /* ── 全局 attention strip（任何页面常驻，待处理最高优先级）────────────────── */
 .attention-strip {
@@ -3000,7 +3009,9 @@ dialog :where(input:not([type=checkbox], [type=radio]), select, textarea) {
   .sidebar { margin: 0; height: auto; border-radius: 0; top: 0; }
   .overview-cols { grid-template-columns: 1fr; }
   .attention-strip { margin: 12px 16px 0; }
+}
 
+/* ════════════════════════════════════════════════════════════════════════════
    "2077" CYBERPUNK SKIN
    Distilled from the kaboo webui (frontend/src/styles/cyberpunk.css). The whole
    dashboard is variable-driven, so re-pointing the design tokens under
