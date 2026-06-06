@@ -11,9 +11,9 @@ import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects, describeProjectDir } from '../services/project-scanner.js';
-import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSessionClosedCard, buildSlashListCard, getCliDisplayName } from '../im/lark/card-builder.js';
+import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSessionClosedCard, buildSlashListCard, getCliDisplayName, buildConfigCard } from '../im/lark/card-builder.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
-import { deleteMessage, sendMessage, listChatBotMembers, resolveUserUnionId, getChatModeStrict } from '../im/lark/client.js';
+import { deleteMessage, sendMessage, sendUserMessage, listChatBotMembers, resolveUserUnionId, getChatModeStrict } from '../im/lark/client.js';
 import { chatAppLink, normalizeBrand } from '../im/lark/lark-hosts.js';
 import { claimPairing } from '../services/pairing-store.js';
 import { logger } from '../utils/logger.js';
@@ -26,6 +26,12 @@ import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type Zellij
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
 import { generateAuthUrl, getTokenStatus } from '../utils/user-token.js';
 import { bindOncall, unbindOncall, getOncallStatus } from '../services/oncall-store.js';
+import {
+  CONFIG_FIELDS, findConfigField, settableFieldKeys, parseBooleanValue,
+  applyConfigField, setBotAllowedUsers, getConfigSnapshot, getConfigCardData, type ConfigEffect,
+} from '../services/bot-config-store.js';
+import { resolveCliId, findInvalidAllowedUserEntries } from '../setup/bot-config-editor.js';
+import { listRelayTargets, resolveRelayTarget, buildRelayContent } from '../services/config-relay.js';
 import { publishAttentionPatch, announcePendingRepoSession } from './session-activity.js';
 import { setCardMode } from '../services/card-mode-store.js';
 import { invalidWorkingDirs } from '../utils/working-dir.js';
@@ -38,7 +44,7 @@ import { t, localeForBot, type Locale } from '../i18n/index.js';
 
 // ─── Exported constants ──────────────────────────────────────────────────────
 
-export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/list-slash-command', '/slash']);
+export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/botconfig', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/list-slash-command', '/slash']);
 
 /**
  * Daemon commands that act on the chat itself rather than opening a
@@ -48,7 +54,7 @@ export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help'
  * card buttons routable, but for these that record is a phantom conversation
  * that pollutes the dashboard's session list. Handle them without a session.
  */
-export const SESSIONLESS_DAEMON_COMMANDS = new Set(['/group', '/g', '/list-slash-command', '/slash']);
+export const SESSIONLESS_DAEMON_COMMANDS = new Set(['/group', '/g', '/list-slash-command', '/slash', '/botconfig']);
 
 /**
  * Slash commands that are forwarded verbatim to the underlying CLI (e.g.
@@ -512,6 +518,265 @@ async function handleScheduleCommand(
   await sessionReply(rootId, t('schedule.parse_failed', undefined, loc));
 }
 
+// ─── Config command ──────────────────────────────────────────────────────────
+
+function configEffectNote(effect: ConfigEffect, loc: Locale): string {
+  return effect === 'immediate'
+    ? t('cmd.config.effect_immediate', undefined, loc)
+    : t('cmd.config.effect_next_session', undefined, loc);
+}
+
+/** `/botconfig zh|en`（及常见别名）→ 卡片显示语言；非语言参数 → undefined（按子命令走）。 */
+function cardLocaleArg(sub: string | undefined): Locale | undefined {
+  if (!sub) return undefined;
+  if (sub === 'zh' || sub === 'cn' || sub === '中文' || sub === '中') return 'zh';
+  if (sub === 'en' || sub === 'english' || sub === '英文' || sub === '英') return 'en';
+  return undefined;
+}
+
+function buildConfigHelp(loc: Locale): string {
+  const fields = CONFIG_FIELDS.map(f => `• ${f.key} — ${f.hint}`).join('\n');
+  return t('cmd.config.help', { fields }, loc);
+}
+
+function buildConfigSnapshot(larkAppId: string, loc: Locale): string {
+  const snap = getConfigSnapshot(larkAppId);
+  if (!snap.ok) return t('cmd.config.no_bot', undefined, loc);
+  const lines = snap.rows.map(r => `• ${r.key} = ${r.value}`).join('\n');
+  return t('cmd.config.snapshot', {
+    cli: snap.info.cliId,
+    brand: snap.info.brand,
+    admins: snap.info.resolvedAdmins,
+    dirs: snap.info.workingDirs.join(', ') || '∅',
+    fields: lines,
+  }, loc);
+}
+
+/**
+ * `/botconfig set allowedUsers ...` —— 动信任根的敏感路径，与普通字段分开：
+ * 末尾的 `确认`/`confirm` 才真正落盘；缺确认 → 回显预览要求二次确认。
+ * 非法条目（裸邮箱前缀等）先挡；防自锁 / 解析空由 {@link setBotAllowedUsers} 兜底。
+ */
+async function applyAllowedUsersSet(
+  tokens: string[],
+  rootId: string,
+  larkAppId: string,
+  senderId: string | undefined,
+  deps: CommandHandlerDeps,
+  loc: Locale,
+): Promise<void> {
+  const reply = (c: string) => deps.sessionReply(rootId, c, undefined, larkAppId);
+  let list = [...tokens];
+  let confirmed = false;
+  if (list.length && /^(confirm|确认|yes|--yes)$/i.test(list[list.length - 1])) {
+    confirmed = true;
+    list = list.slice(0, -1);
+  }
+  const entries = list.join(' ').split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+  if (entries.length === 0) { await reply(t('cmd.config.allow_usage', undefined, loc)); return; }
+  const invalid = findInvalidAllowedUserEntries(entries);
+  if (invalid.length) { await reply(t('cmd.config.allow_invalid', { items: invalid.join(', ') }, loc)); return; }
+  if (!confirmed) { await reply(t('cmd.config.allow_confirm', { list: entries.join(', ') }, loc)); return; }
+
+  const r = await setBotAllowedUsers(larkAppId, entries, senderId);
+  if (!r.ok) {
+    if (r.reason === 'self_lockout') { await reply(t('cmd.config.allow_lockout', undefined, loc)); return; }
+    if (r.reason === 'empty_resolved') { await reply(t('cmd.config.allow_empty', undefined, loc)); return; }
+    await reply(t('cmd.config.write_failed', { reason: r.reason }, loc));
+    return;
+  }
+  await reply(t('cmd.config.allow_ok', { count: r.resolved.length, total: r.raw.length }, loc));
+}
+
+/**
+ * `/botconfig` —— owner/allowedUsers 远程改本 bot 运营字段。sessionless：只认 larkAppId，
+ * 不需活跃会话。严格 admin 闸（拒绝开放模式 bot），写盘 + 内存热更新，无需重启。
+ */
+async function handleConfigCommand(
+  message: LarkMessage,
+  rootId: string,
+  larkAppId: string,
+  deps: CommandHandlerDeps,
+): Promise<void> {
+  const loc = localeForBot(larkAppId);
+  const reply = (c: string) => deps.sessionReply(rootId, c, undefined, larkAppId);
+  const senderId = message.senderId;
+  const chatId = message.chatId;
+  // 发送者是不是 bot（控制 bot 中转过来的消息）。allowedUsers 这类动信任根的操作
+  // 只允许真人，杜绝「控制 bot 中转 /botconfig set allowedUsers」式的提权。
+  const fromBot = message.senderType === 'app' || message.senderType === 'bot';
+
+  // Admin 闸：严格限定 allowedUsers，**拒绝开放模式**（无 allowlist 的 bot 没有可
+  // 授权的 owner，不能凭聊天改配置）。上游 canOperate 对开放模式 / 兄弟 bot 也放行，
+  // 改配置比一般 daemon 命令敏感，这里收紧到「本 bot 的 allowedUsers」。被授权的控制
+  // bot 走的也是这条——它的 open_id 在目标的 allowedUsers 里，故同样过闸。
+  let bot;
+  try { bot = getBot(larkAppId); } catch { await reply(t('cmd.config.no_bot', undefined, loc)); return; }
+  const admins = bot.resolvedAllowedUsers;
+  if (admins.length === 0) { await reply(t('cmd.config.no_owner', undefined, loc)); return; }
+  if (!senderId || !admins.includes(senderId)) { await reply(t('cmd.config.not_admin', undefined, loc)); return; }
+
+  const trimmed = message.content.replace(/^\/botconfig\s*/i, '').trim();
+  const parts = trimmed ? trimmed.split(/\s+/) : [];
+  const sub = parts[0]?.toLowerCase();
+
+  // 裸 /botconfig → 交互配置卡片；`/botconfig zh|en` → 指定卡片显示语言（覆盖 bot 默认）。
+  const cardLoc = cardLocaleArg(sub);
+  if (!sub || cardLoc) {
+    const renderLoc: Locale = cardLoc ?? loc;
+    let modelChoices: readonly string[] = [];
+    try { modelChoices = createCliAdapterSync(bot.config.cliId, bot.config.cliPathOverride).modelChoices ?? []; } catch { /* 无候选 → 不渲染 model 下拉 */ }
+    const data = getConfigCardData(larkAppId, modelChoices);
+    if (!data) { await reply(buildConfigHelp(renderLoc)); return; }
+    const cardJson = buildConfigCard(data, renderLoc);
+    // 始终把卡片**私信**给 owner，群里不留任何回复：
+    //   • 私聊（单发给 bot）→ 卡片就落在当前私聊 = 直接返回配置；
+    //   • 群 / 话题群 → 卡片落在 owner 私聊，群内不产生「话题回复」、也只他可见。
+    // 不再依赖 getChatModeStrict（它会偶发 500 → 误判），私信失败才回退到会话内。
+    try {
+      await sendUserMessage(larkAppId, senderId, cardJson, 'interactive');
+    } catch {
+      await deps.sessionReply(rootId, cardJson, 'interactive', larkAppId);
+    }
+    return;
+  }
+  if (sub === 'help' || sub === '帮助') { await reply(buildConfigHelp(loc)); return; }
+  if (sub === 'get' || sub === 'show' || sub === 'list' || sub === '查看') { await reply(buildConfigSnapshot(larkAppId, loc)); return; }
+
+  // ── 跨机器中转（控制 bot → 共享群 → 目标 bot 的 /botconfig）────────────────────
+  if (sub === 'targets' || sub === 'bots') {
+    if (!chatId) { await reply(t('cmd.config.relay_need_group', undefined, loc)); return; }
+    const targets = await listRelayTargets(larkAppId, chatId);
+    if (targets.length === 0) { await reply(t('cmd.config.targets_none', undefined, loc)); return; }
+    const lines = targets
+      .map(tg => `• ${tg.name}${tg.mentionable ? '' : ' ' + t('cmd.config.target_unreachable', undefined, loc)}  \`${tg.openId}\``)
+      .join('\n');
+    await reply(t('cmd.config.targets_list', { list: lines }, loc));
+    return;
+  }
+
+  if (sub === 'relay') {
+    if (!chatId) { await reply(t('cmd.config.relay_need_group', undefined, loc)); return; }
+    const targetQuery = parts[1];
+    const subcommand = parts.slice(2).join(' ').trim();
+    if (!targetQuery || !subcommand) { await reply(t('cmd.config.relay_usage', undefined, loc)); return; }
+    const res = await resolveRelayTarget(larkAppId, chatId, targetQuery);
+    if (!res.ok) {
+      if (res.reason === 'not_mentionable') { await reply(t('cmd.config.relay_unreachable', { name: res.target.name }, loc)); return; }
+      await reply(t('cmd.config.relay_not_found', { query: targetQuery, candidates: res.candidates.join(', ') || '—' }, loc));
+      return;
+    }
+    const content = buildRelayContent(res.target.openId, subcommand);
+    try {
+      await sendMessage(larkAppId, chatId, content, 'text');
+    } catch (e: any) {
+      await reply(t('cmd.config.relay_send_failed', { msg: e?.message ?? String(e) }, loc));
+      return;
+    }
+    await reply(t('cmd.config.relay_sent', { name: res.target.name, cmd: `/botconfig ${subcommand}` }, loc));
+    return;
+  }
+
+  if (sub === 'trust' || sub === 'untrust') {
+    if (fromBot) { await reply(t('cmd.config.humans_only', undefined, loc)); return; }
+    const arg = parts[1];
+    if (sub === 'trust' && (!arg || arg.toLowerCase() === 'list')) {
+      const cur = getBot(larkAppId).config.allowedUsers ?? [];
+      await reply(t('cmd.config.trust_list', { list: cur.join(', ') || '∅' }, loc));
+      return;
+    }
+    if (!arg) { await reply(t('cmd.config.trust_usage', undefined, loc)); return; }
+    if (!chatId) { await reply(t('cmd.config.relay_need_group', undefined, loc)); return; }
+    const res = await resolveRelayTarget(larkAppId, chatId, arg);
+    if (!res.ok) {
+      if (res.reason === 'not_mentionable') { await reply(t('cmd.config.relay_unreachable', { name: res.target.name }, loc)); return; }
+      await reply(t('cmd.config.relay_not_found', { query: arg, candidates: res.candidates.join(', ') || '—' }, loc));
+      return;
+    }
+    const targetOpenId = res.target.openId;
+    const curRaw = [...(getBot(larkAppId).config.allowedUsers ?? [])];
+    if (sub === 'trust') {
+      if (curRaw.includes(targetOpenId)) { await reply(t('cmd.config.trust_already', { name: res.target.name }, loc)); return; }
+      const r = await setBotAllowedUsers(larkAppId, [...curRaw, targetOpenId], senderId);
+      if (!r.ok) { await reply(t('cmd.config.write_failed', { reason: r.reason }, loc)); return; }
+      await reply(t('cmd.config.trust_ok', { name: res.target.name, id: targetOpenId }, loc));
+    } else {
+      if (!curRaw.includes(targetOpenId)) { await reply(t('cmd.config.untrust_absent', { name: res.target.name }, loc)); return; }
+      const r = await setBotAllowedUsers(larkAppId, curRaw.filter(e => e !== targetOpenId), senderId);
+      if (!r.ok) { await reply(t('cmd.config.write_failed', { reason: r.reason }, loc)); return; }
+      await reply(t('cmd.config.untrust_ok', { name: res.target.name }, loc));
+    }
+    return;
+  }
+
+  if (sub === 'set' || sub === 'unset') {
+    const fieldKey = parts[1];
+    if (!fieldKey) { await reply(t('cmd.config.set_usage', undefined, loc)); return; }
+    const spec = findConfigField(fieldKey);
+    if (!spec) { await reply(t('cmd.config.unknown_field', { field: fieldKey, fields: settableFieldKeys().join(', ') }, loc)); return; }
+
+    if (sub === 'unset') {
+      if (!spec.clearable) { await reply(t('cmd.config.not_clearable', { field: spec.key }, loc)); return; }
+      const r = await applyConfigField(larkAppId, spec, null);
+      if (!r.ok) { await reply(t('cmd.config.write_failed', { reason: r.reason }, loc)); return; }
+      await reply(t('cmd.config.unset_ok', { field: spec.key, old: r.oldText, effect: configEffectNote(r.effect, loc) }, loc));
+      return;
+    }
+
+    // set
+    if (spec.kind === 'allowedUsers') {
+      if (fromBot) { await reply(t('cmd.config.humans_only', undefined, loc)); return; }
+      await applyAllowedUsersSet(parts.slice(2), rootId, larkAppId, senderId, deps, loc);
+      return;
+    }
+
+    const rawValue = parts.slice(2).join(' ').trim();
+    if (!rawValue) { await reply(t('cmd.config.value_required', { field: spec.key }, loc)); return; }
+
+    let value: string | boolean;
+    switch (spec.kind) {
+      case 'boolean': {
+        const b = parseBooleanValue(rawValue);
+        if (b === undefined) { await reply(t('cmd.config.invalid_bool', { field: spec.key, value: rawValue }, loc)); return; }
+        value = b;
+        break;
+      }
+      case 'enum': {
+        const v = rawValue.toLowerCase();
+        if (!spec.enumValues?.includes(v)) { await reply(t('cmd.config.invalid_enum', { field: spec.key, values: (spec.enumValues ?? []).join('|') }, loc)); return; }
+        value = v;
+        break;
+      }
+      case 'cli': {
+        try {
+          const id = resolveCliId(rawValue);
+          if (!id) { await reply(t('cmd.config.value_required', { field: spec.key }, loc)); return; }
+          value = id;
+        } catch (e: any) {
+          await reply(t('cmd.config.invalid_cli', { msg: e?.message ?? String(e) }, loc));
+          return;
+        }
+        break;
+      }
+      case 'dir': {
+        const v = validateWorkingDir(rawValue, loc);
+        if (!v.ok) { await reply(v.error); return; }
+        value = rawValue; // 存原始（保留 ~），与 workingDir 落盘一致；使用处再 expandHome
+        break;
+      }
+      default: // 'string'
+        value = rawValue;
+    }
+
+    const r = await applyConfigField(larkAppId, spec, value);
+    if (!r.ok) { await reply(t('cmd.config.write_failed', { reason: r.reason }, loc)); return; }
+    await reply(t('cmd.config.set_ok', { field: spec.key, old: r.oldText, new: r.newText, effect: configEffectNote(r.effect, loc) }, loc));
+    return;
+  }
+
+  await reply(t('cmd.config.unknown_sub', { sub }, loc));
+}
+
 // ─── Main command handler ────────────────────────────────────────────────────
 
 /**
@@ -937,6 +1202,18 @@ export async function handleCommand(
         const roleArgs = message.content.replace(/^\/role\s*/, '');
         await handleRoleCommand(roleArgs, rootId, chatId, larkAppId, message.senderId, deps);
         logger.info(`[${logTag}] Role command handled`);
+        break;
+      }
+
+      case '/botconfig': {
+        const appId = larkAppId ?? ds?.larkAppId;
+        if (!appId) {
+          await sessionReply(rootId, t('cmd.config.no_bot', undefined, loc));
+          break;
+        }
+        // chatId 既供 sessionless 中转（targets/relay/trust）用，也作 session 路径兜底。
+        await handleConfigCommand({ ...message, chatId: message.chatId ?? ds?.chatId }, rootId, appId, deps);
+        logger.info(`[${logTag}] Config command handled`);
         break;
       }
 
@@ -1847,6 +2124,10 @@ export async function handleCommand(
           t('help.heading_grant', undefined, loc),
           t('help.grant', undefined, loc),
           t('help.revoke', undefined, loc),
+          '',
+          t('help.heading_config', undefined, loc),
+          t('help.config_get', undefined, loc),
+          t('help.config_set', undefined, loc),
           '',
           t('help.heading_group', undefined, loc),
           t('help.group', undefined, loc),

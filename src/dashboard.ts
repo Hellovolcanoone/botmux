@@ -887,6 +887,35 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // GET /api/bots/:appId/fleet/targets — relayable target bots reachable by
+    // this (controller) bot across its group chats. Token-gated (admin info).
+    let mFleetTargets: RegExpMatchArray | null;
+    if (req.method === 'GET' && (mFleetTargets = url.pathname.match(/^\/api\/bots\/([^/]+)\/fleet\/targets$/))) {
+      const appId = decodeURIComponent(mFleetTargets[1]);
+      const upstream = await proxyToDaemon(appId, `/api/fleet/targets`, { method: 'GET' });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // POST /api/bots/:appId/fleet/relay — have this (controller) bot relay a
+    // /botconfig subcommand to a target bot. Body `{ chatId, targetOpenId, command }`.
+    let mFleetRelay: RegExpMatchArray | null;
+    if (req.method === 'POST' && (mFleetRelay = url.pathname.match(/^\/api\/bots\/([^/]+)\/fleet\/relay$/))) {
+      const appId = decodeURIComponent(mFleetRelay[1]);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+      const upstream = await proxyToDaemon(appId, `/api/fleet/relay`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: raw,
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
     // PUT /api/bots/:appId/card-prefs — proxy to that bot's daemon. Body carries
     // either/both `{ disableStreamingCard?, writableTerminalLinkInCard? }` booleans.
     let mBotCardPrefs: RegExpMatchArray | null;

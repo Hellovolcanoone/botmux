@@ -9,6 +9,7 @@ import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as cardPrefsStore from '../services/card-prefs-store.js';
 import * as grantPrefsStore from '../services/grant-prefs-store.js';
+import { listRelayTargets, buildRelayContent, isRelayForbidden } from '../services/config-relay.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession } from './worker-pool.js';
@@ -690,6 +691,50 @@ ipcRoute('PUT', '/api/bot-brand-label', async (req, res) => {
   const r = await brandStore.updateBotBrandLabel(cachedLarkAppId, next);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, brandLabel: r.brandLabel });
+});
+
+// ─── Fleet：本 bot 作为「控制 bot」跨机器中转 /botconfig ───────────────────────────
+// 列出本 bot 在各群里可下发的目标 bot（仅 group 模式、且可 @mention 的）。供
+// dashboard 把「这台机器上的某 bot」当控制器,向远程机器的 bot 下发配置。
+ipcRoute('GET', '/api/fleet/targets', async (_req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  try {
+    const chats = await groupsStore.listChats(cachedLarkAppId);
+    // 控制 bot 可能在很多群里;只看 group 模式,且设个上限避免 N×M 次 isInChat 探测拖垮。
+    const groupChats = chats.filter(c => c.chatMode === 'group').slice(0, 50);
+    const out: Array<{ chatId: string; chatName: string; targets: Array<{ openId: string; name: string }> }> = [];
+    for (const c of groupChats) {
+      const targets = (await listRelayTargets(cachedLarkAppId, c.chatId)).filter(t => t.mentionable);
+      if (targets.length > 0) {
+        out.push({ chatId: c.chatId, chatName: c.name || c.chatId, targets: targets.map(t => ({ openId: t.openId, name: t.name })) });
+      }
+    }
+    jsonRes(res, 200, { controller: { larkAppId: cachedLarkAppId, botName: getBotName() }, chats: out });
+  } catch (e) {
+    jsonRes(res, 502, { error: String(e) });
+  }
+});
+
+// 下发一条 /botconfig 子命令给目标 bot（@mention + 发到 chatId）。command = 不含
+// `/botconfig` 前缀的子命令（如 "set model opus" / "get"）。信任根类（allowedUsers /
+// trust）禁止经此中转,与 command-handler 的 humans-only 守卫同口径。
+ipcRoute('POST', '/api/fleet/relay', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  let body: { chatId?: unknown; targetOpenId?: unknown; command?: unknown };
+  try { body = await readJsonBody(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const chatId = typeof body.chatId === 'string' ? body.chatId : '';
+  const targetOpenId = typeof body.targetOpenId === 'string' ? body.targetOpenId : '';
+  const command = typeof body.command === 'string' ? body.command.trim() : '';
+  if (!chatId || !targetOpenId || !command) return jsonRes(res, 400, { ok: false, error: 'missing_fields' });
+  if (isRelayForbidden(command)) return jsonRes(res, 403, { ok: false, error: 'forbidden_field' });
+  const content = buildRelayContent(targetOpenId, command);
+  try {
+    await sendMessage(cachedLarkAppId, chatId, content, 'text');
+  } catch (e: any) {
+    return jsonRes(res, 502, { ok: false, error: e?.message ?? String(e) });
+  }
+  jsonRes(res, 200, { ok: true, relayed: content });
 });
 
 ipcRoute('PUT', '/api/bot-default-oncall', async (req, res) => {

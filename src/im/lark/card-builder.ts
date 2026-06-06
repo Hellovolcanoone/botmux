@@ -7,6 +7,164 @@ import type { DisplayMode, StreamStatus } from '../../types.js';
 import type { CliUsageLimitState } from '../../utils/cli-usage-limit.js';
 import { t, type Locale } from '../../i18n/index.js';
 import { readGlobalConfig } from '../../global-config.js';
+import type { ConfigCardData } from '../../services/bot-config-store.js';
+
+/** select_static 里代表「清回默认 / 未设置」的哨兵值（model / lang 下拉用）。 */
+export const CONFIG_UNSET = '__unset__';
+
+/** 布尔字段按配置页的逻辑分组（与 dashboard 的 Bot Profiles 区块对应）。 */
+const CONFIG_CARD_BOOLEAN_GROUPS: ReadonlyArray<{ sec: string; keys: readonly string[] }> = [
+  { sec: 'card.config.sec.card', keys: ['disableStreamingCard', 'writableTerminalLinkInCard', 'privateCard'] },
+  { sec: 'card.config.sec.autostart', keys: ['autoStartOnGroupJoin', 'autoStartOnNewTopic'] },
+  { sec: 'card.config.sec.security', keys: ['disableCliBypass', 'restrictGrantCommands'] },
+];
+
+function configSelect(placeholder: string, initial: string, options: Array<{ text: string; value: string }>, value: Record<string, string>): any {
+  return {
+    tag: 'select_static',
+    placeholder: { tag: 'plain_text', content: placeholder },
+    initial_option: initial,
+    options: options.map(o => ({ text: { tag: 'plain_text', content: o.text }, value: o.value })),
+    value,
+  };
+}
+
+function configSubheader(secKey: string, locale?: Locale): any {
+  return { tag: 'div', text: { tag: 'lark_md', content: `**${t(secKey, undefined, locale)}**` } };
+}
+
+/**
+ * 交互配置卡片：`/botconfig`（裸）返回它。按配置页逻辑分区（运行 / 卡片行为 / 主动开工 /
+ * 安全·授权），cli·model·lang 用下拉，布尔字段用切换按钮（i18n 文案 + ✅/⬜️），消息额度
+ * 用下拉。点一下即改并就地刷新（见 card-handler 的 config_set / config_toggle / config_quota）。
+ * 只吃纯数据 {@link ConfigCardData}，不反向依赖 store，避免循环依赖。
+ */
+export function buildConfigCard(data: ConfigCardData, locale?: Locale): string {
+  const def = t('card.config.default', undefined, locale);
+  // 把渲染语言带进每个 action value，使点按钮后的就地重渲染保持同一语言
+  // （`/botconfig en` 的覆盖不会因为一次 toggle 又退回 bot 默认语言）。
+  const locVal: Record<string, string> = locale ? { loc: locale } : {};
+  const elements: any[] = [];
+
+  elements.push({
+    tag: 'div',
+    text: {
+      tag: 'lark_md',
+      content: t('card.config.summary', {
+        cli: data.cliId, model: data.model ?? def, lang: data.lang ?? def, admins: data.admins,
+      }, locale),
+    },
+  });
+
+  // ── 🧠 运行: cli / model / lang ─────────────────────────────────────────
+  elements.push({ tag: 'hr' });
+  elements.push(configSubheader('card.config.sec.runtime', locale));
+  const runSelects: any[] = [
+    configSelect('CLI', data.cliId, data.cliOptions.map(o => ({ text: o.label, value: o.id })), { action: 'config_set', field: 'cli', ...locVal }),
+  ];
+  if (data.modelChoices.length > 0) {
+    runSelects.push(configSelect('model', data.model ?? CONFIG_UNSET,
+      [{ text: def, value: CONFIG_UNSET }, ...data.modelChoices.map(m => ({ text: m, value: m }))],
+      { action: 'config_set', field: 'model', ...locVal }));
+  }
+  runSelects.push(configSelect('lang', data.lang ?? CONFIG_UNSET,
+    [{ text: def, value: CONFIG_UNSET }, { text: '中文 (zh)', value: 'zh' }, { text: 'English (en)', value: 'en' }],
+    { action: 'config_set', field: 'lang', ...locVal }));
+  elements.push({ tag: 'action', actions: runSelects });
+
+  // ── 布尔开关分组 ─────────────────────────────────────────────────────────
+  const onMap = new Map(data.booleans.map(b => [b.key, b.on]));
+  for (const g of CONFIG_CARD_BOOLEAN_GROUPS) {
+    const btns = g.keys.filter(k => onMap.has(k)).map(k => {
+      const on = onMap.get(k) === true;
+      return {
+        tag: 'button',
+        text: { tag: 'plain_text', content: `${on ? '🟢' : '⚪'} ${t('config.label.' + k, undefined, locale)}` },
+        type: on ? 'primary' : 'default',
+        value: { action: 'config_toggle', field: k, ...locVal },
+      };
+    });
+    elements.push({ tag: 'hr' });
+    elements.push(configSubheader(g.sec, locale));
+    elements.push({ tag: 'action', actions: btns });
+    // 安全·授权区附带「消息额度」下拉。
+    if (g.sec === 'card.config.sec.security') {
+      const qOpts = [
+        { text: t('card.config.quota_off', undefined, locale), value: 'off' },
+        ...['5', '10', '20', '50', '100'].map(n => ({ text: n, value: n })),
+      ];
+      elements.push({
+        tag: 'action',
+        actions: [configSelect(t('card.config.quota_label', undefined, locale), data.quota == null ? 'off' : String(data.quota), qOpts, { action: 'config_quota', ...locVal })],
+      });
+    }
+  }
+
+  // 自由文本字段（brandLabel / 入群首轮 prompt / 默认角色）不放主卡（v1 主卡只下拉+开关），
+  // 用一个按钮唤起带输入框的「文本设置」子卡（见 buildConfigTextCard / config_text_open）。
+  elements.push({ tag: 'hr' });
+  elements.push({
+    tag: 'action',
+    actions: [{
+      tag: 'button',
+      text: { tag: 'plain_text', content: t('card.config.text_btn', undefined, locale) },
+      type: 'default',
+      value: { action: 'config_text_open', ...locVal },
+    }],
+  });
+  elements.push({ tag: 'note', elements: [{ tag: 'lark_md', content: t('card.config.note', undefined, locale) }] });
+
+  return JSON.stringify({
+    config: { wide_screen_mode: true },
+    header: { template: 'blue', title: { tag: 'plain_text', content: t('card.config.title', { name: data.botName }, locale) } },
+    elements,
+  });
+}
+
+/**
+ * 「文本设置」子卡：从主配置卡点「✏️ 文本设置」唤起。承载自由文本字段——卡片签名
+ * （brandLabel）、入群首轮 prompt（autoStartOnGroupJoinPrompt）、默认角色（team role）。
+ * v1 `form`+`input` 实现（仓库已验证），输入框预填当前值，一个「保存」提交全部
+ * （form_submit → config_text_save），留空=清除该项；「⬅ 返回」回主卡（config_back）。
+ */
+export function buildConfigTextCard(data: ConfigCardData, locale?: Locale): string {
+  const locVal: Record<string, string> = locale ? { loc: locale } : {};
+  // 每个字段 = 标签 div（在 form 外）+ 一个仅含 [input, 保存按钮] 的 form。
+  // form 内只放 input+button（与仓库已验证的 TUI 表单同构），label 放 form 外，
+  // 否则 form 里混入 div 会整卡渲染失败（空卡）。每字段独立保存。
+  const section = (lblKey: string, name: string, value: string | null): any[] => ([
+    { tag: 'div', text: { tag: 'lark_md', content: `**${t(lblKey, undefined, locale)}**` } },
+    {
+      tag: 'form',
+      name: `config_form_${name}`,
+      elements: [
+        { tag: 'input', name, default_value: value ?? '', placeholder: { tag: 'plain_text', content: t(lblKey, undefined, locale) } },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('card.config.save', undefined, locale) },
+          type: 'primary',
+          name: `config_save_${name}`,
+          action_type: 'form_submit',
+          value: { action: 'config_text_save', field: name, ...locVal },
+        },
+      ],
+    },
+  ]);
+  const elements: any[] = [
+    { tag: 'div', text: { tag: 'lark_md', content: t('card.config.text_note', undefined, locale) } },
+    { tag: 'hr' },
+    ...section('card.config.lbl_brand', 'brandLabel', data.brandLabel),
+    { tag: 'hr' },
+    ...section('card.config.lbl_prompt', 'autoStartPrompt', data.autoStartPrompt),
+    { tag: 'hr' },
+    ...section('card.config.lbl_role', 'teamRole', data.teamRole),
+  ];
+  return JSON.stringify({
+    config: { wide_screen_mode: true },
+    header: { template: 'blue', title: { tag: 'plain_text', content: t('card.config.text_title', { name: data.botName }, locale) } },
+    elements,
+  });
+}
 
 const cliDisplayNames: Record<CliId, string> = {
   'claude-code': 'Claude',

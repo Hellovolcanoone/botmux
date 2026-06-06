@@ -1,0 +1,300 @@
+/**
+ * `/config` 远程编辑 bot 运营字段。与 oncall-store / grant-prefs-store / brand-store
+ * 同款：跨进程文件锁 + bots.json 原子写（rmwBotEntry），外加内存 registry 同步——
+ * 因此 **无需重启 daemon**：读取实时配置的字段立即生效，spawn 时才读取的字段
+ * （model / cliId / disableCliBypass / defaultWorkingDir）下一个新会话生效。
+ *
+ * 刻意只覆盖「运营字段」。secret（larkAppSecret / voice 凭证）绝不经此路径修改——
+ * 聊天通道会被 IM 侧记录，引导新 bot / 换密钥仍走本机 `botmux setup`。授权额度
+ * （grants / quota）由既有 `/grant` 负责，不在此重复。
+ */
+import type { BotConfig } from '../bot-registry.js';
+import { getBot } from '../bot-registry.js';
+import { rmwBotEntry } from './config-store.js';
+import { resolveAllowedUsersWithMap } from '../im/lark/client.js';
+import { CLI_OPTIONS, resolveCliId } from '../setup/bot-config-editor.js';
+import { expandHomePath } from '../utils/working-dir.js';
+import { resolveTeamRoleFile } from '../core/role-resolver.js';
+import { statSync } from 'node:fs';
+import { logger } from '../utils/logger.js';
+
+/**
+ * 生效时机：
+ *   • immediate     — 运行时读取实时 `bot.config`，热更新后下一条消息/事件即生效。
+ *   • next-session  — spawn CLI 时才读取，当前运行中的会话需 `/restart` 重启才换新值；
+ *                     新会话直接用新值。
+ */
+export type ConfigEffect = 'immediate' | 'next-session';
+
+export type ConfigFieldKind = 'string' | 'boolean' | 'enum' | 'cli' | 'dir' | 'allowedUsers';
+
+export interface ConfigFieldSpec {
+  /** 用户面命令里用的字段名（大小写不敏感匹配，见 {@link findConfigField}）。 */
+  key: string;
+  /** bots.json / 内存 BotConfig 上的实际字段。 */
+  configKey: keyof BotConfig;
+  kind: ConfigFieldKind;
+  effect: ConfigEffect;
+  /** 是否支持 `/config unset <field>`（清回默认）。boolean 字段用 `set off` 即可，无需 unset。 */
+  clearable: boolean;
+  /** kind==='enum' 时的合法取值（已小写）。 */
+  enumValues?: readonly string[];
+  /** 一句话说明，进 `/config help` / `/config get`。 */
+  hint: string;
+}
+
+/**
+ * Phase 1 可编辑的运营字段。**不含** allowedUsers 之外的权限字段、secret、brand
+ * （绑定租户、需重启重建 client）、name（pm2 进程名，启动期绑定）。allowedUsers
+ * 在此登记但走 {@link setBotAllowedUsers} 的专用异步路径（重解析 + 防自锁）。
+ */
+export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
+  { key: 'model', configKey: 'model', kind: 'string', effect: 'next-session', clearable: true, hint: 'CLI 模型名（如 opus）；unset 回 CLI 默认' },
+  { key: 'cli', configKey: 'cliId', kind: 'cli', effect: 'next-session', clearable: false, hint: 'CLI 适配器（序号 1-16 或 id，如 claude-code）' },
+  { key: 'lang', configKey: 'lang', kind: 'enum', effect: 'immediate', clearable: true, enumValues: ['zh', 'en'], hint: '机器人 UI 语言 zh|en；unset 回全局默认' },
+  { key: 'defaultWorkingDir', configKey: 'defaultWorkingDir', kind: 'dir', effect: 'next-session', clearable: true, hint: '新话题默认工作目录（跳过仓库选择卡片）' },
+  { key: 'brandLabel', configKey: 'brandLabel', kind: 'string', effect: 'immediate', clearable: true, hint: '卡片页脚品牌文案；unset 回默认 botmux 链接' },
+  { key: 'autoStartPrompt', configKey: 'autoStartOnGroupJoinPrompt', kind: 'string', effect: 'immediate', clearable: true, hint: '被拉进新群主动开工的首轮 prompt（配合 autoStartOnGroupJoin）' },
+  { key: 'allowedUsers', configKey: 'allowedUsers', kind: 'allowedUsers', effect: 'immediate', clearable: false, hint: '管理员名单（邮箱/on_/ou_，逗号或空格分隔）；改后需加 确认' },
+  { key: 'disableStreamingCard', configKey: 'disableStreamingCard', kind: 'boolean', effect: 'immediate', clearable: false, hint: '关闭实时流式卡片 on|off' },
+  { key: 'writableTerminalLinkInCard', configKey: 'writableTerminalLinkInCard', kind: 'boolean', effect: 'immediate', clearable: false, hint: '卡片内嵌可写终端链接 on|off' },
+  { key: 'privateCard', configKey: 'privateCard', kind: 'boolean', effect: 'immediate', clearable: false, hint: '/card 发 owner-only 私有快照 on|off' },
+  { key: 'autoStartOnGroupJoin', configKey: 'autoStartOnGroupJoin', kind: 'boolean', effect: 'immediate', clearable: false, hint: '被拉进新群即主动开工 on|off' },
+  { key: 'autoStartOnNewTopic', configKey: 'autoStartOnNewTopic', kind: 'boolean', effect: 'immediate', clearable: false, hint: '话题群每个新话题自动开工 on|off' },
+  { key: 'disableCliBypass', configKey: 'disableCliBypass', kind: 'boolean', effect: 'next-session', clearable: false, hint: '不加 CLI 审批/sandbox 绕过参数 on|off' },
+  { key: 'restrictGrantCommands', configKey: 'restrictGrantCommands', kind: 'boolean', effect: 'immediate', clearable: false, hint: '被授权人仅能纯对话、拦截斜杠命令 on|off' },
+];
+
+/** 大小写不敏感地按 key 找字段 spec。 */
+export function findConfigField(key: string): ConfigFieldSpec | undefined {
+  const k = key.trim().toLowerCase();
+  return CONFIG_FIELDS.find(f => f.key.toLowerCase() === k);
+}
+
+/** 可设置字段名列表（用于报错提示 / help）。 */
+export function settableFieldKeys(): string[] {
+  return CONFIG_FIELDS.map(f => f.key);
+}
+
+/** 把 on/off 类输入解析成布尔，无法识别 → undefined。 */
+export function parseBooleanValue(raw: string): boolean | undefined {
+  const v = raw.trim().toLowerCase();
+  if (['on', 'true', '1', 'yes', 'y', 'enable', 'enabled', '开', '是'].includes(v)) return true;
+  if (['off', 'false', '0', 'no', 'n', 'disable', 'disabled', '关', '否'].includes(v)) return false;
+  return undefined;
+}
+
+/** 展示某字段当前值的人类可读文本。 */
+function formatFieldValue(spec: ConfigFieldSpec, value: unknown): string {
+  if (spec.kind === 'boolean') return value === true ? 'on' : 'off';
+  if (spec.kind === 'allowedUsers') {
+    const arr = Array.isArray(value) ? value : [];
+    return arr.length ? arr.join(', ') : '∅';
+  }
+  if (value === undefined || value === null || value === '') return '∅';
+  return String(value);
+}
+
+export interface ConfigSnapshotRow {
+  key: string;
+  value: string;
+  effect: ConfigEffect;
+}
+
+/** 当前可编辑字段的快照（供 `/config get`）。不含 secret。 */
+export function getConfigSnapshot(larkAppId: string): {
+  ok: true;
+  rows: ConfigSnapshotRow[];
+  info: { cliId: string; brand: string; resolvedAdmins: number; workingDirs: string[] };
+} | { ok: false } {
+  let bot;
+  try { bot = getBot(larkAppId); } catch { return { ok: false }; }
+  const cfg = bot.config;
+  const rows: ConfigSnapshotRow[] = CONFIG_FIELDS.map(spec => ({
+    key: spec.key,
+    value: formatFieldValue(spec, (cfg as any)[spec.configKey]),
+    effect: spec.effect,
+  }));
+  return {
+    ok: true,
+    rows,
+    info: {
+      cliId: cfg.cliId,
+      brand: cfg.brand ?? 'feishu',
+      resolvedAdmins: bot.resolvedAllowedUsers.length,
+      workingDirs: cfg.workingDirs ?? (cfg.workingDir ? [cfg.workingDir] : []),
+    },
+  };
+}
+
+export type ApplyFieldResult =
+  | { ok: true; oldText: string; newText: string; effect: ConfigEffect }
+  | { ok: false; reason: 'bot_not_registered' | 'bot_not_in_config' | string };
+
+/**
+ * 写入并热更新一个**已解析**的字段值（string / boolean / null=清除）。
+ * 调用方负责按 kind 校验后再传值；本函数只负责落盘 + 同步内存。
+ * 不处理 allowedUsers（异步，见 {@link setBotAllowedUsers}）。
+ */
+export async function applyConfigField(
+  larkAppId: string,
+  spec: ConfigFieldSpec,
+  value: string | boolean | null,
+): Promise<ApplyFieldResult> {
+  if (spec.kind === 'allowedUsers') return { ok: false, reason: 'use_setBotAllowedUsers' };
+  let bot;
+  try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  const oldText = formatFieldValue(spec, (bot.config as any)[spec.configKey]);
+
+  const r = await rmwBotEntry<null>(larkAppId, (entry) => {
+    if (value === null) {
+      delete entry[spec.configKey];
+    } else if (spec.kind === 'boolean') {
+      // 与 parseBotConfigsFromText 一致：true 才写，false → 删 key（bots.json 保持干净）。
+      if (value === true) entry[spec.configKey] = true;
+      else delete entry[spec.configKey];
+    } else {
+      entry[spec.configKey] = value;
+    }
+    return { write: true, result: null };
+  });
+  if (!r.ok) return { ok: false, reason: r.reason };
+
+  // 同步内存 config（与 oncall/grant-prefs store 一致，路由/spawn 不重启即生效）。
+  if (value === null) {
+    (bot.config as any)[spec.configKey] = undefined;
+  } else if (spec.kind === 'boolean') {
+    (bot.config as any)[spec.configKey] = value || undefined;
+  } else {
+    (bot.config as any)[spec.configKey] = value;
+  }
+  const newText = formatFieldValue(spec, (bot.config as any)[spec.configKey]);
+  logger.info(`[config:${larkAppId}] set ${spec.key}: ${oldText} -> ${newText}`);
+  return { ok: true, oldText, newText, effect: spec.effect };
+}
+
+export type SetAllowedUsersResult =
+  | { ok: true; raw: string[]; resolved: string[] }
+  | { ok: false; reason: 'bot_not_registered' | 'bot_not_in_config' | 'self_lockout' | 'empty_resolved' | string };
+
+/**
+ * 改 allowedUsers（管理员名单）。这是动信任根的敏感操作，与普通字段分开：
+ *   1. 用 bot 凭证把邮箱/on_ 解析成 open_id（与启动期同一路径）。
+ *   2. **防自锁**：解析后名单必须仍含发起人的 open_id，否则拒绝——避免把自己踢出管理员。
+ *   3. 解析后非空才写。
+ *   4. 落盘原始条目（邮箱/on_/ou_，与 setup 一致），并同步内存 resolvedAllowedUsers /
+ *      rawAllowedUserResolution（与 daemon 启动期赋值同口径），无需重启。
+ *
+ * confirm 二次确认由调用方（command-handler）处理，本函数只做校验 + 落盘。
+ */
+export async function setBotAllowedUsers(
+  larkAppId: string,
+  rawEntries: string[],
+  senderOpenId: string | undefined,
+): Promise<SetAllowedUsersResult> {
+  let bot;
+  try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+
+  const { resolved, map } = await resolveAllowedUsersWithMap(larkAppId, rawEntries);
+  if (resolved.length === 0) return { ok: false, reason: 'empty_resolved' };
+  if (senderOpenId && !resolved.includes(senderOpenId)) return { ok: false, reason: 'self_lockout' };
+
+  const r = await rmwBotEntry<null>(larkAppId, (entry) => {
+    entry.allowedUsers = rawEntries;
+    return { write: true, result: null };
+  });
+  if (!r.ok) return { ok: false, reason: r.reason };
+
+  bot.config.allowedUsers = rawEntries;
+  bot.resolvedAllowedUsers = resolved;
+  bot.rawAllowedUserResolution = map;
+  logger.info(`[config:${larkAppId}] allowedUsers updated: ${rawEntries.length} entries, ${resolved.length} resolved`);
+  return { ok: true, raw: rawEntries, resolved };
+}
+
+export type CoerceResult =
+  | { ok: true; value: string | boolean }
+  | { ok: false; reason: 'invalid_bool' | 'invalid_enum' | 'invalid_cli' | 'invalid_dir' | 'empty' };
+
+/**
+ * 把一个**原始**字段值（来自卡片下拉/输入或别处）按字段 kind 解析校验成可落盘的
+ * string|boolean。dir 在此做存在性检查（无 locale，返回结构化 reason，调用方再本地化）。
+ * allowedUsers 不走这里（异步，见 {@link setBotAllowedUsers}）。
+ */
+export function coerceConfigValue(spec: ConfigFieldSpec, raw: unknown): CoerceResult {
+  if (spec.kind === 'boolean') {
+    if (typeof raw === 'boolean') return { ok: true, value: raw };
+    const b = parseBooleanValue(String(raw ?? ''));
+    return b === undefined ? { ok: false, reason: 'invalid_bool' } : { ok: true, value: b };
+  }
+  const s = String(raw ?? '').trim();
+  if (!s) return { ok: false, reason: 'empty' };
+  switch (spec.kind) {
+    case 'enum':
+      return spec.enumValues?.includes(s.toLowerCase())
+        ? { ok: true, value: s.toLowerCase() }
+        : { ok: false, reason: 'invalid_enum' };
+    case 'cli': {
+      try {
+        const id = resolveCliId(s);
+        return id ? { ok: true, value: id } : { ok: false, reason: 'invalid_cli' };
+      } catch { return { ok: false, reason: 'invalid_cli' }; }
+    }
+    case 'dir': {
+      try { if (statSync(expandHomePath(s)).isDirectory()) return { ok: true, value: s }; } catch { /* not a dir */ }
+      return { ok: false, reason: 'invalid_dir' };
+    }
+    default: // 'string'
+      return { ok: true, value: s };
+  }
+}
+
+/**
+ * 渲染交互配置卡片所需的纯数据视图。card-builder 只吃这个（不反向 import store），
+ * 避免循环依赖。`modelChoices` 由调用方按 cliId 解析后传入（command-handler /
+ * card-handler 已 import CLI 适配器），缺省空数组 → 不渲染 model 下拉。
+ */
+export interface ConfigCardData {
+  larkAppId: string;
+  botName: string;
+  cliId: string;
+  cliOptions: Array<{ id: string; label: string }>;
+  model: string | null;
+  modelChoices: string[];
+  lang: string | null;
+  brandLabel: string | null;
+  defaultWorkingDir: string | null;
+  /** 入群主动开工首轮 prompt（autoStartOnGroupJoinPrompt）。 */
+  autoStartPrompt: string | null;
+  /** team 级默认角色文本（不在 bots.json，存独立角色文件）。 */
+  teamRole: string | null;
+  /** messageQuota.defaultLimit（被授权人默认消息额度）；null = 不限。 */
+  quota: number | null;
+  admins: number;
+  booleans: Array<{ key: string; on: boolean }>;
+}
+
+export function getConfigCardData(larkAppId: string, modelChoices: readonly string[] = []): ConfigCardData | null {
+  let bot;
+  try { bot = getBot(larkAppId); } catch { return null; }
+  const cfg = bot.config;
+  const q = cfg.messageQuota?.defaultLimit;
+  return {
+    larkAppId,
+    botName: bot.botName ?? cfg.cliId,
+    cliId: cfg.cliId,
+    cliOptions: CLI_OPTIONS.map(o => ({ id: o.id, label: o.label })),
+    model: cfg.model ?? null,
+    modelChoices: [...modelChoices],
+    lang: cfg.lang ?? null,
+    brandLabel: cfg.brandLabel ?? null,
+    defaultWorkingDir: cfg.defaultWorkingDir ?? null,
+    autoStartPrompt: cfg.autoStartOnGroupJoinPrompt ?? null,
+    teamRole: resolveTeamRoleFile(larkAppId),
+    quota: typeof q === 'number' && Number.isInteger(q) && q > 0 ? q : null,
+    admins: bot.resolvedAllowedUsers.length,
+    booleans: CONFIG_FIELDS.filter(f => f.kind === 'boolean').map(f => ({
+      key: f.key, on: (cfg as any)[f.configKey] === true,
+    })),
+  };
+}

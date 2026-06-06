@@ -21,6 +21,63 @@ function cliIdOf(appId: string): string {
   return best?.cliId ?? '';
 }
 
+/**
+ * Fleet 区交互：懒加载本 bot 可下发的目标（GET /fleet/targets），下发一条 /botconfig
+ * 子命令（POST /fleet/relay）。结果异步出现在对应飞书群（v1 盲下发，不回读）。
+ */
+function wireFleetSection(card: HTMLElement, appId: string): void {
+  const loadBtn = card.querySelector<HTMLButtonElement>('button[data-action=fleet-load]');
+  const sendBtn = card.querySelector<HTMLButtonElement>('button[data-action=fleet-send]');
+  const targetSel = card.querySelector<HTMLSelectElement>('select[data-fleet-target]');
+  const cmdInput = card.querySelector<HTMLInputElement>('input[data-fleet-command]');
+  const panel = card.querySelector<HTMLElement>('[data-fleet-panel]');
+  const statusEl = card.querySelector<HTMLElement>('[data-fleet-status]');
+  if (!loadBtn || !sendBtn || !targetSel || !cmdInput || !panel || !statusEl) return;
+
+  loadBtn.addEventListener('click', async () => {
+    statusEl.textContent = ''; statusEl.className = 'oncall-status';
+    loadBtn.disabled = true;
+    try {
+      const r = await fetch(`/api/bots/${encodeURIComponent(appId)}/fleet/targets`);
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { statusEl.textContent = `✗ ${body.error ?? r.status}`; statusEl.classList.add('hint-warn-inline'); return; }
+      const opts: string[] = [];
+      for (const chat of (body.chats ?? [])) {
+        for (const tgt of (chat.targets ?? [])) {
+          const val = `${chat.chatId}|${tgt.openId}`;
+          opts.push(`<option value="${escapeHtml(val)}">${escapeHtml(tgt.name)} — ${escapeHtml(chat.chatName)}</option>`);
+        }
+      }
+      if (opts.length === 0) { statusEl.textContent = t('botDefaults.fleetNone'); statusEl.classList.add('hint-warn-inline'); return; }
+      targetSel.innerHTML = opts.join('');
+      panel.hidden = false;
+      statusEl.textContent = `✓ ${opts.length}`;
+      statusEl.classList.add('hint-ok');
+    } catch (e: any) {
+      statusEl.textContent = `✗ ${e?.message ?? e}`; statusEl.classList.add('hint-warn-inline');
+    } finally { loadBtn.disabled = false; }
+  });
+
+  sendBtn.addEventListener('click', async () => {
+    const sel = targetSel.value;
+    const command = cmdInput.value.trim();
+    if (!sel || !command) { statusEl.textContent = t('botDefaults.fleetNeedInput'); statusEl.className = 'oncall-status hint-warn-inline'; return; }
+    const [chatId, targetOpenId] = sel.split('|');
+    statusEl.textContent = ''; statusEl.className = 'oncall-status';
+    sendBtn.disabled = true;
+    try {
+      const r = await fetch(`/api/bots/${encodeURIComponent(appId)}/fleet/relay`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chatId, targetOpenId, command }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok && body.ok) { statusEl.textContent = `✓ ${t('botDefaults.fleetSent')}`; statusEl.classList.add('hint-ok'); }
+      else { statusEl.textContent = `✗ ${body.error ?? r.status}`; statusEl.classList.add('hint-warn-inline'); }
+    } catch (e: any) { statusEl.textContent = `✗ ${e?.message ?? e}`; statusEl.classList.add('hint-warn-inline'); }
+    finally { sendBtn.disabled = false; }
+  });
+}
+
 function pageHtml(): string {
   return `<section class="page">
 <div class="page-heading">
@@ -206,8 +263,33 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         <section class="bd-tile">${renderRoleSection(b)}</section>
         <section class="bd-tile">${renderCardBehaviorSection(b)}${renderBrandSection(b)}</section>
         <section class="bd-tile">${renderGrantSection(b)}</section>
+        <section class="bd-tile">${renderFleetSection(b)}</section>
       </div>
     </article>`;
+  }
+
+  // Fleet：把本 bot 当「控制者」，向同群里其它机器的 bot 下发 /config。懒加载
+  // （点按钮才拉取目标），避免页面加载时为每个 bot 都 fan-out fleet 探测。
+  function renderFleetSection(_b: any): string {
+    return `<section class="bd-section" data-fleet>
+      <h3 class="bd-section-title">${t('botDefaults.fleetTitle')}</h3>
+      <small class="bd-help">${t('botDefaults.fleetHelp')}</small>
+      <div class="actions">
+        <button type="button" data-action="fleet-load">${t('botDefaults.fleetLoad')}</button>
+        <span class="oncall-status" data-fleet-status></span>
+      </div>
+      <div class="bd-row" data-fleet-panel hidden>
+        <label><span>${t('botDefaults.fleetTarget')}</span>
+          <select data-fleet-target></select>
+        </label>
+        <label><span>${t('botDefaults.fleetCommand')}</span>
+          <input type="text" data-fleet-command placeholder="set model opus">
+        </label>
+        <div class="actions">
+          <button type="button" class="primary" data-action="fleet-send">${t('botDefaults.fleetSend')}</button>
+        </div>
+      </div>
+    </section>`;
   }
 
   // Team-level role editor (one role per bot, cross-chat). This is the
@@ -380,6 +462,8 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       const saveBtn = card.querySelector<HTMLButtonElement>('button[data-action=save]');
       const statusEl = card.querySelector<HTMLSpanElement>('[data-status]');
       if (!toggle || !input || !saveBtn || !statusEl) return; // error card
+
+      wireFleetSection(card, appId);
 
       toggle.addEventListener('change', () => {
         input.disabled = !toggle.checked;
