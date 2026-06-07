@@ -1367,6 +1367,35 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
+  it('shared + never: a non-@ top-level message OPENS a topic (seeds replyRootId), not a flat reply', async () => {
+    // Regression: shared mode + never must auto-open a topic even without @,
+    // instead of replying at the group top level.
+    setupBotState({ allowedUsers: [USER_OPEN_ID], regularGroupReplyMode: 'shared', regularGroupMentionMode: 'never' });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetCachedChatMode.mockReturnValue('group');
+    handlers.isSessionOwner.mockReturnValue(false);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'no @ but should open a shared topic' }),
+      messageId: 'msg-shared-never-seed',
+      chatId: 'chat-shared-never',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    // replyRootId === messageId means a topic is seeded under this message
+    // (reply will go into a thread reusing the chat session), not flat top-level.
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-shared-never',
+      replyRootId: 'msg-shared-never-seed',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
   it('mention mode always (default): a non-@ top-level message is ignored', async () => {
     setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default = always
     mockGetChatMode.mockResolvedValue('group');

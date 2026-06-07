@@ -1024,7 +1024,11 @@ async function maybeApplySharedTopicSeed(input: {
   if (forceTopicApplied) return undefined;
   if (chatType !== 'group') return undefined;
   if (resolveRegularGroupMode(larkAppId, chatId) !== 'shared') return undefined;
-  if (!isBotMentioned(larkAppId, message, senderOpenId)) return undefined;
+  // Seeding a shared topic normally needs an @mention. But under the 'never'
+  // mention policy a non-@ message is also answered — and in shared mode it must
+  // still OPEN a topic (reply in a thread reusing the chat session), not fall
+  // back to a flat top-level reply. So allow non-@ seeding only when never.
+  if (!isBotMentioned(larkAppId, message, senderOpenId) && resolveGroupMentionMode(larkAppId) !== 'never') return undefined;
   const freshMode = routing.scope === 'thread'
     ? await getChatMode(larkAppId, chatId, { forceRefresh: true })
     : (getCachedChatMode(larkAppId, chatId) ?? 'group');
