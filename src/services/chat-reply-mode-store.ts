@@ -45,6 +45,23 @@ function regularGroupDefaultMode(larkAppId: string): ChatReplyMode {
   }
 }
 
+export type GroupMentionMode = 'always' | 'topic' | 'never';
+
+/**
+ * Per-bot (bot-global) @-requirement policy for regular groups, default 'always'.
+ *   • always — @ required everywhere (incl. inside shared topics).
+ *   • topic  — @ required at top level, but non-@ continues inside shared topics.
+ *   • never  — non-@ messages are answered too (where the bot has talk access).
+ */
+export function resolveGroupMentionMode(larkAppId: string): GroupMentionMode {
+  try {
+    const m = getBot(larkAppId).config.regularGroupMentionMode;
+    return m === 'topic' || m === 'never' ? m : 'always';
+  } catch {
+    return 'always';
+  }
+}
+
 /**
  * Effective regular-group reply mode for a chat — the SINGLE source of truth for
  * routing. Per-chat override first, then the per-bot default. Both the

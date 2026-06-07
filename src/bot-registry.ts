@@ -216,6 +216,21 @@ export interface BotConfig {
    */
   regularGroupReplyMode?: ChatReplyMode;
   /**
+   * Per-bot (bot-global) policy for when an @mention is required to get a reply
+   * in regular Lark groups — a 3-tier ladder:
+   *   • 'always' (or undefined) — @ required everywhere, including inside the
+   *                               bot's own shared topics (the safe default).
+   *   • 'topic'                 — @ required to start / at top level, but NOT
+   *                               inside the bot's shared topics (non-@ replies
+   *                               there continue the session).
+   *   • 'never'                 — @ never required: non-@ messages in groups
+   *                               where the bot has talk access are answered too.
+   * Governs the shared-topic fold-back + the top-level @ gate. `new-topic` /
+   * 话题群 topics own their own thread and continue without @ regardless (that
+   * is the mode's defining behavior, not affected by this policy).
+   */
+  regularGroupMentionMode?: 'always' | 'topic' | 'never';
+  /**
    * Per-bot voice-engine override for the voice-summary feature. Merged OVER
    * the global `voice` block in ~/.botmux/config.json (per-bot wins field by
    * field). When this bot has usable voice creds (here or globally), its reply
@@ -679,6 +694,11 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // undefined so bots.json stays clean.
       regularGroupReplyMode: entry.regularGroupReplyMode === 'new-topic' || entry.regularGroupReplyMode === 'shared'
         ? entry.regularGroupReplyMode
+        : undefined,
+      // 3-tier @ policy. Only 'topic' | 'never' are meaningful; 'always' (the
+      // default) and anything else normalize to undefined so bots.json stays clean.
+      regularGroupMentionMode: entry.regularGroupMentionMode === 'topic' || entry.regularGroupMentionMode === 'never'
+        ? entry.regularGroupMentionMode
         : undefined,
       voice,
     });

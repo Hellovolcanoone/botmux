@@ -118,6 +118,17 @@ describe('bot-registry grant additions', () => {
     expect(parseBotConfigsFromText(JSON.stringify([{ larkAppId: 'rg3', larkAppSecret: 's' }]))[0].regularGroupReplyMode).toBeUndefined();
   });
 
+  it('parses regularGroupMentionMode: keeps topic|never, drops always/invalid/absent to undefined', () => {
+    expect(parseBotConfigsFromText(JSON.stringify([{ larkAppId: 'gm1', larkAppSecret: 's', regularGroupMentionMode: 'topic' }]))[0].regularGroupMentionMode).toBe('topic');
+    expect(parseBotConfigsFromText(JSON.stringify([{ larkAppId: 'gm1b', larkAppSecret: 's', regularGroupMentionMode: 'never' }]))[0].regularGroupMentionMode).toBe('never');
+    // 'always' is the default → normalized to undefined so bots.json stays clean.
+    for (const bad of ['always', 'bad', true, 1, undefined]) {
+      const c = parseBotConfigsFromText(JSON.stringify([{ larkAppId: 'gm2', larkAppSecret: 's', regularGroupMentionMode: bad }]));
+      expect(c[0].regularGroupMentionMode).toBeUndefined();
+    }
+    expect(parseBotConfigsFromText(JSON.stringify([{ larkAppId: 'gm3', larkAppSecret: 's' }]))[0].regularGroupMentionMode).toBeUndefined();
+  });
+
   it('parses p2pMode only as literal chat (else undefined = thread default)', () => {
     const cfgs = parseBotConfigsFromText(JSON.stringify([
       { larkAppId: 'p1', larkAppSecret: 's', p2pMode: 'chat' },

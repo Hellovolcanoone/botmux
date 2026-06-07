@@ -113,6 +113,7 @@ function setupBotState(opts?: {
   allowedUsers?: string[];
   restrictGrantCommands?: boolean;
   regularGroupReplyMode?: 'chat' | 'new-topic' | 'shared';
+  regularGroupMentionMode?: 'always' | 'topic' | 'never';
   autoStartOnNewTopic?: boolean;
   chatReplyModes?: Record<string, 'chat' | 'new-topic' | 'shared'>;
   p2pMode?: 'thread' | 'chat';
@@ -126,6 +127,7 @@ function setupBotState(opts?: {
       globalGrants: opts?.globalGrants,
       restrictGrantCommands: opts?.restrictGrantCommands,
       regularGroupReplyMode: opts?.regularGroupReplyMode,
+      regularGroupMentionMode: opts?.regularGroupMentionMode,
       autoStartOnNewTopic: opts?.autoStartOnNewTopic,
       chatReplyModes: opts?.chatReplyModes,
       p2pMode: opts?.p2pMode,
@@ -1290,8 +1292,8 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 
-  it('shared follow-up thread reply folds back to chat session alias', async () => {
-    setupBotState({ allowedUsers: [USER_OPEN_ID] });
+  it('shared follow-up thread reply folds back to chat session when mention mode is topic (no-@ inside topics)', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID], regularGroupMentionMode: 'topic' });
     mockGetChatMode.mockResolvedValue('group');
     handlers.resolveReplyThreadAlias.mockReturnValue({ chatId: 'chat-reply-mode', sessionId: 'sess-chat' });
     handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-reply-mode');
@@ -1314,6 +1316,74 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       larkAppId: MY_APP_ID,
     }));
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('shared follow-up thread reply WITHOUT @ is ignored by default (mention mode always → @ required even in topics)', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default = always
+    mockGetChatMode.mockResolvedValue('group');
+    handlers.resolveReplyThreadAlias.mockReturnValue({ chatId: 'chat-reply-mode', sessionId: 'sess-chat' });
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-reply-mode');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'follow up in alias topic without @' }),
+      rootId: 'msg-topic-alias-1',
+      messageId: 'msg-topic-alias-2b',
+      chatId: 'chat-reply-mode',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    // No fold-back: the non-@ thread message is left to the normal "@ required"
+    // gate, so neither handler fires (the alias resolver is never consulted).
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.resolveReplyThreadAlias).not.toHaveBeenCalled();
+  });
+
+  it('mention mode never: a non-@ top-level message from an allowed user is answered (no @ required)', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID], regularGroupMentionMode: 'never' });
+    mockGetChatMode.mockResolvedValue('group');
+    handlers.isSessionOwner.mockReturnValue(false);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'no at-mention at all, top level' }),
+      messageId: 'msg-never-toplevel',
+      chatId: 'chat-never',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    // never tier relaxes the "@ required" gate for talk-allowed senders → the
+    // non-@ top-level message routes to handleNewTopic (chat-scope, no session yet).
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-never',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('mention mode always (default): a non-@ top-level message is ignored', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default = always
+    mockGetChatMode.mockResolvedValue('group');
+    handlers.isSessionOwner.mockReturnValue(false);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'no at-mention at all, top level' }),
+      messageId: 'msg-always-toplevel',
+      chatId: 'chat-always',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 });
 

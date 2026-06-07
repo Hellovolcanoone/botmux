@@ -63,6 +63,7 @@ describe('card-prefs store — 主动开工 fields', () => {
     expect(prefs.autoStartOnNewTopic).toBe(false);
     expect(prefs.autoStartOnGroupJoinPrompt).toBe('');
     expect(prefs.regularGroupReplyMode).toBe('chat');
+    expect(prefs.regularGroupMentionMode).toBe('always');
   });
 
   it('persists toggles + prompt to bots.json and syncs in-memory config (FR-9)', async () => {
@@ -75,6 +76,7 @@ describe('card-prefs store — 主动开工 fields', () => {
       autoStartOnGroupJoinPrompt: '  先做代码审查再回答 ',
       autoStartOnNewTopic: true,
       regularGroupReplyMode: 'shared',
+      regularGroupMentionMode: 'never',
     });
 
     expect(r.ok).toBe(true);
@@ -83,6 +85,7 @@ describe('card-prefs store — 主动开工 fields', () => {
       expect(r.prefs.autoStartOnNewTopic).toBe(true);
       expect(r.prefs.autoStartOnGroupJoinPrompt).toBe('  先做代码审查再回答 ');
       expect(r.prefs.regularGroupReplyMode).toBe('shared');
+      expect(r.prefs.regularGroupMentionMode).toBe('never');
     }
 
     // On disk
@@ -91,6 +94,7 @@ describe('card-prefs store — 主动开工 fields', () => {
     expect(disk.autoStartOnNewTopic).toBe(true);
     expect(disk.autoStartOnGroupJoinPrompt).toBe('  先做代码审查再回答 ');
     expect(disk.regularGroupReplyMode).toBe('shared');
+    expect(disk.regularGroupMentionMode).toBe('never');
 
     // In-memory registry synced (routing reads bot.config directly, no restart)
     const cfg = registry.getBot('app_default').config;
@@ -98,6 +102,7 @@ describe('card-prefs store — 主动开工 fields', () => {
     expect(cfg.autoStartOnNewTopic).toBe(true);
     expect(cfg.autoStartOnGroupJoinPrompt).toBe('  先做代码审查再回答 ');
     expect(cfg.regularGroupReplyMode).toBe('shared');
+    expect(cfg.regularGroupMentionMode).toBe('never');
   });
 
   it('removes keys when toggled off / prompt blanked (keeps bots.json tidy)', async () => {

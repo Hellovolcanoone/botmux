@@ -882,6 +882,9 @@ const server = createServer(async (req, res) => {
             regularGroupReplyMode: (j.regularGroupReplyMode === 'new-topic' || j.regularGroupReplyMode === 'shared')
               ? j.regularGroupReplyMode
               : 'chat',
+            regularGroupMentionMode: (j.regularGroupMentionMode === 'topic' || j.regularGroupMentionMode === 'never')
+              ? j.regularGroupMentionMode
+              : 'always',
             restrictGrantCommands: j.restrictGrantCommands === true,
             messageQuotaDefaultLimit: typeof j.messageQuotaDefaultLimit === 'number' ? j.messageQuotaDefaultLimit : null,
             p2pMode: j.p2pMode === 'chat' ? 'chat' : 'thread',

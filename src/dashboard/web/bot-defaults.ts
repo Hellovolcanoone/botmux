@@ -204,7 +204,8 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
           </section>
         </section>
         <section class="bd-tile">${renderRoleSection(b)}</section>
-        <section class="bd-tile">${renderCardBehaviorSection(b)}${renderSessionModeSection(b)}${renderBrandSection(b)}</section>
+        <section class="bd-tile">${renderSessionModeSection(b)}</section>
+        <section class="bd-tile">${renderCardBehaviorSection(b)}${renderBrandSection(b)}</section>
         <section class="bd-tile">${renderGrantSection(b)}</section>
       </div>
     </article>`;
@@ -307,8 +308,12 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
     const p2p: string = b.p2pMode === 'chat' ? 'chat' : 'thread';
     const regular: string = (b.regularGroupReplyMode === 'new-topic' || b.regularGroupReplyMode === 'shared')
       ? b.regularGroupReplyMode : 'chat';
+    const mention: string = (b.regularGroupMentionMode === 'topic' || b.regularGroupMentionMode === 'never')
+      ? b.regularGroupMentionMode : 'always';
     const opt = (v: string, label: string) =>
       `<option value="${v}" ${regular === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    const mopt = (v: string, label: string) =>
+      `<option value="${v}" ${mention === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     return `<section class="bd-section">
       <h3 class="bd-section-title">${t('botDefaults.sectionSessionMode')}</h3>
       <div class="bd-row">
@@ -336,6 +341,20 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         <small class="bd-help">${t('botDefaults.regularGroupModeHelp')}</small>
         <div class="actions">
           <span class="oncall-status" data-regular-group-status></span>
+        </div>
+      </div>
+      <div class="bd-row">
+        <label>
+          <span>${t('botDefaults.mentionMode')}</span>
+          <select data-input="regularGroupMentionMode">
+            ${mopt('always', t('botDefaults.mentionModeAlways'))}
+            ${mopt('topic', t('botDefaults.mentionModeTopic'))}
+            ${mopt('never', t('botDefaults.mentionModeNever'))}
+          </select>
+        </label>
+        <small class="bd-help">${t('botDefaults.mentionModeHelp')}</small>
+        <div class="actions">
+          <span class="oncall-status" data-mention-mode-status></span>
         </div>
       </div>
     </section>`;
@@ -566,6 +585,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
               cached.autoStartOnGroupJoinPrompt = body.autoStartOnGroupJoinPrompt;
               cached.autoStartOnNewTopic = body.autoStartOnNewTopic;
               cached.regularGroupReplyMode = body.regularGroupReplyMode;
+              cached.regularGroupMentionMode = body.regularGroupMentionMode;
             }
           } else {
             statusEl.textContent = `✗ ${body.error ?? r.status}`;
@@ -668,6 +688,20 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
             { regularGroupReplyMode: regularGroupModeSel.value },
             regularGroupModeSel,
             regularGroupStatusEl,
+          );
+        });
+      }
+
+      // ── 群聊 @ 策略三档（bot-global）──────────────────────────────────────
+      // always = 都需要 @（默认）；topic = 仅 shared 话题内免 @；never = 都不需要 @。
+      const mentionModeSel = card.querySelector<HTMLSelectElement>('select[data-input=regularGroupMentionMode]');
+      const mentionModeStatusEl = card.querySelector<HTMLSpanElement>('[data-mention-mode-status]');
+      if (mentionModeSel) {
+        mentionModeSel.addEventListener('change', () => {
+          putCardPref(
+            { regularGroupMentionMode: mentionModeSel.value },
+            mentionModeSel,
+            mentionModeStatusEl,
           );
         });
       }

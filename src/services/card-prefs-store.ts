@@ -31,6 +31,8 @@ export interface BotCardPrefs {
   autoStartOnNewTopic: boolean;
   /** Per-bot DEFAULT regular-group session mode (chat | new-topic | shared). */
   regularGroupReplyMode: ChatReplyMode;
+  /** Per-bot 3-tier @-requirement policy for regular groups (default 'always'). */
+  regularGroupMentionMode: 'always' | 'topic' | 'never';
 }
 
 /** Current card prefs for a bot (booleans default false, prompt defaults '' when unset). */
@@ -45,6 +47,8 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
       autoStartOnGroupJoinPrompt: typeof c.autoStartOnGroupJoinPrompt === 'string' ? c.autoStartOnGroupJoinPrompt : '',
       autoStartOnNewTopic: c.autoStartOnNewTopic === true,
       regularGroupReplyMode: c.regularGroupReplyMode ?? 'chat',
+      regularGroupMentionMode: c.regularGroupMentionMode === 'topic' || c.regularGroupMentionMode === 'never'
+        ? c.regularGroupMentionMode : 'always',
     };
   } catch {
     return {
@@ -55,6 +59,7 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
       autoStartOnGroupJoinPrompt: '',
       autoStartOnNewTopic: false,
       regularGroupReplyMode: 'chat',
+      regularGroupMentionMode: 'always',
     };
   }
 }
@@ -90,6 +95,13 @@ export async function updateBotCardPrefs(
     if (val === 'new-topic' || val === 'shared') entry[key] = val;
     else delete entry[key];
   };
+  // 3-tier @ policy: store only the non-default tiers; 'always' (default) drops
+  // the key so bots.json stays tidy (absent === 'always').
+  const applyMention = (entry: any, key: keyof BotCardPrefs, val: 'always' | 'topic' | 'never' | undefined) => {
+    if (val === undefined) return;
+    if (val === 'topic' || val === 'never') entry[key] = val;
+    else delete entry[key];
+  };
 
   const r = await rmwBotEntry<BotCardPrefs>(larkAppId, (entry) => {
     apply(entry, 'disableStreamingCard', patch.disableStreamingCard);
@@ -99,6 +111,7 @@ export async function updateBotCardPrefs(
     applyStr(entry, 'autoStartOnGroupJoinPrompt', patch.autoStartOnGroupJoinPrompt);
     apply(entry, 'autoStartOnNewTopic', patch.autoStartOnNewTopic);
     applyMode(entry, 'regularGroupReplyMode', patch.regularGroupReplyMode);
+    applyMention(entry, 'regularGroupMentionMode', patch.regularGroupMentionMode);
     return {
       write: true,
       result: {
@@ -111,6 +124,9 @@ export async function updateBotCardPrefs(
         regularGroupReplyMode: (entry.regularGroupReplyMode === 'new-topic' || entry.regularGroupReplyMode === 'shared')
           ? entry.regularGroupReplyMode
           : 'chat',
+        regularGroupMentionMode: (entry.regularGroupMentionMode === 'topic' || entry.regularGroupMentionMode === 'never')
+          ? entry.regularGroupMentionMode
+          : 'always',
       },
     };
   });
@@ -140,11 +156,16 @@ export async function updateBotCardPrefs(
       ? patch.regularGroupReplyMode
       : undefined;
   }
+  if (patch.regularGroupMentionMode !== undefined) {
+    bot.config.regularGroupMentionMode = (patch.regularGroupMentionMode === 'topic' || patch.regularGroupMentionMode === 'never')
+      ? patch.regularGroupMentionMode
+      : undefined;
+  }
   logger.info(
     `[card-prefs:${larkAppId}] disableStreamingCard=${r.result.disableStreamingCard} ` +
     `writableTerminalLinkInCard=${r.result.writableTerminalLinkInCard} privateCard=${r.result.privateCard} ` +
     `autoStartOnGroupJoin=${r.result.autoStartOnGroupJoin} autoStartOnNewTopic=${r.result.autoStartOnNewTopic} ` +
-    `regularGroupReplyMode=${r.result.regularGroupReplyMode} ` +
+    `regularGroupReplyMode=${r.result.regularGroupReplyMode} regularGroupMentionMode=${r.result.regularGroupMentionMode} ` +
     `autoStartOnGroupJoinPrompt.len=${r.result.autoStartOnGroupJoinPrompt.length}`,
   );
   return { ok: true, prefs: r.result };

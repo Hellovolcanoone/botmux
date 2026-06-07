@@ -24,7 +24,7 @@ import { openPending, isThrottled } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { chatQuotaKey, globalQuotaKey } from '../../services/grant-store.js';
 import { ensureDefaultOncallBound } from '../../services/oncall-store.js';
-import { resolveRegularGroupMode } from '../../services/chat-reply-mode-store.js';
+import { resolveRegularGroupMode, resolveGroupMentionMode } from '../../services/chat-reply-mode-store.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -1322,10 +1322,16 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         let replyRootId: string | undefined;
         const explicitlyMentionedThisBot = isBotMentioned(larkAppId, message, senderOpenId);
 
-        // Topic-alias reply: a message in a Lark thread can still belong to the
-        // regular group's chat-scope session when that root was registered by
-        // `/reply-mode`. Fold it back to chatId before ownership / serialize.
-        if (!explicitlyMentionedThisBot && routing.scope === 'thread' && message.root_id && message.thread_id && chatType === 'group') {
+        // Shared-mode follow-up: a non-@ message inside a Lark thread can belong
+        // to the regular group's chat-scope session when that root was registered
+        // as a shared-topic alias. Whether a 普通群 answers it without an @mention
+        // is governed by the bot-global mention policy: 'always' (default) keeps
+        // "@ required" so this fold-back is skipped (non-@ thread chatter falls
+        // through to the gate below and is ignored — only an explicit @ continues
+        // a shared topic); 'topic' and 'never' enable the seamless no-@ fold-back.
+        if (!explicitlyMentionedThisBot
+            && resolveGroupMentionMode(larkAppId) !== 'always'
+            && routing.scope === 'thread' && message.root_id && message.thread_id && chatType === 'group') {
           const alias = handlers.resolveReplyThreadAlias?.(message.root_id, chatId, larkAppId) ?? null;
           if (alias) {
             const freshMode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
@@ -1441,7 +1447,15 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // Lark thread). Do not re-run the generic group @ gate, which would
           // reject multi-bot thread replies simply because `routing.scope` was
           // folded back to chat-scope.
-          const relax = (!!replyRootId && isAllowed) || (ownsSession && isAllowed && !!stats && stats.userCount <= 1 && stats.botCount <= 1);
+          //
+          // mention mode 'never': a bot-global opt-in that drops the @ requirement
+          // entirely — any message from a talk-allowed sender is answered (incl.
+          // brand-new non-@ top-level, which then spawns/continues a session).
+          // Gated on isAllowed so restricted groups still only react to permitted
+          // senders. Intended for dedicated / on-call groups, not busy multi-人 chats.
+          const relax = (!!replyRootId && isAllowed)
+            || (isAllowed && resolveGroupMentionMode(larkAppId) === 'never')
+            || (ownsSession && isAllowed && !!stats && stats.userCount <= 1 && stats.botCount <= 1);
           if (!relax) {
             const access = await checkGroupMessageAccess(larkAppId, message, chatId, senderOpenId);
             if (access === 'not_allowed') {
