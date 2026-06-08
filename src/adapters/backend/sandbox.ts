@@ -205,7 +205,15 @@ function cloneProject(src: string, dst: string): void {
     // --no-hardlinks → fully independent object store; the sandbox can never
     // corrupt the source repo, even with the shared-checkout setup.
     const r = spawnSync('git', ['clone', '--local', '--no-hardlinks', '--quiet', src, dst], { stdio: 'ignore' });
-    if (r.status === 0) return;
+    if (r.status === 0) {
+      // Record the clone's base commit so `/land` can diff the agent's changes
+      // (committed + uncommitted) against the exact point we cloned from.
+      try {
+        const head = spawnSync('git', ['-C', dst, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout?.trim();
+        if (head) writeFileSync(join(dirname(dst), 'clone-base'), head);
+      } catch { /* non-fatal: land falls back to HEAD */ }
+      return;
+    }
     // fall through to cp on any git failure (non-repo edge, detached, etc.)
   }
   cpSync(src, dst, { recursive: true });
