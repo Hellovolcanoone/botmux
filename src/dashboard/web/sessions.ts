@@ -38,6 +38,7 @@ const CLI_FILTER_OPTIONS = [
   'copilot',
   'aiden',
   'coco',
+  'oh-my-pi',
   'unknown',
 ];
 
