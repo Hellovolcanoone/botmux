@@ -541,7 +541,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     // entry guard in command-handler.ts refused p2p / topic before the card
     // even rendered. Passing literal 'group' here makes that contract
     // explicit at the call site.
-    const r = await transferSession(sourceDs.session.sessionId, targetChatId, m1MessageId, 'group');
+    const r = await transferSession(sourceDs.session.sessionId, targetChatId, m1MessageId, 'group', 'chat');
     if (!r.ok) {
       // Best-effort: orphan M1 cleanup so a failed transfer doesn't leave a
       // misleading "已接力" message in the target chat (王皓's "明明失败了

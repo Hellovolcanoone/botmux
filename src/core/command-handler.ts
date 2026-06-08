@@ -1837,8 +1837,8 @@ export async function handleCommand(
         if (leaderHasRealSession) {
           const { transferSession } = await import('./worker-pool.js');
           // Target chat was just built by createGroupWithBots — by
-          // construction a regular group.
-          const leaderResult = await transferSession(ds.session.sessionId, newChatId, placeholderRootMessageId, 'group');
+          // construction a regular group, chat-scope.
+          const leaderResult = await transferSession(ds.session.sessionId, newChatId, placeholderRootMessageId, 'group', 'chat');
           if (!leaderResult.ok) {
             // Real session, real failure (worker busy / unsupported target
             // / tmux issue). Abort the entire --create flow — the new chat

@@ -304,8 +304,8 @@ ipcRoute('POST', '/api/sessions/migrate-to-chat', async (req, res) => {
   }
 
   // Target chat was built by the leader's /relay --create — by
-  // construction a regular group. The peer inherits that guarantee.
-  const result = await transferSession(ds.session.sessionId, targetChatId, targetRootMessageId, 'group');
+  // construction a regular group, chat-scope (M1 is the audit anchor).
+  const result = await transferSession(ds.session.sessionId, targetChatId, targetRootMessageId, 'group', 'chat');
   if (!result.ok) {
     return jsonRes(res, 500, { ok: false, error: result.error });
   }
