@@ -28,14 +28,14 @@ function pageHtml(): string {
   return `<section class="page">
 <div class="page-heading">
   <div>
-    <p class="eyebrow">接入点 · beta</p>
-    <h1>接入点（Webhook）<span class="muted" style="font-size:14px;font-weight:400">beta</span></h1>
-    <p>让外部系统（监控告警、CI、工单…）通过一个 webhook 触发机器人在群里说话或跑工作流。<span class="muted">（beta：尚未充分测试，欢迎反馈）</span></p>
+    <p class="eyebrow">Webhook</p>
+    <h1>Webhook</h1>
+    <p>让外部系统（监控告警、CI、工单…）通过一个 webhook 触发机器人在群里说话或跑工作流。</p>
   </div>
 </div>
 
 <div class="card" style="margin-bottom:16px">
-  <h2 style="margin-top:0">新建接入点</h2>
+  <h2 style="margin-top:0">新建 Webhook</h2>
   <div class="cn-form" style="display:grid;grid-template-columns:140px 1fr;gap:10px 14px;align-items:center;max-width:680px">
     <label>名称</label><input id="cn-name" placeholder="如：线上告警">
     <label>触发的机器人</label><select id="cn-bot"></select>
@@ -84,7 +84,7 @@ function pageHtml(): string {
 </div>
 
 <div class="card">
-  <h2 style="margin-top:0">已有接入点 <span class="muted" id="cn-count" style="font-size:13px"></span></h2>
+  <h2 style="margin-top:0">已有 Webhook <span class="muted" id="cn-count" style="font-size:13px"></span></h2>
   <div id="cn-list">加载中…</div>
 </div>
 </section>`;
@@ -133,7 +133,7 @@ function fillGroupPickers(): void {
 function renderList(connectors: Connector[]): void {
   const el = $('cn-list');
   $('cn-count').textContent = connectors.length ? `· ${connectors.length} 个` : '';
-  if (!connectors.length) { el.innerHTML = '<p class="muted">还没有接入点。用上面的表单创建一个。</p>'; return; }
+  if (!connectors.length) { el.innerHTML = '<p class="muted">还没有 Webhook。用上面的表单创建一个。</p>'; return; }
   el.innerHTML = connectors.map(c => {
     const bot = bots.find(b => b.larkAppId === c.target.botId);
     const url = webhookUrl(c.id);
@@ -163,7 +163,7 @@ function renderList(connectors: Connector[]): void {
     b.onclick = async () => { await jsend('PATCH', '/api/connectors/' + encodeURIComponent(b.dataset.id!), { enabled: b.dataset.on !== 'true' }); load(); };
   });
   el.querySelectorAll<HTMLButtonElement>('.cn-del').forEach(b => {
-    b.onclick = async () => { if (!confirm('删除这个接入点？它的 webhook URL 会立即失效。')) return; await jsend('DELETE', '/api/connectors/' + encodeURIComponent(b.dataset.id!)); load(); };
+    b.onclick = async () => { if (!confirm('删除这个 Webhook？它的 URL 会立即失效。')) return; await jsend('DELETE', '/api/connectors/' + encodeURIComponent(b.dataset.id!)); load(); };
   });
 }
 

@@ -165,24 +165,25 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   // 不绑 session（sessionId + workingDir 都在 value 里）。owner 强闸门：只有 owner 能把
   // 隔离副本的改动应用回真实磁盘。agent 在沙盒里无感，不参与。
   if (value?.action && (value.action === 'land_apply' || value.action === 'land_discard') && larkAppId) {
+    const loc = localeForBot(larkAppId);
     const owner = getOwnerOpenId(larkAppId);
     if (!operatorOpenId || operatorOpenId !== owner) {
       logger.info(`Land action "${value.action}" blocked for non-owner: ${operatorOpenId}`);
-      return { toast: { type: 'error', content: '仅 owner 可操作落盘' } };
+      return { toast: { type: 'error', content: t('card.land.toast_owner_only', undefined, loc) } };
     }
     if (value.action === 'land_discard') {
-      return JSON.parse(buildLandResultCard('discarded', ''));
+      return JSON.parse(buildLandResultCard('discarded', '', loc));
     }
     const sid: string = value.sessionId;
     const wd: string = value.workingDir;
-    if (!sid || !wd) return JSON.parse(buildLandResultCard('failed', '卡片缺少会话信息（可能是旧卡），请在会话里重新发 /land。'));
+    if (!sid || !wd) return JSON.parse(buildLandResultCard('failed', t('card.land.stale', undefined, loc), loc));
     const d = computeSandboxDiff(config.session.dataDir, sid);
-    if (!d.ok) return JSON.parse(buildLandResultCard('failed', d.error));
-    if (d.empty) return JSON.parse(buildLandResultCard('discarded', '沙盒副本已无改动。'));
+    if (!d.ok) return JSON.parse(buildLandResultCard('failed', d.error, loc));
+    if (d.empty) return JSON.parse(buildLandResultCard('discarded', '', loc));
     const a = applySandboxDiff(wd, d.patch);
-    if (!a.ok) return JSON.parse(buildLandResultCard('failed', a.error));
+    if (!a.ok) return JSON.parse(buildLandResultCard('failed', a.error, loc));
     logger.info(`Land applied: ${d.files} files (+${d.insertions}/-${d.deletions}) → ${wd}`);
-    return JSON.parse(buildLandResultCard('applied', `已把 ${d.files} 个文件的改动（+${d.insertions}/-${d.deletions}）应用到 \`${wd}\`。`));
+    return JSON.parse(buildLandResultCard('applied', t('card.land.applied_body', { files: d.files, ins: d.insertions, del: d.deletions, dir: wd }, loc), loc));
   }
   // ─── 群内授权卡片动作（grant_chat / grant_global / grant_deny，talk-only）─────
   // 不绑定 session，必须在 session 解析之前处理。owner 强闸门 + nonce 校验。

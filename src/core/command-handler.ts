@@ -861,13 +861,13 @@ export async function handleCommand(
         if (!ds) { await sessionReply(rootId, t('cmd.no_active_session', undefined, loc)); break; }
         const sid = ds.session.sessionId;
         const wd = ds.session.workingDir;
-        if (!wd) { await sessionReply(rootId, '会话没有 workingDir，无法确定落盘目标。'); break; }
+        if (!wd) { await sessionReply(rootId, t('cmd.land.no_workingdir', undefined, loc)); break; }
         const d = computeSandboxDiff(config.session.dataDir, sid);
-        if (!d.ok) { await sessionReply(rootId, `无法落盘：${d.error}`); break; }
-        if (d.empty) { await sessionReply(rootId, '沙盒副本没有改动，无需落盘。'); break; }
+        if (!d.ok) { await sessionReply(rootId, t('cmd.land.cannot', { error: d.error }, loc)); break; }
+        if (d.empty) { await sessionReply(rootId, t('cmd.land.empty', undefined, loc)); break; }
         const lines = d.patch.split('\n');
-        const preview = lines.slice(0, 40).join('\n') + (lines.length > 40 ? '\n…（diff 太长已截断，完整 diff 见 dashboard）' : '');
-        const card = buildLandCard({ sessionId: sid, workingDir: wd, statText: d.statText, files: d.files, insertions: d.insertions, deletions: d.deletions, preview });
+        const preview = lines.slice(0, 40).join('\n') + (lines.length > 40 ? '\n…' : '');
+        const card = buildLandCard({ sessionId: sid, workingDir: wd, statText: d.statText, files: d.files, insertions: d.insertions, deletions: d.deletions, preview }, loc);
         await sessionReply(rootId, card, 'interactive');
         logger.info(`[${logTag}] /land: ${d.files} files (+${d.insertions}/-${d.deletions}) → review card`);
         break;
