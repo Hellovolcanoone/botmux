@@ -166,7 +166,7 @@ export default defineConfig({
   search: { codeBlocks: true },
   markdown: { link: { checkDeadLinks: true } },
   builderConfig: {
-    output: { assetPrefix: "https://cdn.jsdelivr.net/gh/deepcoldy/botmux@docs-assets-v14/" },
+    output: { assetPrefix: "https://cdn.jsdelivr.net/gh/deepcoldy/botmux@docs-assets-v15/" },
   },
   themeConfig: {
     editLink: {
