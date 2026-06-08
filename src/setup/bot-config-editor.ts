@@ -43,6 +43,7 @@ const CLI_DISPLAY_LABELS: Record<CliId, string> = {
   'traex': 'TRAE',
   'pi': 'Pi',
   'copilot': 'Copilot',
+  'oh-my-pi': 'OMP',
 };
 
 /**
