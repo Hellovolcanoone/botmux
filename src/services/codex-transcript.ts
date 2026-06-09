@@ -28,7 +28,7 @@ import { existsSync, statSync, openSync, readSync, closeSync, readdirSync, readl
 import { execSync } from 'node:child_process';
 import { platform } from 'node:os';
 import { join } from 'node:path';
-import { codexSessionsRoot } from './codex-paths.js';
+import { codexHistoryPath, codexSessionsRoot } from './codex-paths.js';
 
 const IS_LINUX = platform() === 'linux';
 
@@ -198,6 +198,49 @@ export function findCodexRolloutBySessionId(cliSessionId: string): string | unde
         return full;
       }
     }
+  }
+  return undefined;
+}
+
+function codexHistoryCliSessionId(parsed: unknown): string | undefined {
+  return parsed && typeof parsed === 'object' && typeof (parsed as any).session_id === 'string'
+    ? (parsed as any).session_id
+    : undefined;
+}
+
+/** Find the newest Codex session whose history entry includes a botmux
+ *  session id. Fresh dashboard rows often only know botmux's UUID; Codex's
+ *  rollout filename uses its own UUID, and history.jsonl is the durable bridge
+ *  between the two. */
+export function findCodexSessionIdByBotmuxSessionId(botmuxSessionId: string): string | undefined {
+  if (!botmuxSessionId) return undefined;
+  const historyPath = codexHistoryPath();
+  if (!existsSync(historyPath)) return undefined;
+  try {
+    const size = statSync(historyPath).size;
+    const fd = openSync(historyPath, 'r');
+    const buf = Buffer.alloc(size);
+    try {
+      readSync(fd, buf, 0, size, 0);
+    } finally {
+      closeSync(fd);
+    }
+    const marker = JSON.stringify(botmuxSessionId).slice(1, -1);
+    const lines = buf.toString('utf8').trimEnd().split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!;
+      if (!line.includes(marker)) continue;
+      try {
+        const parsed = JSON.parse(line);
+        if (typeof parsed?.text === 'string' && parsed.text.includes(botmuxSessionId)) {
+          return codexHistoryCliSessionId(parsed);
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return undefined;
   }
   return undefined;
 }

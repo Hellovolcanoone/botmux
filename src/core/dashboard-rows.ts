@@ -11,6 +11,7 @@ import type { CliId } from '../adapters/cli/types.js';
 import { getTerminalAdvertisedPort } from './terminal-url.js';
 import { getBotBrand } from '../bot-registry.js';
 import { type Brand, chatAppLink } from '../im/lark/lark-hosts.js';
+import { getSessionTokenUsage, type SessionTokenUsage } from './cost-calculator.js';
 
 export interface SessionRow {
   sessionId: string;
@@ -48,6 +49,8 @@ export interface SessionRow {
   /** A TUI prompt card is open and waiting for the user's choice.
    *  Feeds the board view's needs-you column. */
   tuiPromptActive?: boolean;
+  /** Native Agent CLI token usage for this session. Null means unavailable. */
+  tokenUsage?: SessionTokenUsage | null;
 }
 
 export function feishuChatLink(chatId: string, brand: Brand = 'feishu'): string {
@@ -70,6 +73,15 @@ function sessionCreatedAtMs(s: Session): number {
 
 export function sessionLastActivityAtMs(s: Session): number {
   return parseSessionTime(s.lastMessageAt) ?? sessionCreatedAtMs(s);
+}
+
+function sessionTokenUsage(s: Session, workingDir?: string): SessionTokenUsage | null {
+  return getSessionTokenUsage({
+    cliId: s.cliId ?? 'unknown',
+    sessionId: s.sessionId,
+    cliSessionId: s.cliSessionId,
+    cwd: workingDir ?? s.workingDir,
+  });
 }
 
 export function composeRowFromActive(ds: DaemonSession): SessionRow {
@@ -100,6 +112,7 @@ export function composeRowFromActive(ds: DaemonSession): SessionRow {
     feishuChatLink: feishuChatLink(ds.chatId, getBotBrand(ds.larkAppId)),
     pendingRepo: !!ds.pendingRepo,
     tuiPromptActive: !!ds.tuiPromptCardId,
+    tokenUsage: sessionTokenUsage(ds.session, ds.workingDir),
   };
 }
 
@@ -122,5 +135,6 @@ export function composeRowFromClosed(s: Session): SessionRow {
     ownerOpenId: s.ownerOpenId,
     webPort: s.webPort ?? null,
     feishuChatLink: feishuChatLink(s.chatId, getBotBrand(s.larkAppId ?? '')),
+    tokenUsage: sessionTokenUsage(s),
   };
 }

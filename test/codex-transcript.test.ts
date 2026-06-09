@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, appendFileSync, rmSync, statSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { drainCodexRollout, codexSessionIdFromRolloutPath, findCodexRolloutBySessionId, splitCodexEventsByCutoff, extractLastCodexTurn, type CodexBridgeEvent } from '../src/services/codex-transcript.js';
+import { drainCodexRollout, codexSessionIdFromRolloutPath, findCodexRolloutBySessionId, findCodexSessionIdByBotmuxSessionId, splitCodexEventsByCutoff, extractLastCodexTurn, type CodexBridgeEvent } from '../src/services/codex-transcript.js';
 
 let dir: string;
 let path: string;
@@ -75,6 +75,28 @@ describe('findCodexRolloutBySessionId', () => {
       mkdirSync(rolloutDir, { recursive: true });
       writeFileSync(rolloutPath, '');
       expect(findCodexRolloutBySessionId(sid)).toBe(rolloutPath);
+    } finally {
+      if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prevCodexHome;
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('findCodexSessionIdByBotmuxSessionId', () => {
+  it('honors CODEX_HOME and returns the newest history entry for a botmux session', () => {
+    const prevCodexHome = process.env.CODEX_HOME;
+    const codexHome = mkdtempSync(join(tmpdir(), 'codex-home-'));
+    const historyPath = join(codexHome, 'history.jsonl');
+    process.env.CODEX_HOME = codexHome;
+    try {
+      writeFileSync(historyPath, [
+        JSON.stringify({ session_id: 'older-codex-sid', text: 'hello <session_id>botmux-sid</session_id>' }),
+        JSON.stringify({ session_id: 'unrelated-codex-sid', text: 'hello another-session' }),
+        JSON.stringify({ session_id: 'newer-codex-sid', text: 'resume <session_id>botmux-sid</session_id>' }),
+      ].join('\n') + '\n');
+
+      expect(findCodexSessionIdByBotmuxSessionId('botmux-sid')).toBe('newer-codex-sid');
     } finally {
       if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = prevCodexHome;

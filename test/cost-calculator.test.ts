@@ -9,7 +9,10 @@ import { join } from 'node:path';
 // ─── Mocks ────────────────────────────────────────────────────────────────
 
 // Mock os.homedir before importing the module under test
-vi.mock('node:os', () => ({ homedir: () => '/home/testuser' }));
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  homedir: () => '/home/testuser',
+}));
 
 // Mock fs so we never touch real disk
 vi.mock('node:fs', async (importOriginal) => {
@@ -26,15 +29,28 @@ vi.mock('../src/utils/logger.js', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));
 
-// expandHome is imported by cost-calculator from session-manager; provide a simple impl
-vi.mock('../src/core/session-manager.js', () => ({
+// expandHome is imported by cost-calculator from working-dir; provide a simple impl
+vi.mock('../src/core/working-dir.js', () => ({
   expandHome: (p: string) => (p.startsWith('~') ? `/home/testuser${p.slice(1)}` : p),
 }));
 
+vi.mock('../src/services/codex-transcript.js', () => ({
+  findCodexRolloutBySessionId: vi.fn(() => undefined),
+  findCodexSessionIdByBotmuxSessionId: vi.fn(() => undefined),
+}));
+
+vi.mock('../src/services/aiden-checkpoints.js', () => ({
+  findAidenLatestCheckpointBySessionId: vi.fn(() => undefined),
+  findAidenLatestCheckpointByBotmuxSessionId: vi.fn(() => undefined),
+}));
+
 import { existsSync, readFileSync } from 'node:fs';
+import { findAidenLatestCheckpointByBotmuxSessionId, findAidenLatestCheckpointBySessionId } from '../src/services/aiden-checkpoints.js';
+import { findCodexRolloutBySessionId, findCodexSessionIdByBotmuxSessionId } from '../src/services/codex-transcript.js';
 import {
   getSessionJsonlPath,
   getSessionCost,
+  getSessionTokenUsage,
   formatNumber,
   type SessionCost,
 } from '../src/core/cost-calculator.js';
@@ -73,6 +89,14 @@ function userLine(text = 'hello'): string {
 beforeEach(() => {
   vi.mocked(existsSync).mockReset();
   vi.mocked(readFileSync).mockReset();
+  vi.mocked(findCodexRolloutBySessionId).mockReset();
+  vi.mocked(findCodexRolloutBySessionId).mockReturnValue(undefined);
+  vi.mocked(findCodexSessionIdByBotmuxSessionId).mockReset();
+  vi.mocked(findCodexSessionIdByBotmuxSessionId).mockReturnValue(undefined);
+  vi.mocked(findAidenLatestCheckpointBySessionId).mockReset();
+  vi.mocked(findAidenLatestCheckpointBySessionId).mockReturnValue(undefined);
+  vi.mocked(findAidenLatestCheckpointByBotmuxSessionId).mockReset();
+  vi.mocked(findAidenLatestCheckpointByBotmuxSessionId).mockReturnValue(undefined);
 });
 
 // ── getSessionJsonlPath ──────────────────────────────────────────────────
@@ -113,6 +137,20 @@ describe('getSessionJsonlPath', () => {
       'projects',
       '-home-testuser-code-repo',
       'sess-1.jsonl',
+    );
+    expect(result).toBe(expectedPath);
+  });
+
+  it('matches Claude project keys by replacing all non-alnum path chars', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+
+    const result = getSessionJsonlPath('sess-2', '/Users/test/.codex/work_trees/repo');
+    const expectedPath = join(
+      '/home/testuser',
+      '.claude',
+      'projects',
+      '-Users-test--codex-work-trees-repo',
+      'sess-2.jsonl',
     );
     expect(result).toBe(expectedPath);
   });
@@ -304,6 +342,219 @@ describe('getSessionCost', () => {
     const cost = getSessionCost('s13', '/tmp')!;
     expect(cost.turns).toBe(1);
     expect(cost.inputTokens).toBe(10);
+  });
+});
+
+// ── getSessionTokenUsage ─────────────────────────────────────────────────
+
+describe('getSessionTokenUsage', () => {
+  function setupJsonl(content: string) {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(content);
+  }
+
+  it('reports dashboard token in/out from native Claude usage, including cache input tokens', () => {
+    setupJsonl([
+      assistantLine({ input: 100, output: 50, cacheRead: 10, cacheCreate: 5, model: 'claude-sonnet-4-20250514' }),
+      assistantLine({ input: 200, output: 80, cacheRead: 20, cacheCreate: 7 }),
+    ].join('\n'));
+
+    expect(getSessionTokenUsage({
+      cliId: 'claude-code',
+      sessionId: 's1',
+      cwd: '/tmp',
+    })).toEqual({
+      in: 342,
+      out: 130,
+      inputTokens: 300,
+      outputTokens: 130,
+      cacheReadTokens: 30,
+      cacheCreateTokens: 12,
+      turns: 2,
+      model: 'claude-sonnet-4-20250514',
+    });
+  });
+
+  it('returns null when an Agent CLI has no native token usage available', () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+
+    expect(getSessionTokenUsage({
+      cliId: 'gemini',
+      sessionId: 's1',
+      cwd: '/tmp',
+    })).toBeNull();
+  });
+
+  it('reports Codex token_count totals without double-counting cached input', () => {
+    vi.mocked(findCodexSessionIdByBotmuxSessionId).mockReturnValue('codex-sid');
+    vi.mocked(findCodexRolloutBySessionId).mockReturnValue('/home/testuser/.codex/sessions/rollout-codex-sid.jsonl');
+    setupJsonl([
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: {
+              input_tokens: 100,
+              cached_input_tokens: 40,
+              output_tokens: 20,
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: {
+              input_tokens: 150,
+              cached_input_tokens: 60,
+              output_tokens: 30,
+            },
+          },
+        },
+      }),
+    ].join('\n'));
+
+    expect(getSessionTokenUsage({
+      cliId: 'codex',
+      sessionId: 'botmux-sid',
+    })).toEqual({
+      in: 150,
+      out: 30,
+      inputTokens: 150,
+      outputTokens: 30,
+      cacheReadTokens: 60,
+      cacheCreateTokens: 0,
+      turns: 0,
+      model: '',
+    });
+    expect(findCodexSessionIdByBotmuxSessionId).toHaveBeenCalledWith('botmux-sid');
+    expect(findCodexRolloutBySessionId).toHaveBeenCalledWith('codex-sid');
+  });
+
+  it('reports CoCo nested response_meta usage without counting agent_end duplicates', () => {
+    setupJsonl([
+      JSON.stringify({
+        message: {
+          message: {
+            role: 'assistant',
+            response_meta: {
+              finish_reason: 'tool_calls',
+              usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+            },
+            extra: { _source_model: 'openrouter-2o' },
+          },
+        },
+      }),
+      JSON.stringify({
+        agent_end: {
+          output: {
+            response_meta: {
+              usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        message: {
+          message: {
+            role: 'assistant',
+            response_meta: {
+              finish_reason: 'stop',
+              usage: { prompt_tokens: 200, completion_tokens: 30, total_tokens: 230 },
+            },
+            extra: { _source_model: 'openrouter-2o' },
+          },
+        },
+      }),
+    ].join('\n'));
+
+    expect(getSessionTokenUsage({
+      cliId: 'coco',
+      sessionId: 'coco-sid',
+    })).toEqual({
+      in: 300,
+      out: 40,
+      inputTokens: 300,
+      outputTokens: 40,
+      cacheReadTokens: 0,
+      cacheCreateTokens: 0,
+      turns: 2,
+      model: 'openrouter-2o',
+    });
+  });
+
+  it('reports Aiden checkpoint usage_metadata without double-counting cache read', () => {
+    vi.mocked(findAidenLatestCheckpointBySessionId).mockReturnValue('/home/testuser/.aiden/checkpoints/ws/aiden-sid/latest-checkpoint.json');
+    setupJsonl(JSON.stringify({
+      checkpoint: {
+        channel_values: {
+          messages: [
+            {
+              type: 'human',
+              content: 'hello',
+            },
+            {
+              type: 'ai',
+              response_metadata: { model_name: 'aiden-model' },
+              usage_metadata: {
+                input_tokens: 100,
+                output_tokens: 20,
+                total_tokens: 120,
+                input_token_details: { cache_read: 40 },
+              },
+            },
+            {
+              type: 'ai',
+              usage_metadata: {
+                input_tokens: 150,
+                output_tokens: 30,
+                total_tokens: 180,
+                input_token_details: { cache_read: 60 },
+              },
+            },
+          ],
+        },
+      },
+    }));
+
+    expect(getSessionTokenUsage({
+      cliId: 'aiden',
+      sessionId: 'aiden-sid',
+    })).toEqual({
+      in: 250,
+      out: 50,
+      inputTokens: 250,
+      outputTokens: 50,
+      cacheReadTokens: 100,
+      cacheCreateTokens: 0,
+      turns: 2,
+      model: 'aiden-model',
+    });
+    expect(findAidenLatestCheckpointBySessionId).toHaveBeenCalledWith('aiden-sid', undefined, undefined);
+  });
+
+  it('falls back to locating Aiden checkpoint by botmux session id', () => {
+    vi.mocked(findAidenLatestCheckpointByBotmuxSessionId).mockReturnValue('/home/testuser/.aiden/checkpoints/ws/native-sid/checkpoint.json');
+    setupJsonl(JSON.stringify({
+      checkpoint: {
+        channel_values: {
+          messages: [
+            { type: 'ai', usage_metadata: { input_tokens: 10, output_tokens: 5 } },
+          ],
+        },
+      },
+    }));
+
+    expect(getSessionTokenUsage({
+      cliId: 'aiden',
+      sessionId: 'botmux-sid',
+      cwd: '/workspace/current',
+    })?.in).toBe(10);
+    expect(findAidenLatestCheckpointBySessionId).toHaveBeenCalledWith('botmux-sid', undefined, '/workspace/current');
+    expect(findAidenLatestCheckpointByBotmuxSessionId).toHaveBeenCalledWith('botmux-sid', undefined, '/workspace/current');
   });
 });
 
