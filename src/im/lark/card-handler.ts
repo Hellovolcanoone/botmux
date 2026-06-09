@@ -1297,21 +1297,24 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         ds.pendingRepo = false;
         publishAttentionPatch(ds);
         const pendingPrompt = ds.pendingPrompt ?? '';
-        const prompt = buildNewTopicPrompt(
-          pendingPrompt,
-          ds.session.sessionId,
-          effectiveCliId,
-          botCfg.cliPathOverride,
-          ds.pendingAttachments,
-          ds.pendingMentions,
-          await getAvailableBots(ds.larkAppId, ds.chatId),
-          ds.pendingFollowUps,
-          { name: selfBot.botName, openId: selfBot.botOpenId },
-          locDs,
-          ds.pendingSender,
-          { larkAppId: ds.larkAppId, chatId: ds.chatId },
-        );
-        rememberLastCliInput(ds, pendingPrompt, prompt);
+        const pendingRawInput = ds.pendingRawInput;
+        const prompt = pendingRawInput
+          ? ''
+          : buildNewTopicPrompt(
+              pendingPrompt,
+              ds.session.sessionId,
+              effectiveCliId,
+              botCfg.cliPathOverride,
+              ds.pendingAttachments,
+              ds.pendingMentions,
+              await getAvailableBots(ds.larkAppId, ds.chatId),
+              ds.pendingFollowUps,
+              { name: selfBot.botName, openId: selfBot.botOpenId },
+              locDs,
+              ds.pendingSender,
+              { larkAppId: ds.larkAppId, chatId: ds.chatId },
+            );
+        rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? prompt);
         ds.pendingPrompt = undefined;
         ds.pendingAttachments = undefined;
         ds.pendingMentions = undefined;
@@ -1503,20 +1506,23 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       targetDs.pendingRepo = false;
       publishAttentionPatch(targetDs);
       const pendingPrompt = targetDs.pendingPrompt ?? '';
-      const prompt = buildNewTopicPrompt(
-        pendingPrompt,
-        targetDs.session.sessionId,
-        effectiveCliId,
-        botCfg.cliPathOverride,
-        targetDs.pendingAttachments,
-        targetDs.pendingMentions,
-        await getAvailableBots(targetDs.larkAppId, targetDs.chatId),
-        targetDs.pendingFollowUps,
-        { name: selfBot.botName, openId: selfBot.botOpenId },
-        locTarget,
-        targetDs.pendingSender,
-        { larkAppId: targetDs.larkAppId, chatId: targetDs.chatId },
-      );
+      const pendingRawInput = targetDs.pendingRawInput;
+      const prompt = pendingRawInput
+        ? ''
+        : buildNewTopicPrompt(
+            pendingPrompt,
+            targetDs.session.sessionId,
+            effectiveCliId,
+            botCfg.cliPathOverride,
+            targetDs.pendingAttachments,
+            targetDs.pendingMentions,
+            await getAvailableBots(targetDs.larkAppId, targetDs.chatId),
+            targetDs.pendingFollowUps,
+            { name: selfBot.botName, openId: selfBot.botOpenId },
+            locTarget,
+            targetDs.pendingSender,
+            { larkAppId: targetDs.larkAppId, chatId: targetDs.chatId },
+          );
       // Last-line defence: prompt prep awaited above — if anything replaced
       // OR closed the session in that window, forking now would clobber it
       // (or resurrect a /close'd session).
@@ -1524,7 +1530,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         logger.warn(`[${tag(targetDs)}] Session replaced or closed while preparing the pending-CLI prompt (${commitGenSessionId} → ${targetDs.session.sessionId}, active=${sessionStillActive()}) — aborting this fork`);
         return;
       }
-      rememberLastCliInput(targetDs, pendingPrompt, prompt);
+      rememberLastCliInput(targetDs, pendingRawInput ?? pendingPrompt, pendingRawInput ?? prompt);
       targetDs.pendingPrompt = undefined;
       targetDs.pendingAttachments = undefined;
       targetDs.pendingMentions = undefined;

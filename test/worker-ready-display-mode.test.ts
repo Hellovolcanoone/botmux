@@ -283,4 +283,30 @@ describe('Worker ready: set_display_mode re-sync', () => {
     // Flag cleared → a later screen_update will PATCH, not POST a 2nd card.
     expect(ds.streamCardPending).toBe(false);
   });
+
+  it('prompt_ready sends a pending raw slash command once', async () => {
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      worker: fakeWorker,
+      pendingRawInput: '/goal ship the onboarding flow',
+    } as Partial<DaemonSession>);
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'prompt_ready' });
+    await flush();
+
+    expect(fakeWorker.send).toHaveBeenCalledWith({
+      type: 'raw_input',
+      content: '/goal ship the onboarding flow',
+    });
+    expect(ds.pendingRawInput).toBeUndefined();
+
+    fakeWorker.send.mockClear();
+    fakeWorker.emit('message', { type: 'prompt_ready' });
+    await flush();
+
+    expect(fakeWorker.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'raw_input' }),
+    );
+  });
 });

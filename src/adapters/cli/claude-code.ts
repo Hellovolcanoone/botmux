@@ -803,6 +803,7 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
     // `botmux session-ready` 给出「真就绪」信号。worker 据此武装 ready-gate：
     // 收到信号前不投首条 prompt，绕开 cjadk 启动选择器吞首条消息的 bug。
     injectsReadyHook: true,
+    defaultPassthroughCommands: variant.id === 'claude-code' ? ['/goal'] : undefined,
     systemHints: [],
     altScreen: false,
     // Skills are injected per-session via --plugin-dir (see buildArgs), NOT

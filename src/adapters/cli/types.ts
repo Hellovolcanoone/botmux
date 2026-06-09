@@ -228,6 +228,12 @@ export interface CliAdapter {
 
   /** Optional CLI version command override. Defaults to `[resolvedBin, '--version']`. */
   versionCommand?(): { bin: string; args: string[] };
+
+  /** Slash commands this CLI natively supports and botmux should pass through
+   *  by default for this adapter. Unlike the global passthrough allowlist, these
+   *  are scoped to the current CLI so unsupported commands do not leak to other
+   *  adapters. */
+  readonly defaultPassthroughCommands?: readonly string[];
 }
 
 export type CliId = 'claude-code' | 'seed' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr' | 'hermes' | 'mira' | 'traex' | 'pi' | 'copilot' | 'oh-my-pi';

@@ -1775,6 +1775,12 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
 
       case 'prompt_ready': {
         logger.info(`[${t}] ${getCliDisplayName(effectiveCliId)} is ready for input`);
+        if (ds.pendingRawInput && ds.worker && !ds.worker.killed) {
+          const rawInput = ds.pendingRawInput;
+          ds.pendingRawInput = undefined;
+          ds.worker.send({ type: 'raw_input', content: rawInput } as DaemonToWorker);
+          logger.info(`[${t}] Sent pending raw input after prompt_ready: ${rawInput.substring(0, 80)}`);
+        }
         break;
       }
 

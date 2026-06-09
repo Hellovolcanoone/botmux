@@ -52,6 +52,12 @@ export interface DaemonSession {
   repoCardMessageId?: string;    // message_id of the repo selection card — for withdrawal
   worktreeCreating?: boolean;    // a worktree-open is in flight — dedups repeated card clicks / `/repo wt`
   pendingPrompt?: string;        // original user message to send after repo is selected
+  /** One-shot CLI slash command to send literally after the worker reports
+   *  prompt_ready. Used when a new topic starts with an adapter-default
+   *  passthrough command such as `/goal`: the CLI must see raw `/...`, not a
+   *  botmux-wrapped `<user_message>`. In-memory only to avoid replaying after
+   *  daemon restart. */
+  pendingRawInput?: string;
   pendingAttachments?: LarkAttachment[];
   pendingMentions?: LarkMention[];    // @mentions from initial message, used when building prompt after repo selection
   /** Sender (open_id + type + resolved name) of the initial message — stashed

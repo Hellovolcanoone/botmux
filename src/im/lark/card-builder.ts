@@ -391,15 +391,17 @@ function clipDesc(desc?: string): string {
 }
 
 /**
- * Build the `/list-slash-command` card (schema 2.0): a coloured header and three
- * sections — ① fixed passthrough allowlist, ② user-configured custom passthrough,
- * ③ auto-discovered CLI commands/skills/plugins rendered as a paginated native
- * table (command | description). An optional MCP-servers note is appended.
+ * Build the `/list-slash-command` card (schema 2.0): a coloured header and four
+ * sections — ① fixed passthrough allowlist, ② adapter-default passthrough,
+ * ③ user-configured custom passthrough, ④ auto-discovered CLI commands/skills/plugins
+ * rendered as a paginated native table (command | description). An optional MCP
+ * servers note is appended.
  */
 export function buildSlashListCard(
   params: {
     cliName: string;
     builtin: string[];
+    adapterDefaults?: string[];
     custom: string[];
     discovered: { name: string; description?: string }[];
     workingDir: string;
@@ -408,7 +410,7 @@ export function buildSlashListCard(
   },
   locale?: Locale,
 ): string {
-  const { cliName, builtin, custom, discovered, workingDir, mcpServers, discoverySupported = true } = params;
+  const { cliName, builtin, adapterDefaults = [], custom, discovered, workingDir, mcpServers, discoverySupported = true } = params;
   const asCode = (cmds: string[]) => cmds.map((c) => `\`${c}\``).join('  ');
   const elements: any[] = [];
 
@@ -419,7 +421,14 @@ export function buildSlashListCard(
   });
   elements.push({ tag: 'hr' });
 
-  // ② 用户自定义配置
+  // ② 当前 CLI adapter 默认透传
+  elements.push({
+    tag: 'markdown',
+    content: `**${t('slashlist.part_adapter', undefined, locale)}**\n${adapterDefaults.length ? asCode(adapterDefaults) : '—'}`,
+  });
+  elements.push({ tag: 'hr' });
+
+  // ③ 用户自定义配置
   elements.push({
     tag: 'markdown',
     content: `**${t('slashlist.part_custom', undefined, locale)}**\n${
@@ -428,7 +437,7 @@ export function buildSlashListCard(
   });
   elements.push({ tag: 'hr' });
 
-  // ③ 自动发现（命令 / skill / 插件）
+  // ④ 自动发现（命令 / skill / 插件）
   const discHeading = `**${t('slashlist.part_discovered', { cliName }, locale)}**`;
   if (!discoverySupported) {
     elements.push({
