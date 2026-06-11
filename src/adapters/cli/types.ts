@@ -1,9 +1,13 @@
 export interface PtyHandle {
   write(data: string): void;
-  /** Send text literally via tmux send-keys -l (tmux mode only). */
-  sendText?(text: string): void;
-  /** Send special keys via tmux send-keys, e.g. 'Enter', 'Escape', 'C-c' (tmux mode only). */
-  sendSpecialKeys?(...keys: string[]): void;
+  /** Send text literally via tmux send-keys -l (tmux mode only).
+   *  Returns `false` when the write was dropped (e.g. send-keys failed while the
+   *  pane is still alive) so callers can surface a non-submission; `void`/`true`
+   *  means the write was issued. Backends that can't tell return void. */
+  sendText?(text: string): void | boolean;
+  /** Send special keys via tmux send-keys, e.g. 'Enter', 'Escape', 'C-c' (tmux mode only).
+   *  Returns `false` on a dropped write (see sendText). */
+  sendSpecialKeys?(...keys: string[]): void | boolean;
   /** Paste text via tmux load-buffer + paste-buffer (auto-brackets if terminal supports it). */
   pasteText?(text: string): void;
   /** Absolute path to Claude Code's session JSONL; set by worker for claude-code adapter.
