@@ -280,9 +280,9 @@ export function recordSessionUsage(args: RecordSessionUsageArgs): UsageLedgerRec
       // The epoch bump keeps a later identical totals transition from reusing
       // a pre-reset recordId.
       baseline.epoch = prevEpoch + 1;
+      sessionBaselineMemory.set(baselineMemoryKey(args.larkAppId, args.sessionId), baseline);
       state.sessions[args.sessionId] = baseline;
       saveState(dir, args.larkAppId, state, now);
-      sessionBaselineMemory.set(baselineMemoryKey(args.larkAppId, args.sessionId), baseline);
       return null;
     }
     if (deltaInput === 0 && deltaOutput === 0 && deltaCacheRead === 0 && deltaCacheCreate === 0) {
@@ -316,9 +316,11 @@ export function recordSessionUsage(args: RecordSessionUsageArgs): UsageLedgerRec
     // Append first, then advance the baseline: a crash in between replays the
     // same transition with the SAME recordId, which the consumer dedupes.
     appendFileSync(ledgerFilePath(dir, now), JSON.stringify(record) + '\n');
+    // Memory advances immediately after the append: even if saveState throws
+    // without killing the process, this process will not re-bill the interval.
+    sessionBaselineMemory.set(baselineMemoryKey(args.larkAppId, args.sessionId), baseline);
     state.sessions[args.sessionId] = baseline;
     saveState(dir, args.larkAppId, state, now);
-    sessionBaselineMemory.set(baselineMemoryKey(args.larkAppId, args.sessionId), baseline);
     return record;
   } catch (err: any) {
     // The ledger must never take the daemon down with it.
@@ -352,9 +354,9 @@ export function anchorSessionUsage(args: RecordSessionUsageArgs): void {
       // collide with recordIds from before it.
       epoch: (prev?.epoch ?? 0) + 1,
     };
+    sessionBaselineMemory.set(baselineMemoryKey(args.larkAppId, args.sessionId), baseline);
     state.sessions[args.sessionId] = baseline;
     saveState(dir, args.larkAppId, state, now);
-    sessionBaselineMemory.set(baselineMemoryKey(args.larkAppId, args.sessionId), baseline);
   } catch (err: any) {
     logger.error(`usage-ledger: failed to anchor session baseline: ${err?.message ?? err}`);
   }
