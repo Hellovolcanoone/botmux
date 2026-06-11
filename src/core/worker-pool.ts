@@ -34,6 +34,7 @@ import { composeRowFromActive, composeRowFromClosed } from './dashboard-rows.js'
 import { publishAttentionPatch } from './session-activity.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import { emitSessionLifecycleHook, emitSessionStateTransitionHook } from '../services/session-lifecycle-hooks.js';
+import { anchorUsageForDaemonSession, recordUsageForDaemonSession, reconcileUsageForDaemonSession } from '../services/usage-ledger.js';
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
 import { sessionKey, sessionAnchorId, type DaemonSession } from './types.js';
@@ -1078,6 +1079,9 @@ export async function closeSession(
   // 生命周期内永久占位（restartCounts 此前无任何 delete）。
   restartCounts.delete(sessionId);
   if (ds) {
+    // Usage ledger: flush the final delta before the worker goes away (a
+    // crash/limited turn may never have reached an idle edge).
+    recordUsageForDaemonSession(ds);
     killWorker(ds);
     activeSessionsRegistry?.delete(sessionKey(sessionAnchorId(ds), ds.larkAppId));
     killedLive = true;
@@ -1554,6 +1558,12 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
     reason: resume ? 'resume' : 'worker_spawn',
     pid: worker.pid ?? null,
   });
+  // Usage ledger: fresh spawns anchor the baseline so pre-existing transcript
+  // history is never billed. Restores reconcile instead — an in-flight turn
+  // may have completed inside tmux while the daemon was down, and that work
+  // was submitted by botmux (anchoring would swallow it).
+  if (resume) reconcileUsageForDaemonSession(ds);
+  else anchorUsageForDaemonSession(ds);
 }
 
 // ─── Shared worker IPC handler ──────────────────────────────────────────────
@@ -1801,6 +1811,11 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
             source: 'screen_update',
             content: msg.content,
           });
+          // Usage ledger: idle/limited edges are turn boundaries — append the
+          // token delta accrued during the turn that just finished.
+          if (ds.lastScreenStatus === 'idle' || ds.lastScreenStatus === 'limited') {
+            recordUsageForDaemonSession(ds);
+          }
         }
 
         // Bot opted out of the streaming card — dashboard SSE above already got
@@ -2486,6 +2501,8 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     pid: worker.pid ?? null,
     adoptedFrom: adopted.tmuxTarget,
   });
+  // Adopted CLIs come with pre-botmux history — anchor it out of the ledger.
+  anchorUsageForDaemonSession(ds);
 }
 
 // ─── Kill stale PIDs ────────────────────────────────────────────────────────

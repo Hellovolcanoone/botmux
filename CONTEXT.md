@@ -26,6 +26,15 @@ cache read/create tokens when the CLI reports them; Token Out is the native
 output-side total. Botmux does not estimate token counts from message text.
 _Avoid_: token estimate, cost estimate
 
+**Usage Ledger**:
+Append-only daily JSONL files under `~/.botmux/usage/` recording per-turn
+**Token Usage** deltas per **Session**. Each record is a self-describing JSON
+line (recordId, ts, session/bot/chat context, caller open_id, token deltas
+plus cumulative totals). Baselines are anchored at worker spawn so resumed or
+pre-botmux transcript history is never recorded. External trackers (e.g.
+kaboo) consume this directory; botmux never uploads it anywhere itself.
+_Avoid_: usage log, billing database
+
 ## Example Dialogue
 
 Dev: "This Bot uses Codex as its Agent CLI."

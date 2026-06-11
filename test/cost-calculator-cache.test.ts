@@ -122,6 +122,22 @@ describe('readSessionTokenUsageFile caching', () => {
     expect(second).toMatchObject({ turns: 3, inputTokens: 301, outputTokens: 31 });
   });
 
+  it('fresh:true bypasses the reparse throttle but keeps incremental folding', () => {
+    const p = join(dir, 's.jsonl');
+    writeFileSync(p, `${claudeLine('msg_a', 100, 10)}\n`);
+    const first = readSessionTokenUsageFile(p, 'claude');
+    expect(first).toMatchObject({ turns: 1 });
+
+    appendFileSync(p, `${claudeLine('msg_b', 200, 20)}\n`);
+    now += 5_000; // inside the throttle window
+    // Default read serves the stale cache; a fresh read must not.
+    expect(readSessionTokenUsageFile(p, 'claude')).toBe(first);
+    expect(readSessionTokenUsageFile(p, 'claude', { fresh: true })).toMatchObject({
+      turns: 2,
+      inputTokens: 300,
+    });
+  });
+
   it('keeps codex cumulative semantics across incremental reads', () => {
     const p = join(dir, 'rollout.jsonl');
     writeFileSync(p, `${codexCountLine(100, 20)}\n`);
