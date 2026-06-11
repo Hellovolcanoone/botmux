@@ -469,7 +469,6 @@ export function renderSessionsPage(root: HTMLElement) {
     return `<article class="kanban-card" data-id="${escapeHtml(s.sessionId)}" tabindex="0" role="button" draggable="true">
       <div class="kanban-card-top">
         <span class="badge cli-${cssToken(s.cliId)}">${escapeHtml(s.cliId ?? 'unknown')}</span>
-        <span class="kanban-card-id" title="${escapeHtml(s.sessionId)}">#${escapeHtml(String(s.sessionId).slice(0, 8))}</span>
         ${s.adopt ? '<span class="badge">adopt</span>' : ''}
         <span class="kanban-card-top-right">
           <span class="kanban-card-dot" data-status="${escapeHtml(status)}" title="${escapeHtml(status)}"></span>

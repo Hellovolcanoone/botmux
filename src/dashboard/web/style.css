@@ -386,7 +386,8 @@ a { color: inherit; }
 
 main {
   width: 100%;
-  max-width: 1480px;
+  /* 不设上限：收起侧栏腾出的宽度交还内容区（看板/表格都按容器弹性布局）。 */
+  max-width: none;
   padding: 24px;
 }
 
@@ -1343,19 +1344,6 @@ button.primary {
   min-width: 0;
 }
 
-.kanban-card-id {
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
-  white-space: nowrap;
-  /* top 行空间不够时（CLI 徽章 + adopt 徽章 + 状态点 + 两个按钮）牺牲短 ID，
-     让它收缩截断，别把右侧按钮挤出卡片。 */
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* CLI 徽章别折行（claude-code 之类带连字符的会被 280px 卡片拆成两行） */
 .kanban-card-top .badge {
   white-space: nowrap;
@@ -1479,9 +1467,9 @@ button.primary {
 
 /* ── 页面内终端弹窗（看板卡片点击落点）───────────────────────────────────── */
 .term-modal {
-  width: min(1100px, 94vw);
-  height: min(78vh, 820px);
-  max-height: calc(100vh - 32px);
+  width: min(1560px, 96vw);
+  height: min(88vh, 1100px);
+  max-height: calc(100vh - 24px);
   padding: 0;
   overflow: hidden;
 }
