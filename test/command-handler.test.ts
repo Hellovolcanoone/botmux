@@ -333,7 +333,7 @@ vi.mock('../src/services/card-mode-store.js', () => ({
 
 // ─── Imports (after mocks) ──────────────────────────────────────────────────
 
-import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, handleCommand, handleCardCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from '../src/core/command-handler.js';
+import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, resolvePassthroughCommands, handleCommand, handleCardCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from '../src/core/command-handler.js';
 import { setCardMode } from '../src/services/card-mode-store.js';
 import { writeTeamRoleFile, deleteTeamRoleFile, resolveRole } from '../src/core/role-resolver.js';
 import { setBotCapability, clearBotCapability } from '../src/services/bot-profile-store.js';
@@ -587,6 +587,12 @@ describe('PASSTHROUGH_COMMANDS set', () => {
     for (const cmd of PASSTHROUGH_COMMANDS) {
       expect(DAEMON_COMMANDS.has(cmd), `${cmd} must not be in both sets`).toBe(false);
     }
+  });
+
+  it('keeps /goal out of the global passthrough list but enables it for Claude and Codex adapters', () => {
+    expect(PASSTHROUGH_COMMANDS.has('/goal')).toBe(false);
+    expect(resolvePassthroughCommands('app-1').has('/goal')).toBe(true);
+    expect(resolvePassthroughCommands('app-2').has('/goal')).toBe(true);
   });
 });
 
@@ -1288,6 +1294,50 @@ describe('handleCommand', () => {
       expect((buildNewTopicPrompt as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('帮我看看这个 bug');
       expect(forkWorker).toHaveBeenCalledWith(ds, 'WRAPPED:帮我看看这个 bug');
       expect(ds.pendingRepo).toBe(false);
+    });
+
+    it('raw-input cold start boots idle and leaves pendingRawInput for prompt_ready', async () => {
+      // /goal cold start → repo card → bare /repo skip: the raw command must
+      // NOT be wrapped into a prompt; it stays on ds.pendingRawInput and the
+      // prompt_ready handler delivers it literally.
+      const ds = makeDaemonSession({ pendingRepo: true, pendingPrompt: '', pendingRawInput: '/goal 发布 onboarding' });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
+
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', false);
+      expect(buildNewTopicPrompt).not.toHaveBeenCalled();
+      expect(ds.pendingRawInput).toBe('/goal 发布 onboarding');
+      expect(ds.pendingFollowUpInput).toBeUndefined();
+    });
+
+    it('raw-input cold start wraps follow-ups buffered during repo wait into pendingFollowUpInput', async () => {
+      // /goal cold start → repo card pending → user keeps typing (buffered in
+      // pendingFollowUps) → bare /repo skips the card. The buffered messages
+      // must be wrapped and stashed for delivery after the raw input — not
+      // silently dropped.
+      const ds = makeDaemonSession({
+        pendingRepo: true,
+        pendingPrompt: '',
+        pendingRawInput: '/goal 发布 onboarding',
+        pendingFollowUps: ['对了顺手看下 CI', '别忘了更新 changelog'],
+      });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
+
+      expect(forkWorker).toHaveBeenCalledWith(ds, '', false);
+      // Wrapped via buildNewTopicPrompt (mock → `WRAPPED:<pendingPrompt>`),
+      // follow-ups passed through as the 8th arg.
+      expect(buildNewTopicPrompt).toHaveBeenCalled();
+      expect((buildNewTopicPrompt as ReturnType<typeof vi.fn>).mock.calls[0][7])
+        .toEqual(['对了顺手看下 CI', '别忘了更新 changelog']);
+      expect(ds.pendingFollowUpInput).toEqual({
+        userPrompt: '对了顺手看下 CI\n\n别忘了更新 changelog',
+        cliInput: 'WRAPPED:',
+      });
+      expect(ds.pendingRawInput).toBe('/goal 发布 onboarding');
+      expect(ds.pendingFollowUps).toBeUndefined();
     });
 
     it('should report an invalid workingDir and not spawn (keeps pending for recovery)', async () => {

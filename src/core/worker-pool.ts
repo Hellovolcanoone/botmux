@@ -13,7 +13,7 @@ import { hookCommandFor } from '../adapters/hook-command.js';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 import * as sessionStore from '../services/session-store.js';
-import { persistStreamCardState } from './session-manager.js';
+import { persistStreamCardState, rememberLastCliInput } from './session-manager.js';
 import { updateMessage, deleteMessage, sendEphemeralCard, sendUserMessage, addReaction, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildRelayedFrozenCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
@@ -1775,6 +1775,24 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
 
       case 'prompt_ready': {
         logger.info(`[${t}] ${getCliDisplayName(effectiveCliId)} is ready for input`);
+        if (ds.pendingRawInput && ds.worker && !ds.worker.killed) {
+          const rawInput = ds.pendingRawInput;
+          ds.pendingRawInput = undefined;
+          // Input buffered while the repo card was pending rides on the SAME
+          // IPC: worker message handlers run concurrently (async handlers
+          // don't serialize), so a separate `message` IPC could write into
+          // the PTY during raw_input's 200ms text→Enter beat. The worker
+          // enqueues followUpContent only after the Enter landed.
+          const followUp = ds.pendingFollowUpInput;
+          ds.pendingFollowUpInput = undefined;
+          ds.worker.send({
+            type: 'raw_input',
+            content: rawInput,
+            followUpContent: followUp?.cliInput,
+          } as DaemonToWorker);
+          logger.info(`[${t}] Sent pending raw input after prompt_ready: ${rawInput.substring(0, 80)}${followUp ? ` (+follow-up ${followUp.cliInput.length} chars)` : ''}`);
+          if (followUp) rememberLastCliInput(ds, followUp.userPrompt, followUp.cliInput);
+        }
         break;
       }
 

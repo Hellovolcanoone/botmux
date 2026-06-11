@@ -4565,6 +4565,14 @@ process.on('message', async (raw: unknown) => {
         isPromptReady = false;
         idleDetector?.reset();
         log(`Passthrough slash command: ${msg.content}`);
+        // Follow-up rides on the SAME IPC (see DaemonToWorker.raw_input) so it
+        // cannot race the 200ms text→Enter window above. Enqueue only after the
+        // Enter landed: sendToPty queues it as the next turn (type-ahead /
+        // pendingMessages), exactly like a Lark message arriving while busy.
+        if (msg.followUpContent) {
+          sendToPty(msg.followUpContent);
+          log(`Enqueued follow-up after raw input (${msg.followUpContent.length} chars)`);
+        }
       }
       break;
     }

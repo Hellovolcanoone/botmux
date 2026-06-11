@@ -60,7 +60,7 @@ import {
 } from './core/worker-pool.js';
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
-import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, resolvePassthroughCommands, handleCommand, handleCardCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
+import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
 import type { CommandHandlerDeps } from './core/command-handler.js';
 import { findInheritablePeer } from './core/inherit-peer.js';
 import { isCallbackUrl, handleCallbackUrl } from './utils/user-token.js';
@@ -2040,6 +2040,116 @@ async function replyInvalidWorkingDirs(
   return true;
 }
 
+function isInitialSessionPassthrough(larkAppId: string, cmd: string): boolean {
+  return resolveAdapterDefaultPassthroughCommands(larkAppId).includes(cmd);
+}
+
+async function startInitialPassthroughSession(args: {
+  larkAppId: string;
+  chatId: string;
+  chatType: 'group' | 'p2p';
+  scope: 'thread' | 'chat';
+  anchor: string;
+  messageId: string;
+  replyRootId?: string;
+  parsed: LarkMessage;
+  commandContent: string;
+  senderOpenId?: string;
+  /** Ownership is the CALLER's call — required fields, no sender fallback.
+   *  A bot-started cold start must pass undefined (mirrors the auto-create
+   *  path): a foreign-bot owner makes daemon-generated footers wake that bot
+   *  again and leaks owner-gated surfaces (restart/report/cards) to a bot. */
+  ownerOpenId: string | undefined;
+  ownerUnionId: string | undefined;
+  creatorOpenId: string | undefined;
+}): Promise<void> {
+  const {
+    larkAppId, chatId, chatType, scope, anchor, messageId, replyRootId,
+    parsed, commandContent, senderOpenId, ownerOpenId, ownerUnionId, creatorOpenId,
+  } = args;
+  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor)) {
+    return;
+  }
+
+  const botCfg = getBot(larkAppId).config;
+  refreshCliVersion(botCfg.cliId, botCfg.cliPathOverride);
+  const rootIdForStore = scope === 'thread' ? anchor : messageId;
+  const session = sessionStore.createSession(chatId, rootIdForStore, commandContent.substring(0, 50), chatType);
+  const now = Date.now();
+  session.larkAppId = larkAppId;
+  session.ownerOpenId = ownerOpenId;
+  session.creatorOpenId = creatorOpenId;
+  session.ownerUnionId = ownerUnionId;
+  session.lastCallerOpenId = senderOpenId;
+  session.quoteTargetId = parsed.messageId;
+  session.quoteTargetSenderOpenId = senderOpenId;
+  session.quoteTargetSenderIsBot = parsed.senderType === 'app' || parsed.senderType === 'bot';
+  session.lastMessageAt = new Date(now).toISOString();
+  session.scope = scope;
+  sessionStore.updateSession(session);
+  messageQueue.ensureQueue(anchor);
+  messageQueue.appendMessage(anchor, { ...parsed, content: commandContent });
+
+  const { pinnedWorkingDir, oncallEntry, inheritedFrom } = await resolvePinnedWorkingDir({ scope, anchor, chatId, chatType, larkAppId });
+  const ds: DaemonSession = {
+    session,
+    worker: null,
+    workerPort: null,
+    workerToken: null,
+    larkAppId,
+    chatId,
+    chatType,
+    scope,
+    spawnedAt: Date.parse(session.createdAt) || now,
+    cliVersion: cliVersionCache.get(botCfg.cliId)?.version ?? 'unknown',
+    lastMessageAt: now,
+    hasHistory: false,
+    pendingRepo: !pinnedWorkingDir,
+    pendingPrompt: '',
+    pendingRawInput: commandContent,
+    ownerOpenId,
+    currentTurnTitle: commandContent.substring(0, 50),
+    workingDir: pinnedWorkingDir,
+  };
+  if (pinnedWorkingDir) {
+    ds.session.workingDir = pinnedWorkingDir;
+    sessionStore.updateSession(ds.session);
+  }
+  beginReplyTargetTurn(ds, replyRootId, messageId);
+  sessionStore.updateSession(ds.session);
+  activeSessions.set(sessionKey(anchor, larkAppId), ds);
+
+  if (pinnedWorkingDir) {
+    if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
+    rememberLastCliInput(ds, commandContent, commandContent);
+    forkWorker(ds, '', false);
+    const reason = oncallEntry
+      ? `oncall-bound chat ${chatId}`
+      : inheritedFrom
+      ? `inherited from sibling session ${inheritedFrom.sessionId.substring(0, 8)} (app=${inheritedFrom.larkAppId ?? 'unknown'})`
+      : `bot defaultWorkingDir`;
+    logger.info(`[${tag(ds)}] ${reason} → workingDir=${pinnedWorkingDir}, queued initial raw passthrough ${commandContent.substring(0, 40)}`);
+    return;
+  }
+
+  if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
+  const scanDirs = getProjectScanDirs(ds).filter(d => existsSync(d));
+  const projects = scanDirs.length > 0 ? scanMultipleProjects(scanDirs) : [];
+  if (projects.length > 0) {
+    lastRepoScan.set(chatId, projects);
+    const cardJson = buildRepoSelectCard(projects, getSessionWorkingDir(ds), anchor, localeForBot(larkAppId));
+    ds.repoCardMessageId = await sessionReply(anchor, cardJson, 'interactive', larkAppId);
+    announcePendingRepoSession(ds);
+    logger.info(`[${tag(ds)}] Waiting for repo selection before initial raw passthrough (${projects.length} projects)`);
+    return;
+  }
+
+  ds.pendingRepo = false;
+  rememberLastCliInput(ds, commandContent, commandContent);
+  forkWorker(ds, '', false);
+  logger.info(`[${tag(ds)}] No projects to select, queued initial raw passthrough ${commandContent.substring(0, 40)}`);
+}
+
 async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const { chatId, messageId, chatType, larkAppId, replyRootId } = ctx;
   // scope/anchor are mutable here: `/t` / `/topic` may flip a 普通群 chat-scope
@@ -2143,6 +2253,26 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       return;
     }
     if (resolvePassthroughCommands(larkAppId).has(cmd)) {
+      if (isInitialSessionPassthrough(larkAppId, cmd)) {
+        await startInitialPassthroughSession({
+          larkAppId,
+          chatId,
+          chatType,
+          scope,
+          anchor,
+          messageId,
+          replyRootId,
+          parsed,
+          commandContent,
+          senderOpenId,
+          // New-topic senders are humans here (mirrors the normal new-topic
+          // spawn path, which assigns ownership unconditionally too).
+          ownerOpenId: senderOpenId,
+          ownerUnionId: senderUnionId,
+          creatorOpenId: senderOpenId,
+        });
+        return;
+      }
       await sessionReply(anchor, tr('daemon.cmd_requires_session', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
       return;
     }
@@ -2736,6 +2866,26 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       return;
     }
     if (resolvePassthroughCommands(larkAppId).has(cmd)) {
+      if (!existingDs && threadChatId && isInitialSessionPassthrough(larkAppId, cmd)) {
+        await startInitialPassthroughSession({
+          larkAppId,
+          chatId: threadChatId,
+          chatType: ctxChatType,
+          scope,
+          anchor,
+          messageId: parsed.messageId,
+          replyRootId,
+          parsed,
+          commandContent,
+          senderOpenId: threadSenderOpenId,
+          // Bot-started cold starts get no human owner (mirrors the auto-create
+          // path) — see the ownership note on startInitialPassthroughSession.
+          ownerOpenId: isForeignBot ? undefined : threadSenderOpenId,
+          ownerUnionId: isForeignBot ? undefined : data?.sender?.sender_id?.union_id,
+          creatorOpenId: threadSenderOpenId,
+        });
+        return;
+      }
       // 语义边界（刻意保留，非疏漏）：passthrough（/model /clear /compact 等）按
       // “发给 CLI 的对话输入”处理，因此不过下面 DAEMON_COMMANDS 的 oncall
       // canOperate 闸 —— oncall 放行的就是对话输入，canOperate 只管 botmux

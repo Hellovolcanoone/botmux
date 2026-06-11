@@ -74,21 +74,47 @@ export const PASSTHROUGH_COMMANDS = new Set([
   '/btw',
 ]);
 
+function normalizePassthroughCommand(cmd: unknown): string | null {
+  if (typeof cmd !== 'string') return null;
+  const normalized = cmd.trim().toLowerCase();
+  if (!/^\/[a-z0-9][a-z0-9:_-]*$/.test(normalized)) return null;
+  if (DAEMON_COMMANDS.has(normalized)) return null;
+  return normalized;
+}
+
+export function resolveAdapterDefaultPassthroughCommands(larkAppId?: string): string[] {
+  if (!larkAppId) return [];
+  try {
+    const bot = getBot(larkAppId);
+    const adapter = createCliAdapterSync(bot.config.cliId, bot.config.cliPathOverride);
+    const normalized = (adapter.defaultPassthroughCommands ?? [])
+      .map(normalizePassthroughCommand)
+      .filter((c): c is string => !!c);
+    return [...new Set(normalized)];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Effective passthrough set for a bot: the fixed {@link PASSTHROUGH_COMMANDS}
- * plus the bot's `customPassthroughCommands` (bots.json). Entries that would
- * shadow a botmux daemon command are dropped — daemon commands must keep their
- * daemon semantics, and passthrough is checked BEFORE DAEMON_COMMANDS in the
- * router, so an un-filtered custom `/status` would hijack the daemon's own.
+ * plus adapter-scoped defaults and the bot's `customPassthroughCommands`
+ * (bots.json). Entries that would shadow a botmux daemon command are dropped —
+ * daemon commands must keep their daemon semantics, and passthrough is checked
+ * BEFORE DAEMON_COMMANDS in the router, so an un-filtered custom `/status`
+ * would hijack the daemon's own.
  * Unknown / no bot → falls back to the builtin set unchanged.
  */
 export function resolvePassthroughCommands(larkAppId?: string): Set<string> {
   const effective = new Set(PASSTHROUGH_COMMANDS);
   if (!larkAppId) return effective;
+  for (const c of resolveAdapterDefaultPassthroughCommands(larkAppId)) {
+    effective.add(c);
+  }
   try {
     for (const c of getBot(larkAppId).config.customPassthroughCommands ?? []) {
-      if (DAEMON_COMMANDS.has(c)) continue; // never shadow a daemon command
-      effective.add(c);
+      const normalized = normalizePassthroughCommand(c);
+      if (normalized) effective.add(normalized);
     }
   } catch {
     /* unknown bot — builtin set only */
@@ -1023,6 +1049,7 @@ export async function handleCommand(
           ds!.pendingRepo = false;
           publishAttentionPatch(ds!);
           const pendingPrompt = ds!.pendingPrompt ?? '';
+          const pendingRawInput = ds!.pendingRawInput;
           // Was there an actual buffered user message to deliver? A session
           // launched *via* `/repo` (the command itself is the first message) has
           // none — so boot the CLI idle and let the user's NEXT message be the
@@ -1031,7 +1058,34 @@ export async function handleCommand(
             pendingPrompt.trim().length > 0 ||
             (ds!.pendingAttachments?.length ?? 0) > 0 ||
             (ds!.pendingFollowUps?.length ?? 0) > 0;
-          if (hasBufferedInput) {
+          if (pendingRawInput) {
+            // Messages buffered while the repo card was pending must not be
+            // dropped: wrap them now (full prompt-building context lives here)
+            // and stash for delivery right after the raw input on prompt_ready.
+            if (hasBufferedInput) {
+              const { buildNewTopicPrompt, getAvailableBots } = await import('./session-manager.js');
+              const followUpPrompt = buildNewTopicPrompt(
+                pendingPrompt,
+                ds!.session.sessionId,
+                botCfg.cliId,
+                botCfg.cliPathOverride,
+                ds!.pendingAttachments,
+                ds!.pendingMentions,
+                await getAvailableBots(ds!.larkAppId, ds!.chatId),
+                ds!.pendingFollowUps,
+                { name: selfBot.botName, openId: selfBot.botOpenId },
+                loc,
+                ds!.pendingSender,
+                { larkAppId, chatId: ds!.chatId },
+              );
+              ds!.pendingFollowUpInput = {
+                userPrompt: pendingPrompt || (ds!.pendingFollowUps?.join('\n\n') ?? ''),
+                cliInput: followUpPrompt,
+              };
+            }
+            rememberLastCliInput(ds!, pendingRawInput, pendingRawInput);
+            forkWorker(ds!, '', false);
+          } else if (hasBufferedInput) {
             const { buildNewTopicPrompt, getAvailableBots } = await import('./session-manager.js');
             const prompt = buildNewTopicPrompt(
               pendingPrompt,
@@ -2185,10 +2239,11 @@ export async function handleCommand(
 
       case '/list-slash-command':
       case '/slash': {
-        // 列出本 bot 当前可用的 slash 命令，分三段：
+        // 列出本 bot 当前可用的 slash 命令，分四段：
         //   ① botmux 固定放行的透传白名单（PASSTHROUGH_COMMANDS）
-        //   ② 用户在 bots.json 自定义配置的额外透传命令（customPassthroughCommands）
-        //   ③ 文件系统自动发现的 CLI 自定义命令 / skill / 插件
+        //   ② 当前 CLI adapter 默认透传命令（defaultPassthroughCommands）
+        //   ③ 用户在 bots.json 自定义配置的额外透传命令（customPassthroughCommands）
+        //   ④ 文件系统自动发现的 CLI 自定义命令 / skill / 插件
         // MCP 的 /mcp__<server>__<prompt> 需运行时握手才能枚举，这里仅按 .mcp.json 提示 server 名。
         const botCfg = ds
           ? getBot(ds.larkAppId).config
@@ -2197,6 +2252,7 @@ export async function handleCommand(
         const cliName = getCliDisplayName(cliId);
         const workingDir = getSessionWorkingDir(ds);
         const builtin = [...PASSTHROUGH_COMMANDS];
+        const adapterDefaults = resolveAdapterDefaultPassthroughCommands(larkAppId);
         const custom = botCfg?.customPassthroughCommands ?? [];
         let cliAdapter;
         try {
@@ -2211,7 +2267,7 @@ export async function handleCommand(
         const mcpServers = listMcpServerNames(workingDir);
 
         const card = buildSlashListCard(
-          { cliName, builtin, custom, discovered, workingDir, mcpServers, discoverySupported },
+          { cliName, builtin, adapterDefaults, custom, discovered, workingDir, mcpServers, discoverySupported },
           loc,
         );
         await sessionReply(rootId, card, 'interactive');
