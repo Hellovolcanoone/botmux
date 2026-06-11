@@ -8,7 +8,7 @@
  * Run:  pnpm vitest run test/usage-ledger.test.ts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -26,6 +26,7 @@ import {
   anchorSessionUsage,
   recordUsageForDaemonSession,
   anchorUsageForDaemonSession,
+  reconcileUsageForDaemonSession,
   type UsageLedgerRecord,
 } from '../src/services/usage-ledger.js';
 import type { SessionTokenUsage } from '../src/core/cost-calculator.js';
@@ -102,7 +103,7 @@ describe('recordSessionUsage', () => {
       totalCacheReadTokens: 5,
       totalCacheCreateTokens: 2,
     });
-    expect(rec!.recordId).toMatch(/[0-9a-f-]{36}/);
+    expect(rec!.recordId).toMatch(/^[0-9a-f]{32}$/);
 
     const lines = ledgerLines(dir);
     expect(lines).toHaveLength(1);
@@ -178,6 +179,55 @@ describe('recordSessionUsage', () => {
     const a = recordSessionUsage({ ...baseArgs(), ledgerDir: dir, usage: cumulative(100, 10) });
     const b = recordSessionUsage({ ...baseArgs(), ledgerDir: dir, usage: cumulative(200, 20) });
     expect(a!.recordId).not.toBe(b!.recordId);
+  });
+
+  it('replays of the same baseline→snapshot transition reuse the recordId (crash idempotence)', () => {
+    // Crash window: ledger line appended but state.json never advanced. The
+    // replay recomputes the same delta from the same baseline — it must carry
+    // the SAME recordId so the consumer's DedupKey collapses the duplicate.
+    const a = recordSessionUsage({ ...baseArgs(), ledgerDir: dir, usage: cumulative(100, 10) });
+
+    // Simulate the lost state advance: restore the pre-record state file.
+    const statePath = readdirSync(dir).find((f) => f.startsWith('state'));
+    writeFileSync(join(dir, statePath!), JSON.stringify({ v: 1, sessions: {} }));
+
+    const b = recordSessionUsage({
+      ...baseArgs({ now: new Date('2026-06-10T12:01:00Z') }),
+      ledgerDir: dir,
+      usage: cumulative(100, 10),
+    });
+
+    expect(b!.recordId).toBe(a!.recordId);
+  });
+
+  it('does not reuse recordIds across reset epochs for identical transitions', () => {
+    // 0→(100,10), then shrink-reset, then 0→(100,10) again: same totals pair
+    // but a REAL second delta — the reset epoch must keep the ids distinct.
+    const a = recordSessionUsage({ ...baseArgs(), ledgerDir: dir, usage: cumulative(100, 10) });
+    recordSessionUsage({ ...baseArgs(), ledgerDir: dir, usage: cumulative(0, 0) }); // shrink → re-anchor
+    const b = recordSessionUsage({ ...baseArgs(), ledgerDir: dir, usage: cumulative(100, 10) });
+
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(b!.recordId).not.toBe(a!.recordId);
+  });
+
+  it('keeps per-bot baselines in separate state files', () => {
+    recordSessionUsage({ ...baseArgs({ larkAppId: 'cli_a' }), ledgerDir: dir, usage: cumulative(100, 10) });
+    recordSessionUsage({
+      ...baseArgs({ larkAppId: 'cli_b', sessionId: 'sess-other' }),
+      ledgerDir: dir,
+      usage: cumulative(7, 3),
+    });
+
+    const stateFiles = readdirSync(dir).filter((f) => f.startsWith('state')).sort();
+    expect(stateFiles.some((f) => f.includes('cli_a'))).toBe(true);
+    expect(stateFiles.some((f) => f.includes('cli_b'))).toBe(true);
+
+    // cli_b's write must not clobber cli_a's baseline: the next cli_a record
+    // is still a delta, not a fresh full-cumulative dump.
+    const rec = recordSessionUsage({ ...baseArgs({ larkAppId: 'cli_a' }), ledgerDir: dir, usage: cumulative(150, 12) });
+    expect(rec).toMatchObject({ inputTokens: 50, outputTokens: 2 });
   });
 });
 
@@ -265,5 +315,49 @@ describe('daemon-session wrappers', () => {
     vi.mocked(getSessionTokenUsage).mockReturnValue(cumulative(620, 80));
     const rec = recordUsageForDaemonSession(ds, { ledgerDir: dir });
     expect(rec).toMatchObject({ inputTokens: 120, outputTokens: 30 });
+  });
+});
+
+describe('reconcileUsageForDaemonSession (daemon restart)', () => {
+  const ds = {
+    larkAppId: 'cli_app',
+    workingDir: '/live-repo',
+    session: {
+      sessionId: 'sess-r',
+      cliId: 'claude-code',
+      cliSessionId: 'cli-sess-r',
+      chatId: 'oc_chat',
+      title: '重启恢复',
+      lastCallerOpenId: 'ou_last',
+    },
+  } as any;
+
+  beforeEach(() => {
+    vi.mocked(getSessionTokenUsage).mockReset();
+    vi.mocked(getSessionTokenUsage).mockReturnValue(null);
+  });
+
+  it('records the catch-up delta when a baseline exists (turn finished while daemon was down)', () => {
+    vi.mocked(getSessionTokenUsage).mockReturnValue(cumulative(100, 10));
+    recordUsageForDaemonSession(ds, { ledgerDir: dir });
+
+    // The in-flight turn completed inside tmux during the crash window.
+    vi.mocked(getSessionTokenUsage).mockReturnValue(cumulative(200, 20));
+    const rec = reconcileUsageForDaemonSession(ds, { ledgerDir: dir });
+
+    expect(rec).toMatchObject({ inputTokens: 100, outputTokens: 10 });
+  });
+
+  it('anchors without recording when the session is new to the ledger', () => {
+    vi.mocked(getSessionTokenUsage).mockReturnValue(cumulative(500, 50));
+    expect(reconcileUsageForDaemonSession(ds, { ledgerDir: dir })).toBeNull();
+    expect(readdirSync(dir).filter((f) => f.startsWith('usage-'))).toHaveLength(0);
+
+    // Growth after the anchor is measured from it, not from zero.
+    vi.mocked(getSessionTokenUsage).mockReturnValue(cumulative(600, 70));
+    expect(recordUsageForDaemonSession(ds, { ledgerDir: dir })).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 20,
+    });
   });
 });

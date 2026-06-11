@@ -320,14 +320,20 @@ export function __resetSessionUsageCachesForTest(): void {
 
 /** Memoize a transcript-path lookup. `hitTtlMs === null` means a found path
  *  is trusted forever (rollout/transcript files never move); misses are
- *  always retried after PATH_MISS_RETRY_MS. */
-function cachedPathLookup(key: string, hitTtlMs: number | null, lookup: () => string | null): string | null {
+ *  retried after PATH_MISS_RETRY_MS — or immediately when `retryMiss` is set
+ *  (ledger reads must see lazily created transcripts at turn boundaries). */
+function cachedPathLookup(
+  key: string,
+  hitTtlMs: number | null,
+  lookup: () => string | null,
+  opts?: { retryMiss?: boolean },
+): string | null {
   const now = Date.now();
   const cached = sessionPathCache.get(key);
   if (cached) {
     if (cached.path !== null) {
       if (hitTtlMs === null || now - cached.atMs < hitTtlMs) return cached.path;
-    } else if (now - cached.atMs < PATH_MISS_RETRY_MS) {
+    } else if (!opts?.retryMiss && now - cached.atMs < PATH_MISS_RETRY_MS) {
       return null;
     }
   }
@@ -547,13 +553,13 @@ function tokenUsagePathForSession(q: SessionTokenUsageQuery): string | null {
       return cachedPathLookup(`codex:${q.sessionId}:${q.cliSessionId ?? ''}`, null, () => {
         const codexSid = q.cliSessionId || findCodexSessionIdByBotmuxSessionId(q.sessionId) || q.sessionId;
         return findCodexRolloutBySessionId(codexSid) ?? null;
-      });
+      }, { retryMiss: q.fresh });
     case 'coco':
       return cocoEventsPathForSession(sid);
     case 'cursor':
-      return cachedPathLookup(`cursor:${sid}`, null, () => findCursorTranscriptByChatId(sid) ?? null);
+      return cachedPathLookup(`cursor:${sid}`, null, () => findCursorTranscriptByChatId(sid) ?? null, { retryMiss: q.fresh });
     case 'traex':
-      return cachedPathLookup(`traex:${sid}`, null, () => findTraexRolloutBySessionId(sid) ?? null);
+      return cachedPathLookup(`traex:${sid}`, null, () => findTraexRolloutBySessionId(sid) ?? null, { retryMiss: q.fresh });
     case 'antigravity':
       return q.cliSessionId
         ? join(homedir(), '.gemini', 'antigravity-cli', 'brain', q.cliSessionId, '.system_generated', 'logs', 'transcript.jsonl')
@@ -573,6 +579,7 @@ export function getSessionTokenUsage(q: SessionTokenUsageQuery): SessionTokenUsa
         findAidenLatestCheckpointBySessionId(sid, undefined, q.cwd) ??
         findAidenLatestCheckpointByBotmuxSessionId(q.sessionId, undefined, q.cwd) ??
         null,
+      { retryMiss: q.fresh },
     );
     if (!checkpointPath || !existsSync(checkpointPath)) return null;
     return readSessionTokenUsageFile(checkpointPath, 'aiden', { fresh: q.fresh });

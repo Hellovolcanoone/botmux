@@ -34,7 +34,7 @@ import { composeRowFromActive, composeRowFromClosed } from './dashboard-rows.js'
 import { publishAttentionPatch } from './session-activity.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import { emitSessionLifecycleHook, emitSessionStateTransitionHook } from '../services/session-lifecycle-hooks.js';
-import { anchorUsageForDaemonSession, recordUsageForDaemonSession } from '../services/usage-ledger.js';
+import { anchorUsageForDaemonSession, recordUsageForDaemonSession, reconcileUsageForDaemonSession } from '../services/usage-ledger.js';
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
 import { sessionKey, sessionAnchorId, type DaemonSession } from './types.js';
@@ -1558,10 +1558,12 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
     reason: resume ? 'resume' : 'worker_spawn',
     pid: worker.pid ?? null,
   });
-  // Usage ledger: anchor the baseline at spawn so resumed history (or growth
-  // while the daemon was down) is never billed; only turns driven from here
-  // on produce records.
-  anchorUsageForDaemonSession(ds);
+  // Usage ledger: fresh spawns anchor the baseline so pre-existing transcript
+  // history is never billed. Restores reconcile instead — an in-flight turn
+  // may have completed inside tmux while the daemon was down, and that work
+  // was submitted by botmux (anchoring would swallow it).
+  if (resume) reconcileUsageForDaemonSession(ds);
+  else anchorUsageForDaemonSession(ds);
 }
 
 // ─── Shared worker IPC handler ──────────────────────────────────────────────

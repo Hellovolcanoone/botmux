@@ -706,6 +706,28 @@ describe('getSessionTokenUsage', () => {
     }
   });
 
+  it('fresh lookups bypass a cached codex path miss', () => {
+    vi.mocked(findCodexSessionIdByBotmuxSessionId).mockReturnValue(undefined);
+    vi.mocked(findCodexRolloutBySessionId).mockReturnValue(undefined);
+    expect(getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid' })).toBeNull(); // miss now cached
+
+    // The rollout appears moments later (transcripts are created lazily).
+    vi.mocked(findCodexSessionIdByBotmuxSessionId).mockReturnValue('codex-sid');
+    vi.mocked(findCodexRolloutBySessionId).mockReturnValue('/home/testuser/.codex/sessions/rollout-codex-sid.jsonl');
+    setupJsonl(JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 42, output_tokens: 7 } } },
+    }));
+
+    // The dashboard path keeps the negative cache…
+    expect(getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid' })).toBeNull();
+    // …but a fresh (ledger) read must see the newly created transcript.
+    expect(getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid', fresh: true })).toMatchObject({
+      in: 42,
+      out: 7,
+    });
+  });
+
   it('caches the aiden checkpoint lookup briefly', () => {
     vi.mocked(findAidenLatestCheckpointBySessionId).mockReturnValue('/home/testuser/.aiden/checkpoints/ws/aiden-sid/checkpoint.json');
     setupJsonl(JSON.stringify({
