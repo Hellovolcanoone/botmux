@@ -2382,6 +2382,8 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   //   - codex: worker resolves the rollout path either from cliSessionId
   //     (passed below when known) or by reading the Codex pid's open fds
   //     in /proc — so we always pass the pid for codex adopt.
+  //   - traex: same rollout strategy as codex (byte-identical JSONL format),
+  //     only the directory layout (~/.trae/cli/sessions) and finders differ.
   //   - coco: events.jsonl path is `~/.cache/coco/sessions/<sid>/events.jsonl`,
   //     deterministic from cliSessionId. PID is the fallback when discovery
   //     missed (events.jsonl isn't held open continuously, so worker may need
@@ -2413,7 +2415,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   // open store.db fd (chatId), or from cliSessionId (= chatId) when discovery
   // captured it — so adopt must forward the pid + cwd like the other
   // transcript-backed CLIs.
-  const isStructuredBridge = adoptedCliId === 'codex' || adoptedCliId === 'coco' || adoptedCliId === 'mtr' || adoptedCliId === 'cursor';
+  const isStructuredBridge = adoptedCliId === 'codex' || adoptedCliId === 'traex' || adoptedCliId === 'coco' || adoptedCliId === 'mtr' || adoptedCliId === 'cursor';
   const adoptBackendType = adopted.source === 'herdr' ? 'herdr' : adopted.zellijPaneId ? 'zellij' : 'tmux';
 
   const initMsg: DaemonToWorker = {
