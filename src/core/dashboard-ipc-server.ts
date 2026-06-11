@@ -27,7 +27,8 @@ import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners } from './worker-pool.js';
 import { listOnlineDaemons } from '../utils/daemon-discovery.js';
-import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId } from '../im/lark/client.js';
+import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId, listThreadMessages, listChatMessages } from '../im/lark/client.js';
+import { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent } from '../im/lark/message-parser.js';
 import { resumeSession } from './session-manager.js';
 import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { locateLimiter } from './dashboard-locate.js';
@@ -204,6 +205,46 @@ ipcRoute('POST', '/api/sessions/:sessionId/board', async (req, res, params) => {
     },
   });
   jsonRes(res, 200, { ok: true });
+});
+
+// 会话历史：实时拉取该会话所在话题/群的飞书消息（与 botmux history 同链路，
+// 消息体不落盘），给 dashboard 的会话历史弹窗。复杂卡片的「请升级」兜底文本
+// 用 message.get 的完整表示补齐；merge_forward 保持占位符（原型不展开）。
+ipcRoute('GET', '/api/sessions/:sessionId/history', async (req, res, params) => {
+  const session = findSessionRecord(params.sessionId);
+  if (!session) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
+  const appId = session.larkAppId || cachedLarkAppId;
+  if (!appId) return jsonRes(res, 422, { ok: false, error: 'no_lark_app' });
+  const url = new URL(req.url ?? '/', 'http://localhost');
+  const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '80', 10) || 80, 1), 200);
+  try {
+    const raw = session.scope === 'chat'
+      ? await listChatMessages(appId, session.chatId, limit)
+      : await listThreadMessages(appId, session.chatId, session.rootMessageId, limit);
+    const messages = await Promise.all(raw.map(async (m: any) => {
+      const parsed = parseApiMessage(m);
+      if (parsed.msgType === 'interactive' && cardContentHasUpgradeFallback(parsed.content)) {
+        const merged = await resolveMergedCardContent(appId, parsed.messageId).catch(() => null);
+        if (merged) parsed.content = merged.text;
+      }
+      return {
+        messageId: parsed.messageId,
+        senderId: parsed.senderId,
+        senderType: parsed.senderType,
+        msgType: parsed.msgType,
+        content: parsed.content,
+        createTime: parsed.createTime,
+      };
+    }));
+    jsonRes(res, 200, {
+      ok: true,
+      scope: session.scope ?? 'thread',
+      ownerOpenId: session.ownerOpenId,
+      messages,
+    });
+  } catch (err: any) {
+    jsonRes(res, 502, { ok: false, error: String(err?.message ?? err) });
+  }
 });
 
 // 会话重命名：dashboard 看板卡片就地编辑标题。title 只是展示元数据（飞书话题

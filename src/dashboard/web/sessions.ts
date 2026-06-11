@@ -1,10 +1,13 @@
 // Sessions page: filter bar, status board/table, detail drawer with locate/resume/close.
 import {
+  type KanbanGroupBy,
   normalizeSessionsViewMode,
   readStoredBoardOrder,
+  readStoredKanbanGroupBy,
   readStoredSessionsViewMode,
   type SessionsViewMode,
   writeStoredBoardOrder,
+  writeStoredKanbanGroupBy,
   writeStoredSessionsViewMode,
 } from './preferences.js';
 import {
@@ -17,6 +20,7 @@ import { store } from './store.js';
 import {
   botDisplayName,
   botAvatarHtml,
+  chatAvatarHtml,
   chatDisplayTitle,
   attentionWaitSince,
   escapeHtml,
@@ -134,6 +138,7 @@ const ICON = {
   key: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6" cy="6.1" r="3"/><path d="M8.1 8.2 13 13.1"/><path d="M11.3 11.4 12.6 10.1"/><path d="M12.7 12.8 13.7 11.8"/></svg>',
   close: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 4.2 11.8 11.8"/><path d="M11.8 4.2 4.2 11.8"/></svg>',
   edit: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.7 3.3 12.7 5.3 6.3 11.7 3.7 12.3 4.3 9.7 10.7 3.3z"/></svg>',
+  history: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 4.8a2 2 0 0 1 2-2h7.6a2 2 0 0 1 2 2v4.6a2 2 0 0 1-2 2H6.6l-2.9 2.4v-2.4h-.5a2 2 0 0 1-2-2z"/><path d="M5.2 6.2h5.6M5.2 8.4h3.6"/></svg>',
 };
 
 /** Compact icon action button for the card bar. `kind` adds a tint variant. */
@@ -212,10 +217,16 @@ function pageHtml(): string {
         <h1>${t('sessions.title')}</h1>
         <p>${t('sessions.subtitle')}</p>
       </div>
-      <div class="segmented sessions-view-toggle" role="group" aria-label="${t('sessions.viewMode')}">
-        <button type="button" data-view="kanban">${t('sessions.viewKanban')}</button>
-        <button type="button" data-view="board">${t('sessions.viewBoard')}</button>
-        <button type="button" data-view="table">${t('sessions.viewTable')}</button>
+      <div class="sessions-view-controls">
+        <div class="segmented kanban-groupby" id="kanban-groupby" role="group" aria-label="${t('sessions.kanban.groupBy')}" hidden>
+          <button type="button" data-groupby="flow">${t('sessions.kanban.groupFlow')}</button>
+          <button type="button" data-groupby="bot">${t('sessions.kanban.groupBot')}</button>
+        </div>
+        <div class="segmented sessions-view-toggle" role="group" aria-label="${t('sessions.viewMode')}">
+          <button type="button" data-view="kanban">${t('sessions.viewKanban')}</button>
+          <button type="button" data-view="board">${t('sessions.viewBoard')}</button>
+          <button type="button" data-view="table">${t('sessions.viewTable')}</button>
+        </div>
       </div>
     </div>
     <form id="filters" class="filters sessions-filters">
@@ -259,6 +270,7 @@ function pageHtml(): string {
     <div id="sessions-kanban" class="sessions-kanban" hidden></div>
     <dialog id="drawer"></dialog>
     <dialog id="term-modal" class="term-modal"></dialog>
+    <dialog id="history-modal" class="history-modal"></dialog>
   </section>`;
 }
 
@@ -276,6 +288,8 @@ export function renderSessionsPage(root: HTMLElement) {
   const board = root.querySelector<HTMLElement>('#sessions-board')!;
   const kanban = root.querySelector<HTMLElement>('#sessions-kanban')!;
   const termModal = root.querySelector<HTMLDialogElement>('#term-modal')!;
+  const historyModal = root.querySelector<HTMLDialogElement>('#history-modal')!;
+  const groupByBox = root.querySelector<HTMLElement>('#kanban-groupby')!;
   const viewButtons = root.querySelectorAll<HTMLButtonElement>('.sessions-view-toggle [data-view]');
 
   const selected = new Set<string>();
@@ -297,8 +311,11 @@ export function renderSessionsPage(root: HTMLElement) {
   let kanbanEditing = false;
   // 单击开终端 vs 双击改标题的仲裁：单击延迟 220ms 执行，双击先到就取消。
   let kanbanOpenTimer: ReturnType<typeof setTimeout> | null = null;
-  // 上次渲染时每列的有序行 —— drop 落点据此找相邻卡片算持久化位置。
+  // 上次渲染时每列的有序行（聚簇后的视觉平铺顺序）—— drop 落点据此找相邻卡片
+  // 算持久化位置。
   let lastKanbanGroups = new Map<SessionKanbanColumn, any[]>();
+  // 看板分组维度：flow=工作流五列（可拖拽），bot=团队成员列（协作视图，只读）
+  let kanbanGroupBy: KanbanGroupBy = readStoredKanbanGroupBy(window.localStorage);
 
   function orderedBoardColumns() {
     return boardOrder
@@ -472,6 +489,7 @@ export function renderSessionsPage(root: HTMLElement) {
         ${s.adopt ? '<span class="badge">adopt</span>' : ''}
         <span class="kanban-card-top-right">
           <span class="kanban-card-dot" data-status="${escapeHtml(status)}" title="${escapeHtml(status)}"></span>
+          <button type="button" class="card-act kanban-card-act" data-action="history" title="${escapeHtml(t('sessions.history.title'))}" aria-label="${escapeHtml(t('sessions.history.title'))}">${ICON.history}</button>
           <button type="button" class="card-act kanban-card-act" data-action="rename" title="${escapeHtml(t('sessions.kanban.rename'))}" aria-label="${escapeHtml(t('sessions.kanban.rename'))}">${ICON.edit}</button>
           <button type="button" class="card-act kanban-card-act" data-action="details" title="${escapeHtml(t('sessions.details'))}" aria-label="${escapeHtml(t('sessions.details'))}">${ICON.details}</button>
         </span>
@@ -486,33 +504,103 @@ export function renderSessionsPage(root: HTMLElement) {
     </article>`;
   }
 
+  /** 列内同群聚合：≥2 张同 chatId 的卡片折成群组容器（群头像 + 群名 + 计数），
+   *  一眼看出它们关联同一个群/话题群；簇按首个成员出现位置参与列内排序。
+   *  返回聚簇后 HTML 与视觉平铺顺序（drop 落点据此算相邻位置）。 */
+  function clusteredListHtml(columnRows: any[]): { html: string; flat: any[] } {
+    const order: Array<{ chatId: string; rows: any[] }> = [];
+    const byChat = new Map<string, { chatId: string; rows: any[] }>();
+    for (const r of columnRows) {
+      const key = String(r.chatId ?? r.sessionId);
+      let g = byChat.get(key);
+      if (!g) {
+        g = { chatId: key, rows: [] };
+        byChat.set(key, g);
+        order.push(g);
+      }
+      g.rows.push(r);
+    }
+    const flat: any[] = [];
+    const html = order.map(g => {
+      flat.push(...g.rows);
+      if (g.rows.length < 2) return kanbanCardHtml(g.rows[0]);
+      const title = chatDisplayTitle(g.rows[0]) ?? g.chatId;
+      return `<div class="kanban-cluster">
+        <header title="${escapeHtml(title)}">
+          ${chatAvatarHtml({ chatId: g.chatId, name: title, size: 'sm' })}
+          <span class="kanban-cluster-name">${escapeHtml(title)}</span>
+          <span class="kanban-cluster-count">${g.rows.length}</span>
+        </header>
+        ${g.rows.map(kanbanCardHtml).join('')}
+      </div>`;
+    }).join('');
+    return { html, flat };
+  }
+
+  /** 团队模式：列 = 团队里的每个 bot（按名字排序），卡片 = 它名下的活跃会话，
+   *  按最近活跃倒序、同群聚簇。协作总览视图——不支持拖拽（会话不能换 bot）。 */
+  function kanbanByBotHtml(rows: any[]): string {
+    const bots = new Map<string, { name: string; larkAppId: string; rows: any[] }>();
+    for (const r of rows) {
+      if (r.status === 'closed') continue;
+      const key = String(r.larkAppId || r.botName || 'unknown');
+      let b = bots.get(key);
+      if (!b) {
+        b = { name: botDisplayName(r), larkAppId: r.larkAppId, rows: [] };
+        bots.set(key, b);
+      }
+      b.rows.push(r);
+    }
+    const cols = [...bots.values()].sort((a, b) => a.name.localeCompare(b.name));
+    if (!cols.length) return `<div class="kanban-col-empty">${t('sessions.board.emptyColumn')}</div>`;
+    return cols.map(col => {
+      const colRows = col.rows.sort((a, b) => Number(b.lastMessageAt ?? 0) - Number(a.lastMessageAt ?? 0));
+      const { html: listHtml } = clusteredListHtml(colRows);
+      return `<section class="kanban-column kanban-bot-col" data-bot="${escapeHtml(col.larkAppId ?? col.name)}">
+        <header>
+          <span class="kanban-col-avatar">${botAvatarHtml({ name: col.name, larkAppId: col.larkAppId, size: 'sm' })}</span>
+          <h2>${escapeHtml(col.name)}</h2>
+          <span class="kanban-col-count">${colRows.length}</span>
+        </header>
+        <div class="kanban-col-list">${listHtml}</div>
+      </section>`;
+    }).join('');
+  }
+
   function renderKanban(rows: any[]): void {
     // 拖拽/编辑期间冻结 DOM —— innerHTML 重建会拍掉拖拽源和输入框。
     if (kanbanDragId || kanbanEditing) return;
-    const groups = new Map<SessionKanbanColumn, any[]>(KANBAN_COLUMNS.map(c => [c.id, []]));
-    for (const row of rows) groups.get(deriveKanbanColumn(row))!.push(row);
-    const html = KANBAN_COLUMNS.map(column => {
-      let columnRows = (groups.get(column.id) ?? [])
-        .sort((a, b) => effectiveKanbanPosition(a) - effectiveKanbanPosition(b));
-      let hiddenCount = 0;
-      if (column.id === 'done' && columnRows.length > KANBAN_DONE_CAP) {
-        hiddenCount = columnRows.length - KANBAN_DONE_CAP;
-        columnRows = columnRows.slice(0, KANBAN_DONE_CAP);
-      }
-      groups.set(column.id, columnRows);
-      return `<section class="kanban-column kanban-${column.id}" data-col="${column.id}">
-        <header>
-          <span class="kanban-col-icon">${kanbanStatusIcon(column.id)}</span>
-          <h2>${escapeHtml(t(column.labelKey))}</h2>
-          <span class="kanban-col-count">${columnRows.length + hiddenCount}</span>
-        </header>
-        <div class="kanban-col-list">
-          ${columnRows.length ? columnRows.map(kanbanCardHtml).join('') : `<div class="kanban-col-empty">${t('sessions.board.emptyColumn')}</div>`}
-          ${hiddenCount ? `<div class="kanban-col-more">${escapeHtml(t('sessions.kanban.moreHidden', { count: hiddenCount }))}</div>` : ''}
-        </div>
-      </section>`;
-    }).join('');
-    lastKanbanGroups = groups;
+    let html: string;
+    if (kanbanGroupBy === 'bot') {
+      html = kanbanByBotHtml(rows);
+      lastKanbanGroups = new Map(); // 团队模式无拖拽，不需要落点数据
+    } else {
+      const groups = new Map<SessionKanbanColumn, any[]>(KANBAN_COLUMNS.map(c => [c.id, []]));
+      for (const row of rows) groups.get(deriveKanbanColumn(row))!.push(row);
+      html = KANBAN_COLUMNS.map(column => {
+        let columnRows = (groups.get(column.id) ?? [])
+          .sort((a, b) => effectiveKanbanPosition(a) - effectiveKanbanPosition(b));
+        let hiddenCount = 0;
+        if (column.id === 'done' && columnRows.length > KANBAN_DONE_CAP) {
+          hiddenCount = columnRows.length - KANBAN_DONE_CAP;
+          columnRows = columnRows.slice(0, KANBAN_DONE_CAP);
+        }
+        const { html: listHtml, flat } = clusteredListHtml(columnRows);
+        groups.set(column.id, flat);
+        return `<section class="kanban-column kanban-${column.id}" data-col="${column.id}">
+          <header>
+            <span class="kanban-col-icon">${kanbanStatusIcon(column.id)}</span>
+            <h2>${escapeHtml(t(column.labelKey))}</h2>
+            <span class="kanban-col-count">${columnRows.length + hiddenCount}</span>
+          </header>
+          <div class="kanban-col-list">
+            ${columnRows.length ? listHtml : `<div class="kanban-col-empty">${t('sessions.board.emptyColumn')}</div>`}
+            ${hiddenCount ? `<div class="kanban-col-more">${escapeHtml(t('sessions.kanban.moreHidden', { count: hiddenCount }))}</div>` : ''}
+          </div>
+        </section>`;
+      }).join('');
+      lastKanbanGroups = groups;
+    }
     if (html === lastKanbanHtml) return;
     lastKanbanHtml = html;
     // innerHTML 重建会把每列列表的滚动位置归零（改名失焦/SSE 更新时列表跳回
@@ -586,6 +674,64 @@ export function renderSessionsPage(root: HTMLElement) {
       lastKanbanHtml = '';
       rerender();
       alert(`${t('sessions.kanban.renameFail')}: ${e}`);
+    }
+  }
+
+  // ── 会话历史弹窗：实时拉取该会话所在飞书话题/群的消息，按聊天气泡渲染 ──────
+  function historyBubbleHtml(s: any, m: any, ownerOpenId?: string): string {
+    const mine = m.senderType === 'user';
+    const name = mine
+      ? (ownerOpenId && m.senderId === ownerOpenId ? t('sessions.history.owner') : t('sessions.history.user'))
+      : botDisplayName(s);
+    const time = m.createTime ? new Date(m.createTime).toLocaleString() : '';
+    const content = String(m.content ?? '').trim() || `[${m.msgType ?? 'message'}]`;
+    const avatar = mine
+      ? `<span class="history-avatar-user" aria-hidden="true">${escapeHtml(String(name).slice(0, 1))}</span>`
+      : botAvatarHtml({ name: botDisplayName(s), larkAppId: s.larkAppId, size: 'sm' });
+    return `<div class="history-msg${mine ? ' mine' : ''}">
+      ${avatar}
+      <div class="history-msg-main">
+        <div class="history-msg-meta"><span>${escapeHtml(name)}</span><time>${escapeHtml(time)}</time></div>
+        <div class="history-bubble">${escapeHtml(content)}</div>
+      </div>
+    </div>`;
+  }
+
+  async function openHistoryModal(s: any): Promise<void> {
+    const botName = botDisplayName(s);
+    historyModal.innerHTML = `<div class="term-modal-head">
+        <span class="term-modal-title">
+          ${botAvatarHtml({ name: botName, larkAppId: s.larkAppId, size: 'sm' })}
+          <strong title="${escapeHtml(String(s.title ?? ''))}">${escapeHtml((stripMentionPrefix(s.title) || s.sessionId).slice(0, 60))}</strong>
+          <span class="history-scope-tag">${escapeHtml(t('sessions.history.title'))}</span>
+        </span>
+        <span class="term-modal-actions">
+          <button type="button" id="history-close" class="card-act" title="${escapeHtml(t('sessions.dismiss'))}" aria-label="${escapeHtml(t('sessions.dismiss'))}">${ICON.close}</button>
+        </span>
+      </div>
+      <div class="history-body"><div class="term-modal-loading">${t('sessions.history.loading')}</div></div>`;
+    historyModal.showModal();
+    historyModal.querySelector<HTMLButtonElement>('#history-close')!.onclick = () => historyModal.close();
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/history?limit=80`);
+      const body = await r.json().catch(() => ({}));
+      if (!historyModal.open) return;
+      const bodyEl = historyModal.querySelector<HTMLElement>('.history-body')!;
+      if (!r.ok || body?.ok === false) {
+        bodyEl.innerHTML = `<div class="history-error">${escapeHtml(t('sessions.history.fail'))}: ${escapeHtml(String(body?.error ?? r.status))}</div>`;
+        return;
+      }
+      const messages: any[] = Array.isArray(body.messages) ? body.messages : [];
+      if (!messages.length) {
+        bodyEl.innerHTML = `<div class="history-error">${t('sessions.history.empty')}</div>`;
+        return;
+      }
+      bodyEl.innerHTML = `<div class="history-list">${messages.map(m => historyBubbleHtml(s, m, body.ownerOpenId)).join('')}</div>`;
+      bodyEl.scrollTop = bodyEl.scrollHeight; // 默认停在最新一条
+    } catch (e) {
+      if (!historyModal.open) return;
+      const bodyEl = historyModal.querySelector<HTMLElement>('.history-body');
+      if (bodyEl) bodyEl.innerHTML = `<div class="history-error">${escapeHtml(t('sessions.history.fail'))}: ${escapeHtml(String(e))}</div>`;
     }
   }
 
@@ -754,6 +900,12 @@ export function renderSessionsPage(root: HTMLElement) {
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-pressed', String(active));
     });
+    groupByBox.hidden = viewMode !== 'kanban';
+    groupByBox.querySelectorAll<HTMLButtonElement>('[data-groupby]').forEach(btn => {
+      const active = btn.dataset.groupby === kanbanGroupBy;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
   }
 
   // CLI 下拉 chip 上的已选计数：全选时显示「全部」，否则显示 N/总数
@@ -873,6 +1025,7 @@ export function renderSessionsPage(root: HTMLElement) {
       <p><b>${t('sessions.workingDir')}:</b> ${escapeHtml(s.workingDir ?? '-')}</p>
       <div class="actions">
         ${chatScopeLink(s) ?? `<button id="locate-btn" type="button">${t('sessions.locate')}</button>`}
+        <button id="history-drawer-btn" type="button">${t('sessions.history.title')}</button>
         ${terminalControlsHtml(terminal)}
         ${closed ? `<button id="resume-btn" type="button" class="primary">${t('sessions.resume')}</button>` : ''}
         ${!closed ? `<button id="close-btn" type="button" class="contrast">${t('sessions.close')}</button>` : ''}
@@ -893,6 +1046,11 @@ export function renderSessionsPage(root: HTMLElement) {
     const locateBtn = drawer.querySelector<HTMLButtonElement>('#locate-btn');
     if (locateBtn) {
       locateBtn.onclick = () => void locateSession(s, locateBtn);
+    }
+
+    const historyBtn = drawer.querySelector<HTMLButtonElement>('#history-drawer-btn');
+    if (historyBtn) {
+      historyBtn.onclick = () => void openHistoryModal(s);
     }
 
     // Writable-terminal segment (.term-write) lives inside the drawer, outside
@@ -1074,6 +1232,17 @@ export function renderSessionsPage(root: HTMLElement) {
     });
   });
 
+  groupByBox.querySelectorAll<HTMLButtonElement>('[data-groupby]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next: KanbanGroupBy = btn.dataset.groupby === 'bot' ? 'bot' : 'flow';
+      if (next === kanbanGroupBy) return;
+      kanbanGroupBy = next;
+      writeStoredKanbanGroupBy(window.localStorage, next);
+      lastKanbanHtml = '';
+      rerender();
+    });
+  });
+
   // ── 看板交互：单击开终端弹窗（延迟仲裁让位双击）、铅笔/双击改标题、
   //    「详情」进抽屉、整卡拖拽换列与排序 ─────────────────────────────────────
   function cancelKanbanOpen(): void {
@@ -1093,6 +1262,7 @@ export function renderSessionsPage(root: HTMLElement) {
     if (actionButton) {
       if (actionButton.dataset.action === 'details') openDrawer(s);
       else if (actionButton.dataset.action === 'rename') startKanbanRename(card, s);
+      else if (actionButton.dataset.action === 'history') void openHistoryModal(s);
       return;
     }
     if (target.closest('a, button, input, label')) return;
@@ -1124,6 +1294,7 @@ export function renderSessionsPage(root: HTMLElement) {
 
   // ── 看板卡片拖拽 ──────────────────────────────────────────────────────────
   kanban.addEventListener('dragstart', e => {
+    if (kanbanGroupBy === 'bot') return; // 团队模式只读：会话不能拖给别的 bot
     const card = (e.target as HTMLElement).closest<HTMLElement>('.kanban-card[data-id]');
     if (!card) return;
     cancelKanbanOpen();
@@ -1190,6 +1361,12 @@ export function renderSessionsPage(root: HTMLElement) {
   });
   termModal.addEventListener('close', () => {
     termModal.innerHTML = '';
+  });
+  historyModal.addEventListener('click', e => {
+    if (e.target === historyModal) historyModal.close();
+  });
+  historyModal.addEventListener('close', () => {
+    historyModal.innerHTML = '';
   });
 
   selectAllBox.addEventListener('change', () => {

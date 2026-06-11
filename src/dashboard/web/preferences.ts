@@ -67,6 +67,27 @@ export function writeStoredSessionsViewMode(storage: Storage | undefined, mode: 
   }
 }
 
+// ── 看板分组维度：工作流列 vs 团队成员（bot）列 ───────────────────────────────
+export type KanbanGroupBy = 'flow' | 'bot';
+
+export const KANBAN_GROUPBY_STORAGE_KEY = 'botmux.dashboard.sessions.kanbanGroupBy';
+
+export function normalizeKanbanGroupBy(value: unknown): KanbanGroupBy | null {
+  return value === 'flow' || value === 'bot' ? value : null;
+}
+
+export function readStoredKanbanGroupBy(storage: Storage | undefined): KanbanGroupBy {
+  return normalizeKanbanGroupBy(storage?.getItem(KANBAN_GROUPBY_STORAGE_KEY)) ?? 'flow';
+}
+
+export function writeStoredKanbanGroupBy(storage: Storage | undefined, mode: KanbanGroupBy): void {
+  try {
+    storage?.setItem(KANBAN_GROUPBY_STORAGE_KEY, mode);
+  } catch {
+    // localStorage 不可用时只在当前页生效
+  }
+}
+
 // ── 左侧菜单栏收起/展开 ───────────────────────────────────────────────────────
 export type SidebarMode = 'expanded' | 'collapsed';
 

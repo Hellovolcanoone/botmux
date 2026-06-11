@@ -1272,6 +1272,58 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
+/* 视图控件排布：分组维度切换 + 视图切换并排（窄屏自动换行） */
+.sessions-view-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 同群聚簇容器：虚线框 + 群名头，一眼看出卡片同属一个群 */
+.kanban-cluster {
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 3%, transparent);
+}
+
+.kanban-cluster > header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.kanban-cluster-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kanban-cluster-count {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 团队模式列头：bot 头像替代状态图标 */
+.kanban-col-avatar {
+  display: inline-flex;
+  flex: none;
+}
+
 .kanban-backlog .kanban-col-icon { color: var(--faint); }
 .kanban-todo .kanban-col-icon { color: var(--muted); }
 .kanban-in_progress .kanban-col-icon { color: var(--warning); }
@@ -1525,6 +1577,108 @@ button.primary {
 }
 
 .term-modal-loading {
+  margin: auto;
+  color: var(--faint);
+  font-size: 13px;
+}
+
+/* ── 会话历史弹窗：飞书式左右气泡 ─────────────────────────────────────────── */
+.history-modal {
+  width: min(860px, 94vw);
+  height: min(82vh, 900px);
+  max-height: calc(100vh - 24px);
+  padding: 0;
+  overflow: hidden;
+}
+
+.history-modal[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.history-scope-tag {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 14px 16px;
+  background: var(--bg-soft);
+}
+
+.history-list {
+  display: grid;
+  gap: 12px;
+}
+
+.history-msg {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  max-width: 82%;
+}
+
+.history-msg.mine {
+  margin-left: auto;
+  flex-direction: row-reverse;
+}
+
+.history-msg-main {
+  min-width: 0;
+}
+
+.history-msg-meta {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 3px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.history-msg.mine .history-msg-meta {
+  justify-content: flex-end;
+}
+
+.history-bubble {
+  padding: 8px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-raised);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.history-msg.mine .history-bubble {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.history-avatar-user {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12px;
+}
+
+.history-error {
   margin: auto;
   color: var(--faint);
   font-size: 13px;
