@@ -198,10 +198,9 @@ describe('applyBotConfigEdits', () => {
     expect(cleared.model).toBeUndefined();
   });
 
-  // 防回归：cli.ts 的 promptEditBotConfig 在切到不支持 model 的 adapter
-  // （aiden/mtr/agy 等没声明 modelChoices）时会把 input.model 设成 null
-  // 强制清空旧 model — 这里只测 applyBotConfigEdits 把 null 解释为"删字段"
-  // 的契约，覆盖 Codex review 反馈的"切 CLI 后旧 model 残留"边界。
+  // 防回归：cli.ts 的 promptEditBotConfig 在切换 CLI 时会把 input.model 设成
+  // null 强制清空旧 model — 这里只测 applyBotConfigEdits 把 null 解释为
+  // "删字段"的契约，覆盖"切 CLI 后旧 model 残留"边界。
   it('input.model === null clears the field even when cliChoice also changes', () => {
     const updated = applyBotConfigEdits({
       larkAppId: 'app',
