@@ -115,6 +115,24 @@ describe('createRepoWorktree', () => {
     expect(git(res.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feat/existing');
   });
 
+  it('creates a local tracking branch when the explicit branch exists only on origin', async () => {
+    const upstream = makeUpstream('upstream');
+    git(upstream, 'switch', '-c', 'feat/remote-only');
+    git(upstream, 'commit', '--allow-empty', '-m', 'remote branch');
+    const remoteHead = git(upstream, 'rev-parse', 'HEAD');
+    git(upstream, 'switch', 'master');
+    const repo = makeClone(upstream, 'proj');
+
+    const res = await createRepoWorktree(repo, { branch: 'feat/remote-only' });
+
+    expect(res.branch).toBe('feat/remote-only');
+    expect(res.baseRef).toBe('origin/feat/remote-only');
+    expect(res.path).toBe(join(tempRoot, 'proj-feat-remote-only'));
+    expect(git(res.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feat/remote-only');
+    expect(git(res.path, 'rev-parse', 'HEAD')).toBe(remoteHead);
+    expect(git(res.path, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')).toBe('origin/feat/remote-only');
+  });
+
   it('names the worktree after the MAIN repo when given a linked worktree path', async () => {
     const upstream = makeUpstream('upstream');
     const repo = makeClone(upstream, 'proj');

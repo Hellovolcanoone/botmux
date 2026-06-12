@@ -47,6 +47,10 @@ async function localBranchExists(repo: string, branch: string): Promise<boolean>
   return (await tryGit(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], repo)) !== null;
 }
 
+async function remoteBranchExists(repo: string, branch: string): Promise<boolean> {
+  return (await tryGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], repo)) !== null;
+}
+
 /** The remote default branch (`origin/master` / `origin/main`), or `HEAD`
  *  for repos without a usable remote. `origin/HEAD` is only set on clone, so
  *  fall through to probing the usual names when it's missing. */
@@ -79,6 +83,7 @@ async function resolveMainWorktree(dir: string): Promise<string> {
  *
  * - No `branch` given → auto-pick `wt/N` (first free N), dir `<repo>-wt-N`.
  * - `branch` given and exists locally → check it out into the worktree.
+ * - `branch` given and exists remotely → create a local tracking branch from it.
  * - `branch` given and new → create it from the remote default branch.
  *
  * The base ref is fetched first so the worktree starts from the remote's
@@ -128,6 +133,21 @@ export async function createRepoWorktree(
     await git(['worktree', 'add', wtPath, branch], repo, 60_000);
     logger.info(`[git-worktree] created ${wtPath} on existing branch ${branch}`);
     return { path: wtPath, branch, baseRef: branch };
+  }
+
+  if (opts.branch?.trim()) {
+    try {
+      await git(['fetch', 'origin', branch], repo, 30_000);
+    } catch (e) {
+      logger.warn(`[git-worktree] fetch origin ${branch} failed, checking local remote ref: ${e instanceof Error ? e.message : e}`);
+    }
+
+    const remoteRef = `origin/${branch}`;
+    if (await remoteBranchExists(repo, branch)) {
+      await git(['worktree', 'add', '-b', branch, '--track', wtPath, remoteRef], repo, 60_000);
+      logger.info(`[git-worktree] created ${wtPath} tracking ${remoteRef}`);
+      return { path: wtPath, branch, baseRef: remoteRef };
+    }
   }
 
   await git(['worktree', 'add', '-b', branch, wtPath, baseRef], repo, 60_000);
