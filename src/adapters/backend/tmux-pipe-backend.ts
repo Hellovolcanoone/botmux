@@ -117,6 +117,9 @@ export class TmuxPipeBackend implements SessionBackend {
   private readonly createSession: boolean;
   private readonly ownsSession: boolean;
   private readonly _isReattach: boolean;
+  /** Adopt-mode CLI pid. Pane liveness alone is insufficient because the CLI
+   *  can exit back to the user's shell while the tmux pane stays alive. */
+  private readonly watchCliPid: number | undefined;
 
   /** Claude Code session JSONL path — set by worker for claude-code sessions so
    *  the claude-code adapter can verify paste+Enter submissions via file growth. */
@@ -135,11 +138,12 @@ export class TmuxPipeBackend implements SessionBackend {
     return this._isReattach;
   }
 
-  constructor(paneTarget: string, opts?: { createSession?: boolean; ownsSession?: boolean; isReattach?: boolean }) {
+  constructor(paneTarget: string, opts?: { createSession?: boolean; ownsSession?: boolean; isReattach?: boolean; cliPid?: number }) {
     this.paneTarget = paneTarget;
     this.createSession = opts?.createSession ?? false;
     this.ownsSession = opts?.ownsSession ?? false;
     this._isReattach = opts?.isReattach ?? false;
+    this.watchCliPid = opts?.cliPid;
     // Per-instance fifo so concurrent adopt sessions don't collide.
     this.fifoPath = join(tmpdir(), `botmux-pipe-${randomBytes(8).toString('hex')}.fifo`);
   }
@@ -445,6 +449,11 @@ export class TmuxPipeBackend implements SessionBackend {
     this.stopLifecycleWatcher();
     this.lifecycleTimer = setInterval(() => {
       if (this.exited) return;
+      if (!this.isCliPidAlive()) {
+        process.stderr.write(`[tmux-pipe-backend] adopted CLI pid ${this.watchCliPid} exited; detaching observer\n`);
+        this.handlePaneExit();
+        return;
+      }
       try {
         const paneId = execSync(
           `tmux display-message -p -t ${shellescape(this.paneTarget)} '#{pane_id}'`,
@@ -468,6 +477,12 @@ export class TmuxPipeBackend implements SessionBackend {
     if (this.exited) return;
     this.exited = true;
     this.stopLifecycleWatcher();
+    if (this.pipeAttached) {
+      try {
+        execSync(`tmux pipe-pane -t ${shellescape(this.paneTarget)}`, { stdio: 'ignore', timeout: 3000, env: tmuxEnv() });
+      } catch { /* pane may already be gone — benign */ }
+      this.pipeAttached = false;
+    }
     if (this.readStream) {
       try { this.readStream.destroy(); } catch { /* already closed */ }
       this.readStream = null;
@@ -635,6 +650,17 @@ export class TmuxPipeBackend implements SessionBackend {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /** Unknown pid → pane-only liveness. EPERM still means the process exists. */
+  private isCliPidAlive(): boolean {
+    if (this.watchCliPid === undefined) return true;
+    try {
+      process.kill(this.watchCliPid, 0);
+      return true;
+    } catch (err: any) {
+      return err?.code === 'EPERM';
     }
   }
 

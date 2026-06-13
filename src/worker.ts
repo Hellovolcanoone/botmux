@@ -3332,7 +3332,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     const rows = cfg.adoptPaneRows ?? PTY_ROWS;
     const observeBe: ObserveBackend = cfg.adoptZellijPaneId
       ? new ZellijObserveBackend(cfg.adoptZellijSession ?? '', cfg.adoptZellijPaneId, { cliPid: cfg.adoptCliPid })
-      : new TmuxPipeBackend(cfg.adoptTmuxTarget!);
+      : new TmuxPipeBackend(cfg.adoptTmuxTarget!, { cliPid: cfg.adoptCliPid });
     effectiveBackendType = cfg.adoptZellijPaneId ? 'zellij' : 'tmux';
     backend = observeBe;
     observeBe.spawn('', [], {

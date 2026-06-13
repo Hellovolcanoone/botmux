@@ -25,6 +25,7 @@ vi.mock('../src/bot-registry.js', () => ({
     botName: 'TestBot',
   })),
   getAllBots: vi.fn(() => []),
+  getBotBrand: vi.fn(() => 'feishu'),
 }));
 
 vi.mock('../src/core/dashboard-events.js', () => ({

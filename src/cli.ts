@@ -7,7 +7,7 @@
  *   botmux setup --no-open-platform-auto — skip Feishu Open Platform automation
  *   botmux start          — start daemon (pm2)
  *   botmux stop           — stop daemon
- *   botmux restart        — restart daemon (auto-restores sessions)
+ *   botmux restart [--include-pm2] — restart daemon (optionally restart PM2 God too)
  *   botmux logs [--lines] — view daemon logs
  *   botmux status         — show daemon status
  *   botmux upgrade        — upgrade to latest version
@@ -18,7 +18,7 @@
  *   botmux autostart enable|disable|status — manage boot-time autostart (launchd / user systemd)
  *   botmux worker-budget status|set|unset — inspect/override idle worker suspension budget
  */
-import { execSync, spawnSync, spawn } from 'node:child_process';
+import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { join, dirname, basename } from 'node:path';
@@ -1167,6 +1167,26 @@ function deleteAllBotmuxProcesses(home: string = PM2_HOME): void {
   } catch { /* pm2 not running or no apps */ }
 }
 
+function killPm2GodDaemon(home: string = PM2_HOME): void {
+  try {
+    execSync(`${pm2Bin()} kill`, {
+      stdio: 'inherit',
+      env: pm2Env(home),
+      timeout: 15_000,
+    });
+    return;
+  } catch {
+    // Fall back to direct pid cleanup below.
+  }
+
+  for (const pid of listPm2GodDaemonPids(home)) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+  }
+  for (const pid of listPm2GodDaemonPids(home)) {
+    try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+}
+
 /**
  * One-time migration for users upgrading from versions that used the default
  * ~/.pm2 directory. Removes any lingering botmux-* processes registered under
@@ -1220,6 +1240,7 @@ async function cmdRestart(): Promise<void> {
     process.exit(1);
   }
   ensureConfigDir();
+  const includePm2 = process.argv.includes('--include-pm2');
   // Drop a restart-intent breadcrumb so the fresh daemon knows this was an
   // intentional restart and DMs the owner a summary. `IfAbsent` preserves a
   // richer breadcrumb (update / auto-restart) already written by the
@@ -1236,6 +1257,9 @@ async function cmdRestart(): Promise<void> {
   cleanupLegacyPm2();
   // Delete all botmux processes (handles both old single-process and new multi-process)
   deleteAllBotmuxProcesses();
+  if (includePm2) {
+    killPm2GodDaemon();
+  }
   // Wipe abandoned dashboard-daemon descriptors left behind by killed daemons.
   cleanupStaleDaemonDescriptors();
   runPm2(['start', cfg]);
@@ -1453,6 +1477,19 @@ async function cmdDashboard(): Promise<void> {
 
 // ─── Session helpers ──────────────────────────────────────────────────────────
 
+interface AdoptedFromData {
+  source?: 'tmux' | 'herdr' | 'zellij';
+  tmuxTarget?: string;
+  zellijSession?: string;
+  zellijPaneId?: string;
+  herdrSessionName?: string;
+  herdrTarget?: string;
+  herdrPaneId?: string;
+  originalCliPid?: number;
+  cwd?: string;
+  cliId?: string;
+}
+
 interface SessionData {
   sessionId: string;
   chatId: string;
@@ -1486,7 +1523,7 @@ interface SessionData {
   // unconfirmed /adopt scratch as a crashed CLI session.
   cliId?: string;
   lastCliInput?: string;
-  adoptedFrom?: unknown;
+  adoptedFrom?: AdoptedFromData;
 }
 
 /**
@@ -1721,7 +1758,7 @@ function formatSessionRow(
   s: SessionData,
   multiBot: boolean,
   botLabels: Map<string, string>,
-  cols: { id: number; bot?: number; title: number; dir: number; pid: number; uptime: number; status: number },
+  cols: { id: number; bot?: number; title: number; dir: number; pid: number; uptime: number; status: number; target: number },
 ): { text: string; alive: boolean } {
   const id = padEndDisplay(s.sessionId.substring(0, 8), cols.id);
   const parts = [id];
@@ -1731,11 +1768,13 @@ function formatSessionRow(
   }
   const title = padEndDisplay(truncate((s.title || '(untitled)').replace(/[\r\n]+/g, ' '), cols.title), cols.title);
   const dir = padEndDisplay(truncate(s.workingDir || '-', cols.dir), cols.dir);
-  const pid = s.pid ? String(s.pid).padEnd(cols.pid) : '-'.padEnd(cols.pid);
+  const displayPid = sessionDisplayPid(s);
+  const pid = displayPid ? String(displayPid).padEnd(cols.pid) : '-'.padEnd(cols.pid);
   const uptime = formatDuration(Date.now() - new Date(s.createdAt).getTime()).padEnd(cols.uptime);
-  const alive = !!(s.pid && isProcessAlive(s.pid));
-  const status = (alive ? 'online' : s.pid ? 'stopped' : 'idle').padEnd(cols.status);
-  parts.push(title, dir, pid, uptime, status);
+  const alive = isSessionAliveForList(s);
+  const status = padEndDisplay(sessionStatusLabel(s), cols.status);
+  const target = padEndDisplay(truncate(sessionTargetLabel(s), cols.target), cols.target);
+  parts.push(title, dir, pid, uptime, status, target);
   return { text: parts.join(' │ '), alive };
 }
 
@@ -1749,7 +1788,7 @@ function printSessionTable(active: SessionData[]): void {
     botLabels.set(b.larkAppId, `bot${i + 1} (${b.cliId ?? 'claude-code'})`);
   }
 
-  const cols = { id: 10, ...(multiBot ? { bot: 22 } : {}), title: 28, dir: 28, pid: 8, uptime: 8, status: 8 };
+  const cols = { id: 10, ...(multiBot ? { bot: 22 } : {}), title: 28, dir: 28, pid: 8, uptime: 8, status: 8, target: 26 };
 
   const headerParts = ['id'.padEnd(cols.id)];
   if (multiBot) headerParts.push('bot'.padEnd(cols.bot!));
@@ -1759,6 +1798,7 @@ function printSessionTable(active: SessionData[]): void {
     'pid'.padEnd(cols.pid),
     'uptime'.padEnd(cols.uptime),
     'status'.padEnd(cols.status),
+    'target'.padEnd(cols.target),
   );
   const header = headerParts.join(' │ ');
   const separator = '─'.repeat(displayWidth(header));
@@ -1786,6 +1826,70 @@ function tmuxSessionExists(name: string): boolean {
   }
 }
 
+function applyTmuxWindowSizeLargest(sessionName: string): void {
+  try {
+    execFileSync('tmux', ['set-option', '-t', sessionName, 'window-size', 'largest'], {
+      stdio: 'ignore',
+      timeout: 3000,
+      env: tmuxEnv(),
+    });
+  } catch { /* best-effort: attach can still proceed */ }
+}
+
+function isAdoptedSession(s: SessionData): s is SessionData & { adoptedFrom: AdoptedFromData } {
+  return !!s.adoptedFrom && typeof s.adoptedFrom === 'object';
+}
+
+function adoptedCliPid(s: SessionData): number | undefined {
+  const pid = isAdoptedSession(s) ? s.adoptedFrom.originalCliPid : undefined;
+  return typeof pid === 'number' && pid > 0 ? pid : undefined;
+}
+
+function adoptTargetLabel(s: SessionData): string {
+  if (!isAdoptedSession(s)) return '';
+  const a = s.adoptedFrom;
+  if (a.source === 'zellij' || a.zellijPaneId) {
+    const target = a.zellijSession && a.zellijPaneId
+      ? `${a.zellijSession}/${a.zellijPaneId}`
+      : a.zellijPaneId || a.zellijSession || '?';
+    return `adopt: zellij ${target}`;
+  }
+  if (a.source === 'herdr' || a.herdrSessionName || a.herdrPaneId || a.herdrTarget) {
+    const pane = a.herdrTarget ?? a.herdrPaneId ?? '?';
+    const target = a.herdrSessionName ? `${a.herdrSessionName}:${pane}` : pane;
+    return `adopt: herdr ${target}`;
+  }
+  return `adopt: tmux ${a.tmuxTarget ?? '?'}`;
+}
+
+function sessionDisplayPid(s: SessionData): number | undefined {
+  return adoptedCliPid(s) ?? s.pid;
+}
+
+function isSessionAliveForList(s: SessionData): boolean {
+  const pid = sessionDisplayPid(s);
+  return !!(pid && isProcessAlive(pid));
+}
+
+function sessionStatusLabel(s: SessionData): string {
+  if (isAdoptedSession(s)) {
+    const pid = adoptedCliPid(s);
+    if (pid) return isProcessAlive(pid) ? 'adopt' : 'stopped';
+    return s.pid && isProcessAlive(s.pid) ? 'adopt' : 'idle';
+  }
+  return s.pid && isProcessAlive(s.pid) ? 'online' : s.pid ? 'stopped' : 'idle';
+}
+
+function sessionTargetLabel(s: SessionData, tmuxName?: string, hasTmux?: boolean): string {
+  if (isAdoptedSession(s)) return adoptTargetLabel(s);
+  if (hasTmux === undefined) {
+    const name = tmuxName ?? `bmx-${s.sessionId.substring(0, 8)}`;
+    hasTmux = tmuxSessionExists(name);
+    tmuxName = name;
+  }
+  return hasTmux ? `tmux: ${tmuxName}` : '-';
+}
+
 /** Shorten path for display: replace $HOME with ~. */
 function shortenPath(p: string): string {
   const home = homedir();
@@ -1806,10 +1910,10 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
   const termWidth = process.stdout.columns || 100;
   const PREFIX = 4;    // "  ❯ " or "    "
   const SEP_W = 3;     // " │ "
-  const fixedCols = { id: 10, pid: 8, uptime: 7, status: 7 };
+  const fixedCols = { id: 10, pid: 8, uptime: 7, status: 7, target: 26 };
   const botW = multiBot ? 18 : 0;
-  const numSeps = (multiBot ? 7 : 6) - 1;  // separators between columns
-  const fixedTotal = PREFIX + fixedCols.id + botW + fixedCols.pid + fixedCols.uptime + fixedCols.status + numSeps * SEP_W;
+  const numSeps = (multiBot ? 8 : 7) - 1;  // separators between columns
+  const fixedTotal = PREFIX + fixedCols.id + botW + fixedCols.pid + fixedCols.uptime + fixedCols.status + fixedCols.target + numSeps * SEP_W;
   const flexTotal = Math.max(20, termWidth - fixedTotal);
   const titleW = Math.floor(flexTotal * 0.4);
   const dirW = flexTotal - titleW;
@@ -1822,11 +1926,25 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
     pid: fixedCols.pid,
     uptime: fixedCols.uptime,
     status: fixedCols.status,
+    target: fixedCols.target,
   };
 
   // Build row data — use shortened paths for TUI
-  function buildRows(): Array<{ session: SessionData; text: string; alive: boolean; tmuxName: string; hasTmux: boolean }> {
+  function buildRows(): Array<{
+    session: SessionData;
+    text: string;
+    alive: boolean;
+    tmuxName: string;
+    hasTmux: boolean;
+    isAdopt: boolean;
+    targetLabel: string;
+    canAttach: boolean;
+  }> {
     return active.map(s => {
+      const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
+      const isAdopt = isAdoptedSession(s);
+      const hasTmux = !isAdopt && tmuxSessionExists(tmuxName);
+      const targetLabel = sessionTargetLabel(s, tmuxName, hasTmux);
       // Build row text with shortened dir
       const id = padEndDisplay(s.sessionId.substring(0, 8), cols.id);
       const parts = [id];
@@ -1836,15 +1954,15 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
       }
       const title = padEndDisplay(truncate((s.title || '(untitled)').replace(/[\r\n]+/g, ' '), cols.title), cols.title);
       const dir = padEndDisplay(truncate(shortenPath(s.workingDir || '-'), cols.dir), cols.dir);
-      const pid = s.pid ? String(s.pid).padEnd(cols.pid) : '-'.padEnd(cols.pid);
+      const displayPid = sessionDisplayPid(s);
+      const pid = displayPid ? String(displayPid).padEnd(cols.pid) : '-'.padEnd(cols.pid);
       const uptime = formatDuration(Date.now() - new Date(s.createdAt).getTime()).padEnd(cols.uptime);
-      const alive = !!(s.pid && isProcessAlive(s.pid));
-      const status = (alive ? 'online' : s.pid ? 'stopped' : 'idle').padEnd(cols.status);
-      parts.push(title, dir, pid, uptime, status);
+      const alive = isSessionAliveForList(s);
+      const status = padEndDisplay(sessionStatusLabel(s), cols.status);
+      const target = padEndDisplay(truncate(targetLabel, cols.target), cols.target);
+      parts.push(title, dir, pid, uptime, status, target);
 
-      const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
-      const hasTmux = tmuxSessionExists(tmuxName);
-      return { session: s, text: parts.join(' │ '), alive, tmuxName, hasTmux };
+      return { session: s, text: parts.join(' │ '), alive, tmuxName, hasTmux, isAdopt, targetLabel, canAttach: hasTmux && !isAdopt };
     });
   }
 
@@ -1860,6 +1978,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
       'pid'.padEnd(cols.pid),
       'uptime'.padEnd(cols.uptime),
       'status'.padEnd(cols.status),
+      'target'.padEnd(cols.target),
     );
     return hParts.join(' │ ');
   }
@@ -1902,10 +2021,12 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
 
     // Footer info
     const selected = rows[cursor];
-    const tmuxHint = selected.hasTmux
-      ? `\x1b[32mtmux: ${selected.tmuxName}\x1b[0m`
-      : `\x1b[2mtmux: 无会话\x1b[0m`;
-    process.stdout.write(`\n  ${tmuxHint}\n`);
+    const targetHint = selected.isAdopt
+      ? `\x1b[33m${selected.targetLabel}\x1b[0m  \x1b[2mEnter 已禁用；请直接使用原 tmux/zellij/herdr 客户端。\x1b[0m`
+      : selected.hasTmux
+        ? `\x1b[32mtmux: ${selected.tmuxName}\x1b[0m`
+        : `\x1b[2mtmux: 无会话\x1b[0m`;
+    process.stdout.write(`\n  ${targetHint}\n`);
 
     // Flash message or confirmation prompt
     if (confirmDelete) {
@@ -1918,7 +2039,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
     }
 
     // Keybinding hints
-    process.stdout.write(`\n  \x1b[2m↑/↓ 选择  ⏎ 连接  d 删除  q 退出\x1b[0m\n`);
+    process.stdout.write(`\n  \x1b[2m↑/↓ 选择  ⏎ ${selected?.canAttach ? '连接' : '不可连接'}  d 删除  q 退出\x1b[0m\n`);
   }
 
   return new Promise<void>((resolve) => {
@@ -1942,13 +2063,15 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
       const r = rows[idx];
       const s = r.session;
 
-      // Kill CLI process
-      if (s.pid && isProcessAlive(s.pid)) {
+      // Kill botmux's worker process. For adopted sessions, never kill the
+      // user's original CLI pid if an old record stored it in `pid`.
+      const originalPid = adoptedCliPid(s);
+      if (s.pid && s.pid !== originalPid && isProcessAlive(s.pid)) {
         killProcess(s.pid);
       }
 
-      // Kill tmux session
-      if (r.hasTmux) {
+      // Kill only botmux-owned tmux sessions. Adopted panes belong to the user.
+      if (!r.isAdopt && r.hasTmux) {
         try { execSync(`tmux kill-session -t '${r.tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() }); } catch { /* */ }
       }
 
@@ -2018,11 +2141,17 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
       // Enter — attach to tmux
       if (key === '\r' || key === '\n') {
         const selected = rows[cursor];
-        if (!selected.hasTmux) {
+        if (selected.isAdopt) {
+          flashMsg = `\x1b[33m这是 adopt 会话；botmux 不 attach 用户 pane。目标: ${selected.targetLabel}\x1b[0m`;
+          render();
+          return;
+        }
+        if (!selected.canAttach) {
           flashMsg = '\x1b[33m该会话没有 tmux，无法连接\x1b[0m';
           render();
           return;
         }
+        applyTmuxWindowSizeLargest(selected.tmuxName);
         cleanup();
         spawnSync('tmux', ['attach-session', '-t', selected.tmuxName], {
           stdio: 'inherit',
@@ -2051,6 +2180,19 @@ async function cmdList(): Promise<void> {
   const prunedScratch: SessionData[] = [];
   const live: SessionData[] = [];
   for (const s of active) {
+    if (isAdoptedSession(s)) {
+      const pid = adoptedCliPid(s);
+      if (pid && isProcessAlive(pid)) {
+        live.push(s);
+      } else if (pid) {
+        pruned.push(s);
+      } else {
+        const hasPid = !!(s.pid && isProcessAlive(s.pid));
+        hasPid ? live.push(s) : pruned.push(s);
+      }
+      continue;
+    }
+
     const hasPid = !!(s.pid && isProcessAlive(s.pid));
     const hasTmux = tmuxSessionExists(`bmx-${s.sessionId.substring(0, 8)}`);
     if (!hasPid && !hasTmux) {
@@ -2071,7 +2213,7 @@ async function cmdList(): Promise<void> {
   closeNow(prunedScratch);
   if (pruned.length > 0) {
     closeNow(pruned);
-    console.log(`已自动清理 ${pruned.length} 个不可恢复的会话（进程已死且无 tmux session）`);
+    console.log(`已自动清理 ${pruned.length} 个不可恢复的会话（进程已退出或无可恢复后端）`);
   }
 
   // Sort by creation time, newest first
@@ -2113,6 +2255,10 @@ function cmdDelete(): void {
     toDelete = active;
   } else if (target === 'stopped') {
     toDelete = active.filter(s => {
+      if (isAdoptedSession(s)) {
+        const pid = adoptedCliPid(s);
+        return pid ? !isProcessAlive(pid) : !(s.pid && isProcessAlive(s.pid));
+      }
       const hasPid = !!(s.pid && isProcessAlive(s.pid));
       const hasTmux = tmuxSessionExists(`bmx-${s.sessionId.substring(0, 8)}`);
       return !hasPid && !hasTmux;
@@ -2139,18 +2285,24 @@ function cmdDelete(): void {
   }
 
   for (const s of toDelete) {
-    // Kill CLI process if running
-    if (s.pid && isProcessAlive(s.pid)) {
+    const originalPid = adoptedCliPid(s);
+
+    // Kill botmux's worker process if running. For adopted sessions, never
+    // kill the user's original CLI pid.
+    if (s.pid && s.pid !== originalPid && isProcessAlive(s.pid)) {
       killProcess(s.pid);
       console.log(`  killed pid ${s.pid}`);
     }
 
-    // Kill associated tmux session if it exists
+    // Kill associated botmux-owned tmux session if it exists. Adopted panes
+    // belong to the user and must be left untouched.
     const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
-    try {
-      execSync(`tmux kill-session -t '${tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() });
-      console.log(`  killed tmux ${tmuxName}`);
-    } catch { /* no tmux session */ }
+    if (!isAdoptedSession(s)) {
+      try {
+        execSync(`tmux kill-session -t '${tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() });
+        console.log(`  killed tmux ${tmuxName}`);
+      } catch { /* no tmux session */ }
+    }
 
     // Mark session as closed
     s.status = 'closed';
@@ -2407,7 +2559,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
               默认使用 botmux 内置 Feishu Web QR 登录尝试自动导入权限/redirect/发布版本；可加 --no-open-platform-auto 跳过
   start       启动 daemon
   stop        停止 daemon
-  restart     重启 daemon（自动恢复活跃会话）
+  restart     重启 daemon（自动恢复活跃会话；--include-pm2 同时重启 PM2 God）
   logs        查看 daemon 日志（--lines N, --bot <0-based-index|pm2-name|appId>）
   status      查看 daemon 状态
   upgrade     升级到最新版本
