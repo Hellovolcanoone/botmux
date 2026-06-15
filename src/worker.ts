@@ -26,6 +26,7 @@ import {
   shouldRunQuietRotation,
   evaluatePidResolverPullback,
   decideFingerprintSwitch,
+  shouldHealAbsentBaseline,
   sessionIdFromJsonlPath,
   SESSION_ID_FILENAME_RE,
   type PidFollowResult,
@@ -1376,8 +1377,27 @@ function stopBridgeWatcher(): void {
 function bridgeMarkPendingTurn(messageText: string, preferredTurnId?: string): string | undefined {
   if (!bridgeJsonlPath) return undefined;
   if (!bridgeBaselineDone) {
-    log('Bridge baseline not ready — this turn will not have transcript-driven final_output');
-    return undefined;
+    // Self-heal a stuck baseline: the guessed transcript path never
+    // materialised (Claude wrote under a different sessionId, a stale resume
+    // id, or an /adopt sid persisted as the botmux sid). An absent file has
+    // no history to absorb, so arm fresh-empty readiness so THIS turn gets
+    // marked — the mark arms the per-tick exact-content fingerprint recovery,
+    // which finds the jsonl Claude actually wrote this message to and switches
+    // the bridge onto it (no dependence on Claude-internal pid files, so
+    // version-robust). See shouldHealAbsentBaseline for the full rationale.
+    if (shouldHealAbsentBaseline({
+      baselineDone: bridgeBaselineDone,
+      hasJsonlPath: !!bridgeJsonlPath,
+      jsonlFileExists: existsSyncSafe(bridgeJsonlPath),
+    })) {
+      bridgeOffset = 0;
+      bridgePendingTail = '';
+      bridgeBaselineDone = true;
+      log(`Bridge baseline self-healed: guessed transcript ${bridgeJsonlPath} absent; fresh-empty readiness armed for fingerprint recovery`);
+    } else {
+      log('Bridge baseline not ready — this turn will not have transcript-driven final_output');
+      return undefined;
+    }
   }
   const fingerprint = makeFingerprint(messageText);
   // Full normalised content powers the unknown-sid recovery path. When a
