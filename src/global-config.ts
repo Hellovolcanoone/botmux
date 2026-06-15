@@ -39,6 +39,11 @@ export interface GlobalConfig {
   /** Machine-wide auto-update / auto-restart schedule. Off unless explicitly
    *  enabled. Only the primary daemon (bot-0) acts on it — see core/maintenance.ts. */
   maintenance?: MaintenanceConfig;
+  /** Optional HTTP(S) proxy for the daemon's own outbound downloads (e.g. the
+   *  HD2D office assets). Node's global fetch ignores HTTP_PROXY/HTTPS_PROXY,
+   *  so hosts behind a proxy must set this (or the env vars, which we read as a
+   *  fallback). Form: `http://host:port` or `http://user:pass@host:port`. */
+  httpProxy?: string;
 }
 
 export interface MaintenanceConfig {
@@ -233,6 +238,7 @@ export function readGlobalConfig(): GlobalConfig {
   if (worker) out.worker = worker;
   const maintenance = readMaintenance(raw.maintenance);
   if (maintenance) out.maintenance = maintenance;
+  if (typeof raw.httpProxy === 'string' && raw.httpProxy.trim()) out.httpProxy = raw.httpProxy.trim();
   readCache = { path, value: out, at: Date.now() };
   return out;
 }
