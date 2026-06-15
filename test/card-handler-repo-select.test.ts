@@ -254,7 +254,11 @@ describe('repo select card — worktree open', () => {
     expect(ds.workingDir).toBe('/repos/alpha-wt-1');
     expect(ds.session.workingDir).toBe('/repos/alpha-wt-1');
     expect(ds.pendingRepo).toBe(false);
-    expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('worktree 已创建');
+    const replies = sessionReply.mock.calls.map(c => c[1]).join();
+    expect(replies).toContain('worktree 已创建');
+    // The redundant "已选择" confirmation is suppressed in the worktree flow —
+    // the "worktree 已创建：…" line above is the single message the user sees.
+    expect(replies).not.toContain('已选择');
   });
 
   it('blocks a plain switch while git runs — and does NOT commit when the session moved on out-of-band', async () => {

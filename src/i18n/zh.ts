@@ -60,7 +60,7 @@ export const messages: Record<string, string> = {
   'card.repo.placeholder_switch': '选择仓库并切换',
   'card.repo.manual_placeholder': '输入任意工作目录，如 /path/to/project 或 ~/projects/foo',
   'card.repo.manual_empty': '请输入工作目录路径',
-  'card.repo.current_active': '当前活跃项目：',
+  'card.repo.current_active': '当前工作目录：',
   'card.repo.current_marker': ' ← 当前',
   'card.repo.note': '也可以回复 `/repo <编号>` 切换（如 `/repo 1`），或直接 `/repo <路径|项目名>`（如 `/repo botmux`、`/repo ~/projects/foo`）跳过本卡片；`/repo wt <编号|项目名> [分支名]` 基于远端默认分支新建 worktree 打开',
   'card.repo.placeholder_worktree': '🌿 选仓库新建 worktree 打开',

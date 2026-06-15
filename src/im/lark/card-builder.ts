@@ -967,12 +967,47 @@ export function buildRepoSelectCard(projects: ProjectInfo[], currentPath?: strin
       title: { tag: 'plain_text', content: t('card.repo.title', undefined, locale) },
     },
     elements: [
+      // Current working directory + 「直接开启会话」on the same row: the skip
+      // button means "use this directory as-is, don't pick a repo", so it pairs
+      // with the current-dir line rather than the switch dropdown below.
       {
-        tag: 'div',
-        text: {
-          tag: 'lark_md',
-          content: `${t('card.repo.current_active', undefined, locale)}**${escapeMd(currentPath ?? 'N/A')}**`,
-        },
+        tag: 'column_set',
+        // flow: columns sit side-by-side on desktop and reflow (button wraps
+        // below) on narrow mobile instead of squeezing the button until its
+        // label truncates. auto-width columns size to content, so the text and
+        // button hug each other (no wide desktop gap) and the button always
+        // shows its full label.
+        flex_mode: 'flow',
+        horizontal_spacing: 'default',
+        columns: [
+          {
+            tag: 'column',
+            width: 'auto',
+            vertical_align: 'center',
+            elements: [
+              {
+                tag: 'div',
+                text: {
+                  tag: 'lark_md',
+                  content: `${t('card.repo.current_active', undefined, locale)}**${escapeMd(currentPath ?? 'N/A')}**`,
+                },
+              },
+            ],
+          },
+          {
+            tag: 'column',
+            width: 'auto',
+            vertical_align: 'center',
+            elements: [
+              {
+                tag: 'button',
+                text: { tag: 'plain_text', content: t('card.btn.skip_repo', undefined, locale) },
+                type: 'primary',
+                value: { action: 'skip_repo', root_id: rootMessageId ?? '' },
+              },
+            ],
+          },
+        ],
       },
       {
         tag: 'hr',
@@ -985,12 +1020,6 @@ export function buildRepoSelectCard(projects: ProjectInfo[], currentPath?: strin
             placeholder: { tag: 'plain_text', content: t('card.repo.placeholder_switch', undefined, locale) },
             options,
             value: { key: 'repo_switch', root_id: rootMessageId ?? '' },
-          },
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: t('card.btn.skip_repo', undefined, locale) },
-            type: 'primary',
-            value: { action: 'skip_repo', root_id: rootMessageId ?? '' },
           },
         ],
       },
@@ -1012,18 +1041,47 @@ export function buildRepoSelectCard(projects: ProjectInfo[], currentPath?: strin
         tag: 'form',
         name: 'repo_manual_form',
         elements: [
+          // Input + 「使用此目录」on one row (column_set), mirroring the
+          // dropdown+button rhythm above. form_submit still collects
+          // form_value.repo_manual_path from the enclosing form.
           {
-            tag: 'input',
-            name: 'repo_manual_path',
-            placeholder: { tag: 'plain_text', content: t('card.repo.manual_placeholder', undefined, locale) },
-          },
-          {
-            tag: 'button',
-            name: 'repo_manual_submit',
-            text: { tag: 'plain_text', content: t('card.btn.manual_repo', undefined, locale) },
-            type: 'default',
-            action_type: 'form_submit',
-            value: { action: 'repo_manual_submit', root_id: rootMessageId ?? '' },
+            tag: 'column_set',
+            // flex_mode 'none' keeps the weighted input filling the row while
+            // the auto-width button hugs its label — input stays usable on
+            // mobile (not squeezed by a flow reflow) and the button never
+            // truncates. (flow mode collapsed the input on narrow screens.)
+            flex_mode: 'none',
+            horizontal_spacing: 'default',
+            columns: [
+              {
+                tag: 'column',
+                width: 'weighted',
+                weight: 1,
+                vertical_align: 'center',
+                elements: [
+                  {
+                    tag: 'input',
+                    name: 'repo_manual_path',
+                    placeholder: { tag: 'plain_text', content: t('card.repo.manual_placeholder', undefined, locale) },
+                  },
+                ],
+              },
+              {
+                tag: 'column',
+                width: 'auto',
+                vertical_align: 'center',
+                elements: [
+                  {
+                    tag: 'button',
+                    name: 'repo_manual_submit',
+                    text: { tag: 'plain_text', content: t('card.btn.manual_repo', undefined, locale) },
+                    type: 'default',
+                    action_type: 'form_submit',
+                    value: { action: 'repo_manual_submit', root_id: rootMessageId ?? '' },
+                  },
+                ],
+              },
+            ],
           },
         ],
       },

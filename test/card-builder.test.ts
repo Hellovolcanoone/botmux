@@ -576,6 +576,24 @@ describe('buildRepoSelectCard', () => {
     { name: 'gamma', path: '/home/user/gamma', type: 'repo', branch: 'develop' },
   ];
 
+  // The current-dir text + 「直接开启会话」and the manual input + button are
+  // each wrapped in a column_set for same-row layout, so a plain top-level
+  // .find() no longer reaches the div / input / button. Walk into column_set
+  // columns and form elements to collect every node by tag.
+  function deepFind(card: any, tag: string): any[] {
+    const out: any[] = [];
+    const walk = (els: any[]) => {
+      for (const el of els ?? []) {
+        if (el?.tag === tag) out.push(el);
+        if (Array.isArray(el?.columns)) el.columns.forEach((c: any) => walk(c.elements));
+        if (Array.isArray(el?.elements)) walk(el.elements);
+        if (Array.isArray(el?.actions)) walk(el.actions);
+      }
+    };
+    walk(card.elements);
+    return out;
+  }
+
   it('should return valid JSON', () => {
     const json = buildRepoSelectCard(projects);
     expect(() => JSON.parse(json)).not.toThrow();
@@ -597,20 +615,27 @@ describe('buildRepoSelectCard', () => {
   describe('current path display', () => {
     it('should show currentPath when provided', () => {
       const card = parse(buildRepoSelectCard(projects, '/home/user/alpha'));
-      const divEl = card.elements.find((e: any) => e.tag === 'div');
+      const divEl = deepFind(card, 'div')[0];
       expect(divEl.text.content).toContain('/home/user/alpha');
     });
 
     it('should show "N/A" when currentPath is undefined', () => {
       const card = parse(buildRepoSelectCard(projects));
-      const divEl = card.elements.find((e: any) => e.tag === 'div');
+      const divEl = deepFind(card, 'div')[0];
       expect(divEl.text.content).toContain('N/A');
     });
 
     it('should escape markdown special chars in currentPath', () => {
       const card = parse(buildRepoSelectCard(projects, '/home/user/[special]'));
-      const divEl = card.elements.find((e: any) => e.tag === 'div');
+      const divEl = deepFind(card, 'div')[0];
       expect(divEl.text.content).toContain('\\[special\\]');
+    });
+
+    it('uses the "当前工作目录" label (not "项目")', () => {
+      const card = parse(buildRepoSelectCard(projects, '/home/user/alpha'));
+      const divEl = deepFind(card, 'div')[0];
+      expect(divEl.text.content).toContain('当前工作目录');
+      expect(divEl.text.content).not.toContain('当前活跃项目');
     });
   });
 
@@ -690,14 +715,20 @@ describe('buildRepoSelectCard', () => {
   // ── Skip repo button ──────────────────────────────────────────────────
 
   describe('skip repo button', () => {
-    it('should include "直接开启会话" button with primary type', () => {
+    it('should include "直接开启会话" button with primary type, paired with the current-dir row', () => {
       const card = parse(buildRepoSelectCard(projects, undefined, 'om_root'));
-      const actionEl = card.elements.find((e: any) => e.tag === 'action');
-      const skipBtn = actionEl.actions.find((a: any) => a.value?.action === 'skip_repo');
+      const skipBtn = deepFind(card, 'button').find((b: any) => b.value?.action === 'skip_repo');
       expect(skipBtn).toBeDefined();
       expect(skipBtn.type).toBe('primary');
       expect(skipBtn.text.content).toContain('直接开启会话');
       expect(skipBtn.value.root_id).toBe('om_root');
+      // It now lives in the top column_set (next to 当前工作目录), NOT in the
+      // switch-dropdown action row.
+      const switchRow = card.elements.find((e: any) => e.tag === 'action');
+      expect(switchRow.actions.some((a: any) => a.value?.action === 'skip_repo')).toBe(false);
+      expect(card.elements[0].tag).toBe('column_set');
+      const topButtons = deepFind({ elements: [card.elements[0]] }, 'button');
+      expect(topButtons.some((b: any) => b.value?.action === 'skip_repo')).toBe(true);
     });
   });
 
@@ -716,24 +747,26 @@ describe('buildRepoSelectCard', () => {
   // ── Element structure ─────────────────────────────────────────────────
 
   describe('element structure', () => {
-    it('should have 6 top-level elements: div, hr, action, worktree action, manual form, note', () => {
+    it('should have 6 top-level elements: dir+skip column_set, hr, switch action, worktree action, manual form, note', () => {
       const card = parse(buildRepoSelectCard(projects));
       expect(card.elements).toHaveLength(6);
-      expect(card.elements[0].tag).toBe('div');
+      expect(card.elements[0].tag).toBe('column_set'); // 当前工作目录 + 直接开启会话
       expect(card.elements[1].tag).toBe('hr');
-      expect(card.elements[2].tag).toBe('action');
-      expect(card.elements[3].tag).toBe('action');
-      expect(card.elements[4].tag).toBe('form');
+      expect(card.elements[2].tag).toBe('action');     // 选择仓库并切换 dropdown
+      expect(card.elements[3].tag).toBe('action');     // worktree dropdown
+      expect(card.elements[4].tag).toBe('form');       // manual entry
       expect(card.elements[5].tag).toBe('note');
     });
 
-    it('manual-entry form carries an input + form_submit button under repo_manual_submit', () => {
+    it('manual-entry form carries an input + form_submit button (same row via column_set)', () => {
       const card = parse(buildRepoSelectCard(projects, undefined, 'om_root'));
       const form = card.elements.find((e: any) => e.tag === 'form' && e.name === 'repo_manual_form');
       expect(form).toBeDefined();
-      const input = form.elements.find((e: any) => e.tag === 'input');
+      // input + button now share a row inside a column_set under the form
+      expect(form.elements[0].tag).toBe('column_set');
+      const input = deepFind({ elements: [form] }, 'input')[0];
       expect(input.name).toBe('repo_manual_path');
-      const btn = form.elements.find((e: any) => e.tag === 'button');
+      const btn = deepFind({ elements: [form] }, 'button').find((b: any) => b.name === 'repo_manual_submit');
       expect(btn.action_type).toBe('form_submit');
       expect(btn.value.action).toBe('repo_manual_submit');
       expect(btn.value.root_id).toBe('om_root');
@@ -744,8 +777,8 @@ describe('buildRepoSelectCard', () => {
         { name: 'beta', path: '/home/user/beta', type: 'worktree', branch: 'feat-x' },
       ];
       const card = parse(buildRepoSelectCard(onlyWorktrees));
-      // div, hr, action, form, note — worktree action dropped, form stays
-      expect(card.elements.map((e: any) => e.tag)).toEqual(['div', 'hr', 'action', 'form', 'note']);
+      // column_set(dir+skip), hr, switch action, form, note — worktree action dropped, form stays
+      expect(card.elements.map((e: any) => e.tag)).toEqual(['column_set', 'hr', 'action', 'form', 'note']);
     });
   });
 

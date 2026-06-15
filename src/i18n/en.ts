@@ -57,7 +57,7 @@ export const messages: Record<string, string> = {
   'card.repo.placeholder_switch': 'Pick a repo to switch to',
   'card.repo.manual_placeholder': 'Enter any working directory, e.g. /path/to/project or ~/projects/foo',
   'card.repo.manual_empty': 'Please enter a working directory path',
-  'card.repo.current_active': 'Currently active project:',
+  'card.repo.current_active': 'Current working directory:',
   'card.repo.current_marker': ' ← current',
   'card.repo.note': 'You can also reply `/repo <N>` (e.g. `/repo 1`), or `/repo <path|name>` directly (e.g. `/repo botmux`, `/repo ~/projects/foo`) to skip this card. `/repo wt <N|name> [branch]` opens a fresh worktree off the remote default branch.',
   'card.repo.placeholder_worktree': '🌿 Open a repo as a new worktree',

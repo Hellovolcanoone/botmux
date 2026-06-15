@@ -163,6 +163,10 @@ async function commitRepoSelection(
   },
   dirPath: string,
   dirLabel: string,
+  // The worktree flow already posted a precise "worktree 已创建：path 分支 …"
+  // line before funnelling in here — suppress the redundant "已选择/已切换"
+  // confirmation so the user sees a single message, not two.
+  opts?: { suppressConfirmReply?: boolean },
 ): Promise<void> {
   const { ds, rootId, cardMessageId, larkAppId, activeSessions, sessionReply } = ctx;
   const locTarget = localeForBot(ds.larkAppId);
@@ -231,7 +235,9 @@ async function commitRepoSelection(
     // A card click has no turn of its own — anchor the confirmation to the
     // session's current reply-target turn so a shared fold-back topic keeps
     // it in-thread (same leak as the /repo command path).
-    await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: dirLabel }, locTarget), undefined, fallbackTurnId(ds, undefined));
+    if (!opts?.suppressConfirmReply) {
+      await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: dirLabel }, locTarget), undefined, fallbackTurnId(ds, undefined));
+    }
     logger.info(`[${tag(ds)}] Repo selected: ${dirPath}, spawning CLI`);
   } else {
     // Mid-session repo switch — close old session, start fresh.
@@ -272,7 +278,9 @@ async function commitRepoSelection(
     ds.lastScreenContent = undefined;
     ds.lastScreenStatus = undefined;
     forkWorker(ds, '', false);
-    await sessionReply(rootId, t('cmd.repo.switched_to', { name: dirLabel }, locTarget));
+    if (!opts?.suppressConfirmReply) {
+      await sessionReply(rootId, t('cmd.repo.switched_to', { name: dirLabel }, locTarget));
+    }
     logger.info(`[${tag(ds)}] Repo switched to ${dirPath}, new session created`);
   }
 
@@ -1764,7 +1772,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         // right before committing, or we'd kill the session it just spawned.
         if (sessionChanged()) return notSwitched(creation, 'during reply');
         try {
-          await commitRepoSelection(commitCtx, creation.path, `${pathBasename(creation.path)} (${creation.branch})`);
+          // The "worktree 已创建：…" notice above already confirms the switch —
+          // suppress commitRepoSelection's own "已选择/已切换" to avoid a dup.
+          await commitRepoSelection(commitCtx, creation.path, `${pathBasename(creation.path)} (${creation.branch})`, { suppressConfirmReply: true });
         } catch (e) {
           // The worktree DOES exist at this point — only the switch failed.
           // Don't report it as a creation failure, or the user retries and
