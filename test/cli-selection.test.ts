@@ -23,6 +23,14 @@ describe('CLI_SELECT_OPTIONS / CLI_SELECT_TREE', () => {
     expect(keys[i + 2]).toBe('aiden-x-codex');
   });
 
+  it('appends the two cjadk gateway options after the native CLIs', () => {
+    const keys = CLI_SELECT_OPTIONS.map((o) => o.key);
+    expect(keys).toContain('cjadk-x-claude');
+    expect(keys).toContain('cjadk-x-codex');
+    const i = keys.indexOf('cjadk-x-claude');
+    expect(keys[i + 1]).toBe('cjadk-x-codex');
+  });
+
   it('keeps every plain CliId selectable by its own key', () => {
     expect(lookupCliSelection('claude-code')?.cliId).toBe('claude-code');
     expect(lookupCliSelection('codex')?.cliId).toBe('codex');
@@ -36,6 +44,12 @@ describe('CLI_SELECT_OPTIONS / CLI_SELECT_TREE', () => {
     const codex = CLI_SELECT_TREE.find((g) => g.key === 'codex');
     expect(codex?.option?.cliId).toBe('codex');
     expect(codex?.children).toBeUndefined();
+  });
+
+  it('cascades CJADK into a submenu of its two × variants', () => {
+    const cjadk = CLI_SELECT_TREE.find((g) => g.key === 'cjadk');
+    expect(cjadk?.children?.map((c) => c.key)).toEqual(['cjadk-x-claude', 'cjadk-x-codex']);
+    expect(cjadk?.option).toBeUndefined();
   });
 });
 
@@ -57,6 +71,14 @@ describe('resolveCliSelection', () => {
     expect(resolveCliSelection('aiden')).toEqual({ cliId: 'aiden' });
   });
 
+  it('maps cjadk×claude to claude-code + wrapperCli "cjadk claude"', () => {
+    expect(resolveCliSelection('cjadk-x-claude')).toEqual({ cliId: 'claude-code', wrapperCli: 'cjadk claude' });
+  });
+
+  it('maps cjadk×codex to codex + wrapperCli "cjadk codex"', () => {
+    expect(resolveCliSelection('cjadk-x-codex')).toEqual({ cliId: 'codex', wrapperCli: 'cjadk codex' });
+  });
+
   it('throws on an unknown key', () => {
     expect(() => resolveCliSelection('nope')).toThrow(/未知 CLI 选择项/);
   });
@@ -66,6 +88,11 @@ describe('selectionKeyForBot', () => {
   it('round-trips aiden gateway bots back to their selection key', () => {
     expect(selectionKeyForBot('claude-code', 'aiden x claude')).toBe('aiden-x-claude');
     expect(selectionKeyForBot('codex', 'aiden x codex')).toBe('aiden-x-codex');
+  });
+
+  it('round-trips cjadk gateway bots back to their selection key', () => {
+    expect(selectionKeyForBot('claude-code', 'cjadk claude')).toBe('cjadk-x-claude');
+    expect(selectionKeyForBot('codex', 'cjadk codex')).toBe('cjadk-x-codex');
   });
 
   it('falls back to cliId for plain bots or unrecognised prefixes', () => {
@@ -109,6 +136,18 @@ describe('buildWrappedLaunch', () => {
     const out = buildWrappedLaunch('aiden x codex', ['resume', 'cid', '--model', 'm']);
     expect(out.bin).toBe('aiden');
     expect(out.args).toEqual(['x', 'codex', 'resume', 'cid', '--model', 'm']);
+  });
+
+  it('keeps --settings for cjadk claude (forwarded verbatim to real claude)', () => {
+    const out = buildWrappedLaunch('cjadk claude', ['--session-id', 'sid', '--settings', '{}', '--plugin-dir', '/p']);
+    expect(out.bin).toBe('cjadk');
+    expect(out.args).toEqual(['claude', '--session-id', 'sid', '--settings', '{}', '--plugin-dir', '/p']);
+  });
+
+  it('prepends the prefix for cjadk codex', () => {
+    const out = buildWrappedLaunch('cjadk codex', ['resume', 'cid']);
+    expect(out.bin).toBe('cjadk');
+    expect(out.args).toEqual(['codex', 'resume', 'cid']);
   });
 
   it('works for a generic single-token prefix (ccr) without stripping --settings', () => {

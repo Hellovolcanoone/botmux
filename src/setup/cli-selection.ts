@@ -2,14 +2,20 @@
  * cli-selection.ts
  *
  * 单一事实源：把「用户可选的 CLI 形态」从「原始 cliId 列表」抽象成一层
- * **可级联的选择项**。除了原生 CLI，额外提供两个 aiden 网关形态：
+ * **可级联的选择项**。除了原生 CLI，额外提供若干网关形态：
  *   - Aiden × Claude → 底层 cliId=claude-code，启动前缀 `aiden x claude`
  *   - Aiden × Codex  → 底层 cliId=codex，启动前缀 `aiden x codex`
+ *   - CJADK × Claude → 底层 cliId=claude-code，启动前缀 `cjadk claude`
+ *   - CJADK × Codex  → 底层 cliId=codex，启动前缀 `cjadk codex`
  *
- * 这两个形态**不生成任何 wrapper 脚本**：通过 bot 配置的 `wrapperCli`（通用启动前缀）
+ * 这些形态**不生成任何 wrapper 脚本**：通过 bot 配置的 `wrapperCli`（通用启动前缀）
  * 实现——worker 在 spawn 时把启动命令拼成 `<wrapperCli> <CLI 参数>`（纯 argv，跨系统）。
- * `wrapperCli` 是通用机制（也能承载 ccr / claude-w 等），不止 aiden。见 worker.ts 的
+ * `wrapperCli` 是通用机制（也能承载 ccr / claude-w 等），不止 aiden / cjadk。见 worker.ts 的
  * wrapperCli 处理与 {@link buildWrappedLaunch} / {@link stripSettingsArgs}。
+ *
+ * aiden 与 cjadk 的差异：`aiden x claude` 不收 `--settings`（要剥掉），而 cjadk
+ * （`allowUnknownOption`）把全部 passthrough 参数原样转发给真正的 claude/codex，
+ * `--settings`（承载 bypass 键）必须保留，故不走剥离分支。
  *
  * 三处入口（终端 setup / 终端 bot 编辑 / dashboard 网页添加机器人）共用本模块：
  *   - 展示：`CLI_SELECT_OPTIONS`（扁平，web 下拉 + 非 TTY 回退）/ `CLI_SELECT_TREE`（级联，终端 TUI）
@@ -53,25 +59,46 @@ const AIDEN_X_CODEX: CliSelectOption = { key: 'aiden-x-codex', label: 'Aiden × 
 
 const AIDEN_VARIANTS: ReadonlyArray<CliSelectOption> = [AIDEN_NATIVE, AIDEN_X_CLAUDE, AIDEN_X_CODEX];
 
+// ─── cjadk 选项 ──────────────────────────────────────────────────────────────
+// cjadk 没有「原生 agent」模式，只是个装配启动器（`cjadk <agent>`），故只有 × 变体。
+
+const CJADK_X_CLAUDE: CliSelectOption = { key: 'cjadk-x-claude', label: 'CJADK × Claude', cliId: 'claude-code', wrapperCli: 'cjadk claude' };
+const CJADK_X_CODEX: CliSelectOption = { key: 'cjadk-x-codex', label: 'CJADK × Codex', cliId: 'codex', wrapperCli: 'cjadk codex' };
+
+const CJADK_VARIANTS: ReadonlyArray<CliSelectOption> = [CJADK_X_CLAUDE, CJADK_X_CODEX];
+
+/** 顶层 CLI 之外、纯 wrapperCli 网关分组（不对应任何原生 cliId），追加到树/列表末尾。 */
+const EXTRA_GATEWAY_GROUPS: ReadonlyArray<CliSelectGroup> = [
+  { key: 'cjadk', label: 'CJADK', children: CJADK_VARIANTS },
+];
+
 // ─── 扁平 / 级联 视图（均派生自 bot-config-editor 的 CLI_OPTIONS，避免再抄一份）──
 
 /**
- * 级联树（终端 TUI 用）：顺序同 CLI_OPTIONS；'aiden' 一项展开成 children。
+ * 级联树（终端 TUI 用）：顺序同 CLI_OPTIONS；'aiden' 一项展开成 children；
+ * 末尾追加无原生 cliId 的网关分组（CJADK）。
  */
-export const CLI_SELECT_TREE: ReadonlyArray<CliSelectGroup> = CLI_OPTIONS.map((o) =>
-  o.id === 'aiden'
-    ? { key: 'aiden', label: 'Aiden', children: AIDEN_VARIANTS }
-    : { key: o.id, label: o.label, option: { key: o.id, label: o.label, cliId: o.id } },
-);
+export const CLI_SELECT_TREE: ReadonlyArray<CliSelectGroup> = [
+  ...CLI_OPTIONS.map((o): CliSelectGroup =>
+    o.id === 'aiden'
+      ? { key: 'aiden', label: 'Aiden', children: AIDEN_VARIANTS }
+      : { key: o.id, label: o.label, option: { key: o.id, label: o.label, cliId: o.id } },
+  ),
+  ...EXTRA_GATEWAY_GROUPS,
+];
 
 /**
- * 扁平选项（web 下拉 + 非 TTY 回退用）：在 'aiden' 之后紧跟两个 aiden×* 项。
+ * 扁平选项（web 下拉 + 非 TTY 回退用）：'aiden' 之后紧跟两个 aiden×* 项，
+ * 末尾追加 cjadk×* 项。
  */
-export const CLI_SELECT_OPTIONS: ReadonlyArray<CliSelectOption> = CLI_OPTIONS.flatMap((o) =>
-  o.id === 'aiden'
-    ? AIDEN_VARIANTS
-    : [{ key: o.id, label: o.label, cliId: o.id }],
-);
+export const CLI_SELECT_OPTIONS: ReadonlyArray<CliSelectOption> = [
+  ...CLI_OPTIONS.flatMap((o) =>
+    o.id === 'aiden'
+      ? AIDEN_VARIANTS
+      : [{ key: o.id, label: o.label, cliId: o.id }],
+  ),
+  ...CJADK_VARIANTS,
+];
 
 const OPTION_BY_KEY: ReadonlyMap<string, CliSelectOption> = new Map(
   CLI_SELECT_OPTIONS.map((o) => [o.key, o]),

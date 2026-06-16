@@ -502,6 +502,11 @@ const BOTMUX_INJECTED_ENV_KEYS = [
   // Seed CLI（Claude Code fork）的数据根目录。worker 为 seed 注入它指向 seed 自己的
   // `.claude-runtime`，bridge 才能盯对文件；不进白名单 tmux pane 就拿不到。
   'CLAUDE_CONFIG_DIR',
+  // cjadk wrapperCli（`cjadk <agent>`）启动时 worker 注入 `0`，让 cjadk 跑非交互模式
+  // （跳过启动选择器、清掉吃首条/碎裂多行的输入怪癖），对齐 cjadk 官方 `cjadk feishu`
+  // wrapper。只有 cjadk 启动会被设上此值，其它 bot 不带 → 不进白名单 tmux pane 拿不到，
+  // cjadk 就回到交互模式（本次 bug 的根因）。
+  'CJADK_INTERACTIVE',
 ] as const;
 
 /**

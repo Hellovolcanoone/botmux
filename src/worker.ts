@@ -57,7 +57,7 @@ import {
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
-import { buildWrappedLaunch } from './setup/cli-selection.js';
+import { buildWrappedLaunch, parseWrapperCli } from './setup/cli-selection.js';
 import { findLaunchedCliPid, scheduleWrapperRealCliPid } from './core/session-discovery.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
@@ -3775,6 +3775,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // bin 走 PATH 解析），无需 wrapper 脚本、跨系统。aiden x claude 形态会剥掉 aiden 拒收的
   // --settings（见 buildWrappedLaunch）。与文件沙盒互斥：沙盒已把命令重写成 bwrap，叠加
   // 前缀会破坏隔离，故 sandboxOn 时跳过并告警（网关 + oncall 沙盒本就不是合理组合）。
+  // CJADK_INTERACTIVE is a cjadk-only knob we set on the cjadk wrapper branch
+  // below. Strip any value inherited from the daemon's own env first so a
+  // daemon launched under `cjadk feishu` (which exports it) can't leak it via
+  // the tmux env allowlist into EVERY bot's pane — only the cjadk branch should
+  // ever (re)set it. Harmless for non-cjadk CLIs (they don't read it), but this
+  // keeps the behaviour intentional rather than ambient. (Codex review note.)
+  delete (childEnv as Record<string, string>).CJADK_INTERACTIVE;
+
   if (cfg.wrapperCli && cfg.wrapperCli.trim()) {
     if (sandboxOn) {
       log(`wrapperCli="${cfg.wrapperCli}" ignored: file sandbox enabled and takes precedence (cannot combine launch prefix with bwrap)`);
@@ -3784,6 +3792,19 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
         spawnBin = launch.bin;
         spawnArgs = launch.args;
         log(`Launch prefix: spawning ${spawnBin} ${spawnArgs.slice(0, 2).join(' ')} … (cliId=${cfg.cliId})`);
+        // cjadk runs its launched agent in an INTERACTIVE wrapper by default —
+        // a model/session selector at startup plus terminal quirks that fight
+        // botmux's automated input (the selector eats the first prompt; the
+        // pre-render lag fragments multi-line messages; follow-ups can stick in
+        // the input box). cjadk's own botmux integration (`cjadk feishu`, see its
+        // botmux-wrapper-writer) sets CJADK_INTERACTIVE=0 to disable all of that.
+        // We mirror it here so a `cjadk <agent>` wrapperCli is driven the way
+        // cjadk intends — no selector, clean soft-newline input. Keyed on the
+        // wrapper's leading token so only cjadk launches are affected.
+        if (parseWrapperCli(cfg.wrapperCli)[0] === 'cjadk') {
+          (childEnv as Record<string, string>).CJADK_INTERACTIVE = '0';
+          log('cjadk launcher: set CJADK_INTERACTIVE=0 (non-interactive, mirrors cjadk feishu wrapper)');
+        }
       }
     }
   }
