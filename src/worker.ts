@@ -58,9 +58,10 @@ import {
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
 import { buildWrappedLaunch } from './setup/cli-selection.js';
+import { findLaunchedCliPid } from './core/session-discovery.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
-import type { CliAdapter, PtyHandle, SubmitRecheckResult } from './adapters/cli/types.js';
+import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
 import { HerdrBackend } from './adapters/backend/herdr-backend.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
@@ -3881,6 +3882,42 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       mode: effectiveResume ? 'baseline-existing' : 'fresh-empty',
       dataDir: claudeDataDir,
     });
+  }
+
+  // wrapperCli launcher (e.g. `aiden x claude`): backend.getChildPid() returned
+  // the LAUNCHER's pid above, but the launcher forks the real CLI (real Claude
+  // Code, Codex, …) as a child — and it's THAT child, not the launcher, that
+  // writes ~/.claude/sessions/<pid>.json and owns the transcript jsonl. With the
+  // launcher pid, resolveJsonlFromPid / findOpenClaudeSessionIds (both keyed on
+  // bridgeCliPid / backend.cliPid) find nothing, so the bridge stays pinned to a
+  // path the real CLI never writes — the model's turns never drive working/idle
+  // transitions and `botmux send`-less turns aren't forwarded. Resolve the real
+  // descendant pid and rewire backend.cliPid + bridgeCliPid to it; the bridge's
+  // 1s pid-follow poller then re-points to the CLI's real jsonl. The launcher
+  // forks the CLI asynchronously (slow through a gateway), so retry. Skipped when
+  // sandbox is on — wrapperCli is ignored there, so there is no launcher indirection.
+  // session-id MARKER inference is unaffected (the launcher-pid marker is still a
+  // valid ancestor of an in-CLI `botmux send`, and the env fallback covers it too).
+  if (cliPid && cfg.wrapperCli && cfg.wrapperCli.trim() && !sandboxOn) {
+    const launcherPid = cliPid;
+    const targetCliId = cfg.cliId as CliId;
+    let attempts = 0;
+    const resolveRealCliPid = () => {
+      if (!backend) return;
+      const realPid = findLaunchedCliPid(launcherPid, targetCliId);
+      if (realPid && realPid !== launcherPid) {
+        log(`wrapperCli "${cfg.wrapperCli}": resolved real CLI pid ${realPid} under launcher ${launcherPid} (cliId=${targetCliId}); rewiring session discovery + bridge`);
+        if (claudeDataDir) {
+          (backend as TmuxBackend | PtyBackend | ZellijBackend).cliPid = realPid;
+          // Per-tick maybeFollowSessionRotationViaPid (bridge 1s poller) reads the
+          // module-level bridgeCliPid and re-points to the real CLI's jsonl.
+          bridgeCliPid = realPid;
+        }
+        return;
+      }
+      if (++attempts < 30) setTimeout(resolveRealCliPid, 200); // ~6s budget
+    };
+    setTimeout(resolveRealCliPid, 200);
   }
 
   // Structured transcript bridge fallback: if the model finishes without

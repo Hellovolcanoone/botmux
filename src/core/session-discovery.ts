@@ -321,6 +321,51 @@ function findCliProcess(
 }
 
 /**
+ * Resolve the REAL CLI pid spawned underneath a wrapperCli launcher
+ * (e.g. `aiden x claude`, where the launcher forks real Claude Code as a child).
+ *
+ * The worker's `backend.getChildPid()` returns the LAUNCHER's pid, but it's the
+ * forked child — not the launcher — that writes `~/.claude/sessions/<pid>.json`
+ * and owns the transcript jsonl. Tracking the launcher pid therefore breaks
+ * session-id discovery and leaves the JSONL bridge watching a path the real CLI
+ * never writes. This walks the launcher's DESCENDANTS to find the actual CLI.
+ *
+ * Matching is by process `comm` ONLY — deliberately NOT argv. The launcher's own
+ * argv carries the target name as a literal token (`aiden x claude` → "claude"
+ * is in argv), so argv-scanning (cliIdFromCommArgv) would misidentify the
+ * launcher itself as the CLI. The real CLI process has the binary as its comm
+ * (`claude`, `codex`, …); the launcher's comm is its own (`node`/`aiden`).
+ *
+ * BFS starts at the launcher's children (never the launcher node) and returns
+ * the shallowest descendant recognized as `targetCliId`, or null if none exists
+ * yet — the launcher may not have forked the CLI at call time, so callers retry.
+ */
+export function findLaunchedCliPid(
+  launcherPid: number,
+  targetCliId: CliId,
+  maxDepth = 6,
+  // Injectable process probes (defaults hit the real OS); tests pass fakes.
+  probes: { childrenOf?: (pid: number) => number[]; commOf?: (pid: number) => string | undefined } = {},
+): number | null {
+  const childrenOf = probes.childrenOf ?? getChildPids;
+  const commOf = probes.commOf ?? readComm;
+  let frontier = childrenOf(launcherPid);
+  const seen = new Set<number>([launcherPid]);
+  for (let depth = 0; depth < maxDepth && frontier.length > 0; depth++) {
+    const next: number[] = [];
+    for (const pid of frontier) {
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+      const comm = commOf(pid);
+      if (comm && cliIdForComm(comm, targetCliId) === targetCliId) return pid;
+      next.push(...childrenOf(pid));
+    }
+    frontier = next;
+  }
+  return null;
+}
+
+/**
  * Try to read Claude Code session metadata from ~/.claude/sessions/<PID>.json.
  * Returns { sessionId, cwd, startedAt } or undefined.
  */
