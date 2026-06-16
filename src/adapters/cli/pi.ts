@@ -44,6 +44,7 @@ export function createPiAdapter(pathOverride?: string): CliAdapter {
     busyPattern: /Working\.\.\./,
     readyPattern: undefined,
     supportsTypeAhead: true,
+    mergeQueuedInput: true,
     systemHints: BOTMUX_SHELL_HINTS,
     altScreen: true,
     skillsDir: '~/.pi/agent/skills',

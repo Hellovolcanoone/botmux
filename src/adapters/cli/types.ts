@@ -216,6 +216,11 @@ export interface CliAdapter {
    *  correct for both shapes. */
   readonly supportsTypeAhead?: boolean;
 
+  /** When true, worker may squash additional queued Lark messages into the
+   *  pending tail instead of preserving one botmux turn per queued message.
+   *  Keep this opt-in: most adapters rely on distinct turnId / card routing. */
+  readonly mergeQueuedInput?: boolean;
+
   /** Whether CLI uses alternate screen buffer */
   readonly altScreen: boolean;
 

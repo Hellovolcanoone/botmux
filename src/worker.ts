@@ -110,6 +110,9 @@ let consecutiveInWorkerRestarts = 0;
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
 let resumeFallbackNotified = false;
+const IDLE_PROBE_INTERVAL_MS = 3_500;
+const IDLE_PROBE_MAX_ATTEMPTS = 24;
+let busyPatternIdleProbeTimer: ReturnType<typeof setTimeout> | null = null;
 /** The effectiveResume flag used by the most recent spawnCli call. Written
  *  immediately after the two-tier fallback check so late-attach timers
  *  (hermes, cursor, etc.) can read THE SAME semantics the spawn used,
@@ -2762,6 +2765,7 @@ function onPtyData(data: string): void {
 
 function markPromptReady(): void {
   if (isPromptReady) return;  // guard against duplicate calls
+  stopBusyPatternIdleProbe();
   // Ready-gate: a startup selector's ❯ (cjadk et al.) falsely matches
   // readyPattern → the IdleDetector fires idle while the CLI is NOT actually at
   // its input box. Hold off declaring ready until the SessionStart hook signal
@@ -3023,6 +3027,7 @@ async function flushPending(): Promise<void> {
       let result: Awaited<ReturnType<typeof cliAdapter.writeInput>> | undefined;
       try {
         result = await cliAdapter.writeInput(backend, msg);
+        scheduleBusyPatternIdleProbe(`${cliName()} post-submit`);
       } catch (err: any) {
         log(`writeInput threw: ${err?.message ?? err}`);
         // If the CLI exited mid-write the backend already fired onExit (which
@@ -3071,7 +3076,7 @@ function sendToPty(content: string, turnId?: string): void {
     isFlushing,
     supportsTypeAhead: cliAdapter.supportsTypeAhead === true,
     awaitingFirstPrompt,
-  });
+  }) && cliAdapter.mergeQueuedInput === true;
   const mergedQueued = shouldMergeQueued && mergeQueuedCliInput(pendingMessages, next);
   if (mergedQueued) {
     log(`Merged queued message (${pendingMessages.length} pending): "${content.substring(0, 80)}" — ${cliName()} ${awaitingFirstPrompt ? 'still booting' : 'is busy'}`);
@@ -3341,23 +3346,62 @@ function seedBackendScreen(source: string, be: Pick<SessionBackend, 'captureCurr
   }
 }
 
+function captureBackendScreen(be: Pick<SessionBackend, 'captureCurrentScreen' | 'captureViewport'>): string {
+  return be.captureViewport?.() ?? be.captureCurrentScreen?.() ?? '';
+}
+
+function probeBusyPatternIdle(
+  source: string,
+  be: Pick<SessionBackend, 'captureCurrentScreen' | 'captureViewport'>,
+): boolean {
+  try {
+    const content = captureBackendScreen(be);
+    if (!content) return false;
+    if (cliAdapter?.busyPattern) {
+      if (cliAdapter.busyPattern.test(content)) return false;
+      log(`${source} idle probe: busy marker absent, marking prompt ready`);
+      markPromptReady();
+      return true;
+    }
+    onPtyData(content);
+  } catch (err: any) {
+    log(`${source} idle probe captureCurrentScreen failed: ${err.message}`);
+  }
+  return false;
+}
+
 function scheduleReattachIdleProbe(source: string, be: Pick<SessionBackend, 'captureCurrentScreen' | 'captureViewport'>): void {
   setTimeout(() => {
     if (!awaitingFirstPrompt || isPromptReady || pendingMessages.length > 0) return;
-    try {
-      const content = be.captureViewport?.() ?? be.captureCurrentScreen?.() ?? '';
-      if (!content) return;
-      if (cliAdapter?.busyPattern) {
-        if (cliAdapter.busyPattern.test(content)) return;
-        log(`${source} idle probe: busy marker absent, marking prompt ready`);
-        markPromptReady();
-        return;
-      }
-      onPtyData(content);
-    } catch (err: any) {
-      log(`${source} idle probe captureCurrentScreen failed: ${err.message}`);
+    probeBusyPatternIdle(source, be);
+  }, IDLE_PROBE_INTERVAL_MS).unref?.();
+}
+
+function stopBusyPatternIdleProbe(): void {
+  if (busyPatternIdleProbeTimer) {
+    clearTimeout(busyPatternIdleProbeTimer);
+    busyPatternIdleProbeTimer = null;
+  }
+}
+
+function scheduleBusyPatternIdleProbe(source: string): void {
+  stopBusyPatternIdleProbe();
+  if (!cliAdapter?.busyPattern || !backend?.captureCurrentScreen && !backend?.captureViewport) return;
+
+  let attempts = 0;
+  const tick = () => {
+    busyPatternIdleProbeTimer = null;
+    if (!backend || isPromptReady || pendingMessages.length > 0) return;
+    attempts += 1;
+    if (probeBusyPatternIdle(source, backend)) return;
+    if (attempts < IDLE_PROBE_MAX_ATTEMPTS && !isPromptReady) {
+      busyPatternIdleProbeTimer = setTimeout(tick, IDLE_PROBE_INTERVAL_MS);
+      busyPatternIdleProbeTimer.unref?.();
     }
-  }, 3_500).unref?.();
+  };
+
+  busyPatternIdleProbeTimer = setTimeout(tick, IDLE_PROBE_INTERVAL_MS);
+  busyPatternIdleProbeTimer.unref?.();
 }
 
 function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
@@ -4141,6 +4185,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
 function killCli(): void {
   idleDetector?.dispose();
   idleDetector = null;
+  stopBusyPatternIdleProbe();
   // Cancel any pending ready-gate fallback / settle timers; spawnCli re-arms on respawn.
   if (readySignalTimer) { clearTimeout(readySignalTimer); readySignalTimer = null; }
   if (readyFlushSettleTimer) { clearTimeout(readyFlushSettleTimer); readyFlushSettleTimer = null; }

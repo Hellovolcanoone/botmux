@@ -503,6 +503,16 @@ describe('supportsTypeAhead flag', () => {
     expect(adapter.busyPattern?.test('已完成，等待下一条输入')).toBe(false);
   });
 
+  it('pi: opts into queued-input merging', () => {
+    expect(createPiAdapter('/bin/pi').mergeQueuedInput).toBe(true);
+  });
+
+  it('non-pi type-ahead adapters do not squash queued botmux turns', () => {
+    expect(createClaudeCodeAdapter('/bin/claude').mergeQueuedInput).toBeUndefined();
+    expect(createCocoAdapter('/bin/coco').mergeQueuedInput).toBeUndefined();
+    expect(createCodexAdapter('/bin/codex').mergeQueuedInput).toBeUndefined();
+  });
+
   it.each(PLAIN_ADAPTERS.filter(([name]) => name !== 'codex'))('%s: undefined (default behavior)', (_name, adapter) => {
     expect(adapter.supportsTypeAhead).toBeUndefined();
   });
