@@ -14,7 +14,7 @@ import { logger } from '../utils/logger.js';
 import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, isRelayableRealSession, closeSession } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
-import { getSessionPersistentBackendType, persistentSessionName, probePersistentSession, killPersistentSession } from './persistent-backend.js';
+import { getSessionPersistentBackendType, persistentSessionName, probePersistentSession, probePersistentBackendServer, killPersistentSession, type PersistentBackendType } from './persistent-backend.js';
 import { adoptTargetLabel, validateAdoptTargetState } from './session-discovery.js';
 import { getBot, getAllBots } from '../bot-registry.js';
 import type { CliId } from '../adapters/cli/types.js';
@@ -777,6 +777,16 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
   // actual re-fork is deferred into `toReattach` and staggered below so a box
   // with dozens of surviving sessions doesn't spike on restart.
   const toReattach: DaemonSession[] = [];
+  // Server-liveness is sampled ONCE per backend type (cached): a single
+  // `tmux list-sessions` answers for all of that backend's sessions, and a
+  // consistent snapshot avoids a mid-loop race where an early lazy fork could
+  // flip the answer partway through (the loop itself starts no workers).
+  const serverStateCache = new Map<PersistentBackendType, 'running' | 'down' | 'unknown'>();
+  const backendServerState = (bt: PersistentBackendType) => {
+    let s = serverStateCache.get(bt);
+    if (s === undefined) { s = probePersistentBackendServer(bt); serverStateCache.set(bt, s); }
+    return s;
+  };
   for (const [, ds] of activeSessions) {
     const backendType = getSessionPersistentBackendType(ds);
     if (!backendType) continue;
@@ -785,10 +795,21 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     const backendName = persistentSessionName(backendType, ds.session.sessionId);
     const probe = probePersistentSession(backendType, backendName);
     if (probe === 'missing') {
-      // Probe succeeded and authoritatively says the backing pane/agent is gone
-      // — this is a true zombie. Close it (evicts the active record + marks the
-      // store row closed) so the next message starts a clean session.
       const tag = ds.session.sessionId.substring(0, 8);
+      // 'missing' is ambiguous: it means EITHER this one pane is gone while the
+      // server runs (a true solo zombie) OR the whole multiplexer server is down
+      // (e.g. machine reboot) and every pane vanished at once. Only the former is
+      // a zombie to close. On a reboot the CLI transcript on disk is still
+      // resumable, so keep the worker-less active record and let it lazily resume
+      // on the next message (exactly like a pty session) instead of mass-closing
+      // every session — the bug that wiped a full dashboard after a host reboot.
+      if (backendServerState(backendType) === 'down') {
+        logger.warn(`[${tag}] ${backendType} server is down (host reboot?) — keeping "${backendName}" active for lazy resume instead of closing`);
+        continue;
+      }
+      // Server is up (or its state is inconclusive) and this specific pane is
+      // gone — a true zombie. Close it (evicts the active record + marks the
+      // store row closed) so the next message starts a clean session.
       logger.warn(`[${tag}] ${backendType} backing session "${backendName}" is gone — closing zombie active session`);
       await closeSession(ds.session.sessionId);
       continue;
