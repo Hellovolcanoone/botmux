@@ -220,6 +220,7 @@ describe('repo select card — plain switch', () => {
 
   it('mid-session selection closes the old session and forks a fresh one', async () => {
     const ds = makeDs(); // no pendingRepo
+    ds.session.workingDir = '/repos/gamma'; // old session's actual repo
     const { deps, sessionReply } = makeDeps(ds);
 
     await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
@@ -227,6 +228,7 @@ describe('repo select card — plain switch', () => {
     expect(killWorker).toHaveBeenCalledTimes(1);
     expect(closeSession).toHaveBeenCalledWith('uuid-old');
     expect(ds.session.sessionId).toMatch(/^uuid-new-/);
+    expect(ds.workingDir).toBe('/repos/beta');
     expect(ds.session.workingDir).toBe('/repos/beta');
     expect(forkWorker).toHaveBeenCalledTimes(1);
     expect(vi.mocked(forkWorker).mock.calls[0]![1]).toBe('');
@@ -236,6 +238,10 @@ describe('repo select card — plain switch', () => {
     expect(deliverEphemeralOrReply).toHaveBeenCalledTimes(1);
     const closedCard = vi.mocked(deliverEphemeralOrReply).mock.calls[0]![2] as string;
     expect(closedCard).toContain('uuid-old');
+    // Regression guard: the closed card must carry the OLD session's repo, NOT
+    // the switch target — otherwise `claude --resume` reopens it in the wrong cwd.
+    expect(closedCard).toContain('gamma');
+    expect(closedCard).not.toContain('beta');
   });
 });
 

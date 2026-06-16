@@ -1123,11 +1123,11 @@ export async function handleCommand(
         // close + recreate the session (mid-session switch). Used by both the
         // numeric `/repo <N>` form and the `/repo <path|name>` form.
         const commitRepoSelection = async (selectedPath: string, displayName: string, how: string) => {
-          ds!.workingDir = selectedPath;
-          ds!.session.workingDir = selectedPath;
-          sessionStore.updateSession(ds!.session);
-
           if (ds!.pendingRepo) {
+            // First spawn: pin the new cwd onto the CURRENT session, then fork.
+            ds!.workingDir = selectedPath;
+            ds!.session.workingDir = selectedPath;
+            sessionStore.updateSession(ds!.session);
             await forkPendingCli(t('cmd.repo.selected_in_pending', { name: displayName }, loc));
           } else {
             // Safety net: a mid-session `/repo` switch closes the running
@@ -1140,6 +1140,12 @@ export async function handleCommand(
             // still hits anchor_occupied while the new session occupies this
             // anchor — expected; `/close` the new one first, or use the
             // command.) Mirrors the `/close` case above.
+            //
+            // The new cwd is NOT written onto the old session here — it would
+            // pollute the displaced session's stored workingDir (and the closed
+            // card), so `claude --resume` later would reopen the old context in
+            // the new repo's cwd. The new repo is pinned onto the fresh session
+            // below instead.
             const closedCard = buildClosedSessionCard(ds!, loc);
             killWorker(ds!);
             sessionStore.closeSession(ds!.session.sessionId);
@@ -1155,6 +1161,7 @@ export async function handleCommand(
             ds!.session = session;
             ds!.lastUserPrompt = undefined;
             ds!.lastCliInput = undefined;
+            ds!.workingDir = selectedPath;
             ds!.session.workingDir = selectedPath;
             ds!.session.larkAppId = ds!.larkAppId;
             sessionStore.updateSession(ds!.session);

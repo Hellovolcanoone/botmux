@@ -177,11 +177,12 @@ async function commitRepoSelection(
   const repoSessionKey = larkAppId ? sessionKey(rootId, larkAppId) : rootId;
   const sessionStillActive = () => activeSessions.get(repoSessionKey) === ds;
   const commitGenSessionId = ds.session.sessionId;
-  ds.workingDir = dirPath;
-  ds.session.workingDir = dirPath;
-  sessionStore.updateSession(ds.session);
 
   if (ds.pendingRepo) {
+    // First spawn: pin the new cwd onto the CURRENT session before forking.
+    ds.workingDir = dirPath;
+    ds.session.workingDir = dirPath;
+    sessionStore.updateSession(ds.session);
     const selfBot = getBot(ds.larkAppId);
     const botCfg = selfBot.config;
     const effectiveCliId = sessionCliId(ds);
@@ -248,6 +249,11 @@ async function commitRepoSelection(
     // this anchor, so the old context would otherwise vanish without a trace
     // (relay/adopt/resume all hit `anchor_occupied`). The card keeps it
     // visible and carries the terminal `claude --resume` command.
+    //
+    // The new cwd is NOT written onto the old session here — it would pollute
+    // the displaced session's stored workingDir (and the closed card), so
+    // `claude --resume` later would reopen the old context in the new repo's
+    // cwd. The new repo is pinned onto the fresh session below instead.
     const closedCard = buildClosedSessionCard(ds, locTarget);
 
     killWorker(ds);
@@ -277,6 +283,7 @@ async function commitRepoSelection(
     // workingDir and the worker spawns in the bot's default cwd, so
     // `claude --resume` looks in the wrong .claude/projects/<hash>/ dir and
     // exits code 0 immediately, crash-looping until the rate-limiter trips.
+    ds.workingDir = dirPath;
     ds.session.workingDir = dirPath;
     ds.session.larkAppId = ds.larkAppId;
     sessionStore.updateSession(ds.session);
