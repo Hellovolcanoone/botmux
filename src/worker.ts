@@ -113,6 +113,7 @@ let resumeFallbackNotified = false;
 const IDLE_PROBE_INTERVAL_MS = 3_500;
 const IDLE_PROBE_MAX_ATTEMPTS = 24;
 let busyPatternIdleProbeTimer: ReturnType<typeof setTimeout> | null = null;
+let reattachIdleProbeTimer: ReturnType<typeof setTimeout> | null = null;
 /** The effectiveResume flag used by the most recent spawnCli call. Written
  *  immediately after the two-tier fallback check so late-attach timers
  *  (hermes, cursor, etc.) can read THE SAME semantics the spawn used,
@@ -3363,7 +3364,6 @@ function probeBusyPatternIdle(
       markPromptReady();
       return true;
     }
-    onPtyData(content);
   } catch (err: any) {
     log(`${source} idle probe captureCurrentScreen failed: ${err.message}`);
   }
@@ -3371,10 +3371,21 @@ function probeBusyPatternIdle(
 }
 
 function scheduleReattachIdleProbe(source: string, be: Pick<SessionBackend, 'captureCurrentScreen' | 'captureViewport'>): void {
-  setTimeout(() => {
-    if (!awaitingFirstPrompt || isPromptReady || pendingMessages.length > 0) return;
+  stopReattachIdleProbe();
+  if (!cliAdapter?.busyPattern || (!be.captureCurrentScreen && !be.captureViewport)) return;
+  reattachIdleProbeTimer = setTimeout(() => {
+    reattachIdleProbeTimer = null;
+    if (backend !== be || !awaitingFirstPrompt || isPromptReady) return;
     probeBusyPatternIdle(source, be);
-  }, IDLE_PROBE_INTERVAL_MS).unref?.();
+  }, IDLE_PROBE_INTERVAL_MS);
+  reattachIdleProbeTimer.unref?.();
+}
+
+function stopReattachIdleProbe(): void {
+  if (reattachIdleProbeTimer) {
+    clearTimeout(reattachIdleProbeTimer);
+    reattachIdleProbeTimer = null;
+  }
 }
 
 function stopBusyPatternIdleProbe(): void {
@@ -3386,12 +3397,12 @@ function stopBusyPatternIdleProbe(): void {
 
 function scheduleBusyPatternIdleProbe(source: string): void {
   stopBusyPatternIdleProbe();
-  if (!cliAdapter?.busyPattern || !backend?.captureCurrentScreen && !backend?.captureViewport) return;
+  if (!cliAdapter?.busyPattern || (!backend?.captureCurrentScreen && !backend?.captureViewport)) return;
 
   let attempts = 0;
   const tick = () => {
     busyPatternIdleProbeTimer = null;
-    if (!backend || isPromptReady || pendingMessages.length > 0) return;
+    if (!backend || isPromptReady) return;
     attempts += 1;
     if (probeBusyPatternIdle(source, backend)) return;
     if (attempts < IDLE_PROBE_MAX_ATTEMPTS && !isPromptReady) {
@@ -4185,6 +4196,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
 function killCli(): void {
   idleDetector?.dispose();
   idleDetector = null;
+  stopReattachIdleProbe();
   stopBusyPatternIdleProbe();
   // Cancel any pending ready-gate fallback / settle timers; spawnCli re-arms on respawn.
   if (readySignalTimer) { clearTimeout(readySignalTimer); readySignalTimer = null; }
