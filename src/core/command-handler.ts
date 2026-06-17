@@ -2366,7 +2366,14 @@ export async function handleCommand(
         const workingDir = getSessionWorkingDir(ds);
         const builtin = [...PASSTHROUGH_COMMANDS];
         const adapterDefaults = resolveAdapterDefaultPassthroughCommands(larkAppId);
-        const custom = botCfg?.customPassthroughCommands ?? [];
+        // 只展示「实际生效」的 custom 命令：用与 resolvePassthroughCommands 同一套
+        // normalize 过滤掉手写 bots.json 里遮蔽 daemon 命令 / 非法的项（parser 出于
+        // 兼容会保留它们，但路由会丢弃），避免 `/status` 之类被展示成可用却走 daemon。
+        const custom = [...new Set(
+          (botCfg?.customPassthroughCommands ?? [])
+            .map(normalizePassthroughCommand)
+            .filter((c): c is string => !!c),
+        )];
         let cliAdapter;
         try {
           cliAdapter = createCliAdapterSync(cliId, botCfg?.cliPathOverride);

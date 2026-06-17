@@ -64,6 +64,7 @@ import {
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
 import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
+import { SLASH_COMMAND_SHAPE } from './core/passthrough-commands.js';
 import type { CommandHandlerDeps } from './core/command-handler.js';
 import { findInheritablePeer } from './core/inherit-peer.js';
 import { isCallbackUrl, handleCallbackUrl } from './utils/user-token.js';
@@ -550,7 +551,10 @@ export function grantRestrictedSlashCommandText(
   senderOpenId: string | undefined,
   cmd: string,
 ): string | undefined {
-  if (!/^\/[a-z][a-z0-9_-]*$/.test(cmd)) return undefined;
+  // 用与 passthrough 归一化同一套 shape 正则（SLASH_COMMAND_SHAPE），否则像
+  // `/foo:bar`、`/1cmd` 这类 passthrough 认、本闸不认的命令会让 grant-only 用户在
+  // restrictGrantCommands=true 下绕过限制直达 raw passthrough（路由里本闸在 passthrough 之前）。
+  if (!SLASH_COMMAND_SHAPE.test(cmd)) return undefined;
   return grantRestrictedCommandText(larkAppId, chatId, senderOpenId, cmd);
 }
 

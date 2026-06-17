@@ -544,6 +544,26 @@ describe('/list-slash-command discovery', () => {
     );
   });
 
+  it('shows only effective custom passthrough commands (drops daemon-shadow + junk, normalizes)', async () => {
+    // 手写 bots.json 可能留下 `/status`（遮蔽 daemon 命令，parser 出于兼容会保留但
+    // 路由会丢弃）、非法项、大小写不一；展示侧须与 resolvePassthroughCommands 同口径。
+    vi.mocked(getBot).mockImplementation(((id: string = 'app-1') => {
+      const b = defaultGetBot(id);
+      (b.config as any).customPassthroughCommands = ['/status', '/b@d', '/GOAL', '/export', '/goal'];
+      return b;
+    }) as any);
+    try {
+      const deps = makeDeps(makeDaemonSession());
+      await handleCommand('/slash', ROOT_ID, makeLarkMessage('/slash'), deps, LARK_APP_ID);
+      expect(buildSlashListCard).toHaveBeenCalledWith(
+        expect.objectContaining({ custom: ['/goal', '/export'] }),
+        expect.anything(),
+      );
+    } finally {
+      vi.mocked(getBot).mockImplementation(defaultGetBot as any);
+    }
+  });
+
   it('keeps Claude-family filesystem discovery enabled', async () => {
     const deps = makeDeps(makeDaemonSession());
 

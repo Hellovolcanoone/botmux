@@ -29,6 +29,17 @@ export const PASSTHROUGH_COMMANDS = new Set([
 ]);
 
 /**
+ * Shape of a slash-command token: leading `/`, an alphanumeric first char, then
+ * `[a-z0-9:_-]`. Shared by passthrough normalization AND the grant-restriction
+ * gate ({@link ../daemon.js}'s `grantRestrictedSlashCommandText`) so a custom
+ * passthrough command can't slip past the restriction check via a shape one
+ * recognizes but the other doesn't (e.g. `/foo:bar`, `/1cmd` — colon / leading
+ * digit). Keep the two in lockstep: anything passthrough accepts must also be
+ * recognized as a command by the restriction gate.
+ */
+export const SLASH_COMMAND_SHAPE = /^\/[a-z0-9][a-z0-9:_-]*$/;
+
+/**
  * Normalize a single custom passthrough command: lowercase, must match the
  * slash-command shape, and must not shadow a daemon command (passthrough is
  * checked BEFORE DAEMON_COMMANDS in the router). Returns null for anything that
@@ -38,7 +49,7 @@ export const PASSTHROUGH_COMMANDS = new Set([
 export function normalizePassthroughCommand(cmd: unknown): string | null {
   if (typeof cmd !== 'string') return null;
   const normalized = cmd.trim().toLowerCase();
-  if (!/^\/[a-z0-9][a-z0-9:_-]*$/.test(normalized)) return null;
+  if (!SLASH_COMMAND_SHAPE.test(normalized)) return null;
   if (DAEMON_COMMANDS.has(normalized)) return null;
   return normalized;
 }
