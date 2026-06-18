@@ -24,6 +24,7 @@ import { createAidenAdapter } from '../src/adapters/cli/aiden.js';
 import { createCocoAdapter } from '../src/adapters/cli/coco.js';
 import { createCodexAdapter } from '../src/adapters/cli/codex.js';
 import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
+import { createCursorAdapter } from '../src/adapters/cli/cursor.js';
 import { createGeminiAdapter } from '../src/adapters/cli/gemini.js';
 import { createOpenCodeAdapter } from '../src/adapters/cli/opencode.js';
 import { createAntigravityAdapter } from '../src/adapters/cli/antigravity.js';
@@ -390,6 +391,38 @@ describe('copilot buildArgs', () => {
   it('surfaces curated model choices for setup', () => {
     expect(adapter.modelChoices).toContain('claude-sonnet-4');
     expect(adapter.modelChoices).toContain('gpt-5');
+  });
+});
+
+describe('cursor buildArgs', () => {
+  const adapter = createCursorAdapter('/usr/bin/cursor-agent');
+
+  it('fresh session passes force/model flags without resume flags', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cursor', resume: false, model: 'gpt-5' });
+    expect(args).toContain('--force');
+    expect(args).toContain('--model');
+    expect(args).toContain('gpt-5');
+    expect(args).not.toContain('--resume');
+    expect(args).not.toContain('--continue');
+  });
+
+  it('resume with persisted Cursor chatId passes --resume <chatId>', () => {
+    const chatId = 'c8c78608-0eef-4930-8007-c41ba71ba05d';
+    const args = adapter.buildArgs({
+      sessionId: 'sess-cursor',
+      resume: true,
+      resumeSessionId: chatId,
+    });
+    expect(args).toContain('--resume');
+    const idx = args.indexOf('--resume');
+    expect(args[idx + 1]).toBe(chatId);
+    expect(args).not.toContain('--continue');
+  });
+
+  it('resume without a persisted chatId falls back to --continue', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cursor', resume: true });
+    expect(args).toContain('--continue');
+    expect(args).not.toContain('--resume');
   });
 });
 

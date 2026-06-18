@@ -38,7 +38,7 @@ import { findTraexRolloutBySessionId, findTraexRolloutByPid } from './services/t
 import { cocoEventsPathForSession, drainCocoEvents, findCocoSessionByPid } from './services/coco-transcript.js';
 import { currentHermesStateOffset, drainHermesStateDb } from './services/hermes-transcript.js';
 import { currentMtrSessionOffset, drainMtrSession, findLatestMtrSessionByDirectory, findMtrSessionById, type MtrTranscriptSource } from './services/mtr-transcript.js';
-import { drainCursorTranscript, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
+import { drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
 import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
@@ -2822,6 +2822,33 @@ function persistCliSessionId(cliSessionId: string): void {
   }
 }
 
+function observeCursorCliSessionId(pid: number, label = 'spawn'): void {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  if (lastInitConfig?.cliId !== 'cursor') return;
+  if (lastInitConfig.cliSessionId) return;
+
+  const backendAtSpawn = backend;
+  let attempts = 0;
+  const maxAttempts = 60; // Cursor may open store.db only after its startup render settles.
+  const tick = () => {
+    if (!backend || lastInitConfig?.cliId !== 'cursor' || lastInitConfig.cliSessionId) return;
+    if (backend !== backendAtSpawn) return;
+    const currentPid = backend.getChildPid?.();
+    if (currentPid && currentPid !== pid) return;
+
+    const realPid = findLaunchedCliPid(pid, 'cursor') ?? pid;
+    const chatId = findCursorChatIdByPid(realPid);
+    if (chatId) {
+      persistCliSessionId(chatId);
+      log(`Observed Cursor chatId via pid ${realPid}${realPid === pid ? '' : ` (launcher ${pid})`} (${label}): ${chatId}`);
+      return;
+    }
+    attempts++;
+    if (attempts < maxAttempts) setTimeout(tick, 500);
+  };
+  setTimeout(tick, 250);
+}
+
 /** How long to wait before re-checking whether a submit-not-confirmed message
  *  eventually landed. Cold-start sessions and slow third-party hooks
  *  (UserPromptSubmit, SessionStart — e.g. superpowers' large skill injection)
@@ -3966,6 +3993,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     });
   };
   if (cliPid) startWrapperRealPidResolve(cliPid);
+  if (cliPid) observeCursorCliSessionId(cliPid);
 
   // Wire pid + cwd so the claude-code adapter's writeInput can read
   // ~/.claude/sessions/<pid>.json — the spawn-time pid-state record. Its
@@ -4012,6 +4040,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
         // LAUNCHER. Kick the descendant resolver so the bridge gets the real CLI
         // pid too (mirrors the synchronous path above). No-op for non-wrapperCli.
         startWrapperRealPidResolve(pid);
+        observeCursorCliSessionId(pid, 'async');
         return;
       }
       if (++attempts < 25) setTimeout(resolveCliPidLate, 120); // ~3s budget
