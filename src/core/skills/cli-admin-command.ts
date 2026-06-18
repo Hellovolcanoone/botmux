@@ -203,7 +203,9 @@ export function runSkillsAdminCommand(args: string[]): AdminCommandResult {
       if (!gh) return { code: 2, stdout: '', stderr: 'invalid github source\n' };
       const path = argValue(args, '--path') ?? gh.path;
       if (!path) return { code: 2, stdout: '', stderr: 'github install requires a repo path or --path <skill-path>\n' };
-      const ref = argValue(args, '--ref');
+      // Fall back to the ref parsed from a browser URL (…/tree/<ref>/…) when
+      // --ref isn't given, matching the dashboard install path.
+      const ref = argValue(args, '--ref') ?? gh.ref;
       const sourceOverride: SkillSource = { type: 'github', owner: gh.owner, repo: gh.repo, path, ...(ref ? { ref } : {}) };
       const pkg = installGitSkill({
         url: githubToGitUrl(gh.owner, gh.repo),
