@@ -38,7 +38,8 @@ import { findTraexRolloutBySessionId, findTraexRolloutByPid } from './services/t
 import { cocoEventsPathForSession, drainCocoEvents, findCocoSessionByPid } from './services/coco-transcript.js';
 import { currentHermesStateOffset, drainHermesStateDb } from './services/hermes-transcript.js';
 import { currentMtrSessionOffset, drainMtrSession, findLatestMtrSessionByDirectory, findMtrSessionById, type MtrTranscriptSource } from './services/mtr-transcript.js';
-import { drainCursorTranscript, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
+import { drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
+import { shouldObserveCursorChatId, shouldPersistObservedCursorChatId } from './services/cursor-resume-policy.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
 import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
@@ -122,6 +123,7 @@ let reattachIdleProbeTimer: ReturnType<typeof setTimeout> | null = null;
  *  setup so even the tick that fires between spawnCli-start and the
  *  adapter's hermesBridgeAttach reads the correct mode. */
 let lastSpawnEffectiveResume = false;
+let lastSpawnEffectiveCliSessionId: string | undefined;
 let idleDetector: IdleDetector | null = null;
 let isTmuxMode = false;
 /** Adopt-bridge mode using TmuxPipeBackend: not a tmux attach client, all
@@ -2822,6 +2824,48 @@ function persistCliSessionId(cliSessionId: string): void {
   }
 }
 
+function observeCursorCliSessionId(pid: number, label = 'spawn'): void {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  if (!shouldObserveCursorChatId({
+    cliId: lastInitConfig?.cliId,
+    effectiveResume: lastSpawnEffectiveResume,
+    effectiveCliSessionId: lastSpawnEffectiveCliSessionId,
+  })) return;
+
+  const backendAtSpawn = backend;
+  let attempts = 0;
+  const maxAttempts = 60; // Cursor may open store.db only after its startup render settles.
+  const tick = () => {
+    if (!backend || !shouldObserveCursorChatId({
+      cliId: lastInitConfig?.cliId,
+      effectiveResume: lastSpawnEffectiveResume,
+      effectiveCliSessionId: lastSpawnEffectiveCliSessionId,
+    })) return;
+    if (backend !== backendAtSpawn) return;
+    const currentPid = backend.getChildPid?.();
+    if (currentPid && currentPid !== pid) return;
+
+    const realPid = findLaunchedCliPid(pid, 'cursor') ?? pid;
+    const chatId = findCursorChatIdByPid(realPid);
+    if (chatId) {
+      if (!shouldPersistObservedCursorChatId({
+        effectiveResume: lastSpawnEffectiveResume,
+        effectiveCliSessionId: lastSpawnEffectiveCliSessionId,
+        observedChatId: chatId,
+      })) {
+        log(`Observed Cursor chatId via pid ${realPid}${realPid === pid ? '' : ` (launcher ${pid})`} (${label}) but kept existing resume target ${lastSpawnEffectiveCliSessionId}`);
+        return;
+      }
+      persistCliSessionId(chatId);
+      log(`Observed Cursor chatId via pid ${realPid}${realPid === pid ? '' : ` (launcher ${pid})`} (${label}): ${chatId}`);
+      return;
+    }
+    attempts++;
+    if (attempts < maxAttempts) setTimeout(tick, 500);
+  };
+  setTimeout(tick, 250);
+}
+
 /** How long to wait before re-checking whether a submit-not-confirmed message
  *  eventually landed. Cold-start sessions and slow third-party hooks
  *  (UserPromptSubmit, SessionStart — e.g. superpowers' large skill injection)
@@ -3652,6 +3696,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // `lastInitConfig.resume` (= true) and baseline an empty store, swallowing
   // the fresh session's first turn.
   lastSpawnEffectiveResume = effectiveResume;
+  lastSpawnEffectiveCliSessionId = effectiveCliSessionId;
 
   // ttadk 网关：模型走 ttadk 自己的 `-m`（启动期注入到 ttadk 前缀，见下方 wrapperCli
   // 分支），不能再把 cfg.model 透给底层适配器，否则真实 CLI 会再吃一个 --model 重复。
@@ -3966,6 +4011,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     });
   };
   if (cliPid) startWrapperRealPidResolve(cliPid);
+  if (cliPid) observeCursorCliSessionId(cliPid);
 
   // Wire pid + cwd so the claude-code adapter's writeInput can read
   // ~/.claude/sessions/<pid>.json — the spawn-time pid-state record. Its
@@ -4012,6 +4058,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
         // LAUNCHER. Kick the descendant resolver so the bridge gets the real CLI
         // pid too (mirrors the synchronous path above). No-op for non-wrapperCli.
         startWrapperRealPidResolve(pid);
+        observeCursorCliSessionId(pid, 'async');
         return;
       }
       if (++attempts < 25) setTimeout(resolveCliPidLate, 120); // ~3s budget
