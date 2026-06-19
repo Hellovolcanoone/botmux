@@ -16,7 +16,7 @@
  *   botmux delete <id>    — close a session by ID prefix
  *   botmux delete all     — close all active sessions
  *   botmux autostart enable|disable|status — manage boot-time autostart (launchd / user systemd / Windows Task Scheduler)
- *   botmux whiteboard status|enable|disable|current|list|read|append|post|write — local project whiteboard
+ *   botmux whiteboard status|enable|disable|current|list|read|update|post|write — local project whiteboard
  */
 import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
@@ -73,7 +73,6 @@ import { isLocale, localeForBot, setDefaultLocale, SUPPORTED_LOCALES, t, type Lo
 import { type Brand, chatAppLink, larkHosts, normalizeBrand, sdkDomain } from './im/lark/lark-hosts.js';
 import { mergeGlobalConfig, readGlobalConfig, setGlobalLocale, globalConfigPath } from './global-config.js';
 import {
-  appendWhiteboard,
   createWhiteboard,
   ensureDefaultWhiteboard,
   getWhiteboard,
@@ -2624,7 +2623,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        voice disable   关闭语音功能（移除配置）
   whiteboard status|enable|disable
                        本地项目白板（默认关闭；enable 只打开能力，不创建白板）
-       current --create / list / read / append / post / write --yes
+       current --create / list / read / update / post / write --yes
 
 定时任务（可在 CLI 会话内自动推断 chat）:
   schedule list                        列出所有任务
@@ -2819,9 +2818,9 @@ Commands:
   create [--id ID] [--title T] Create a board for current/bound context
   read [--id ID]               Read board.md (requires enabled)
   path [--id ID]               Print board/meta/log paths
-  append [--id ID] [text...]   Append to board.md (or stdin / --content-file)
+  update [--id ID] [text...]   Replace board.md current state (or stdin / --content-file)
   post [--id ID] [--to X] ...  Append local message to log.jsonl only
-  write --yes [--id ID] ...    Overwrite board.md; --yes required
+  write --yes [--id ID] ...    Force-overwrite board.md; --yes required
 
 Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
     return;
@@ -2879,12 +2878,12 @@ Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
     return;
   }
 
-  if (['read', 'append', 'post', 'write'].includes(action)) requireWhiteboardEnabled();
+  if (['read', 'update', 'post', 'write'].includes(action)) requireWhiteboardEnabled();
 
   const explicitId = argValue(rest, '--id');
   const ctx = currentWhiteboardContext(rest);
   let id = explicitId ?? ctx.session?.whiteboardId;
-  if (!id && whiteboardEnabled() && (action === 'append' || action === 'post')) {
+  if (!id && whiteboardEnabled() && (action === 'update' || action === 'post')) {
     const meta = ensureDefaultWhiteboard({ larkAppId: ctx.larkAppId, chatId: ctx.chatId, workingDir: ctx.workingDir, sessionId: ctx.sessionId });
     id = meta.id;
     if (ctx.session) { ctx.session.whiteboardId = id; saveSession(ctx.session); }
@@ -2902,10 +2901,11 @@ Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
     console.log(JSON.stringify({ board: meta, path: whiteboardPath(id) }, null, 2));
     return;
   }
-  if (action === 'append') {
+  if (action === 'update') {
     requireWhiteboardEnabled();
     const content = whiteboardContentFromArgs(rest);
-    const meta = appendWhiteboard(id, content, { actor: ctx.sessionId });
+    const { writeWhiteboard } = await import('./services/whiteboard-store.js');
+    const meta = writeWhiteboard(id, content, { actor: ctx.sessionId, kind: 'update' });
     console.log(JSON.stringify({ ok: true, board: meta }, null, 2));
     return;
   }
@@ -2919,7 +2919,7 @@ Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
   if (action === 'write') {
     requireWhiteboardEnabled();
     if (!argFlag(rest, '--yes')) {
-      console.error('Refusing to overwrite whiteboard without --yes. Prefer `botmux whiteboard append` for agent updates.');
+      console.error('Refusing to overwrite whiteboard without --yes. Prefer `botmux whiteboard update` for current-state updates.');
       process.exit(2);
     }
     const content = whiteboardContentFromArgs(rest, ['--yes']);

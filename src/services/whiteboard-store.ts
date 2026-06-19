@@ -346,18 +346,7 @@ function rotateWhiteboardLogIfNeeded(id: string, incomingBytes = 0): void {
   renameSync(fp, join(dir, 'log.1.jsonl'));
 }
 
-export function appendWhiteboard(id: string, content: string, opts?: { actor?: string; kind?: string }): WhiteboardMeta {
-  if (!whiteboardEnabled()) throw new Error('whiteboard_disabled');
-  const clean = safeId(id);
-  if (!getWhiteboard(clean)) throw new Error('whiteboard_not_found');
-  mkdirSync(boardDir(clean), { recursive: true });
-  const text = content.trimEnd();
-  if (text) appendFileSync(whiteboardBoardPath(clean), `${text}\n\n`, 'utf-8');
-  appendLog(clean, { kind: opts?.kind ?? 'append', actor: opts?.actor, content: text });
-  return touchWhiteboard(clean);
-}
-
-export function writeWhiteboard(id: string, content: string, opts?: { actor?: string }): WhiteboardMeta {
+export function writeWhiteboard(id: string, content: string, opts?: { actor?: string; kind?: string }): WhiteboardMeta {
   if (!whiteboardEnabled()) throw new Error('whiteboard_disabled');
   const clean = safeId(id);
   if (!getWhiteboard(clean)) throw new Error('whiteboard_not_found');
@@ -365,7 +354,7 @@ export function writeWhiteboard(id: string, content: string, opts?: { actor?: st
   const tmp = `${whiteboardBoardPath(clean)}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(tmp, content.endsWith('\n') ? content : content + '\n', 'utf-8');
   renameSync(tmp, whiteboardBoardPath(clean));
-  appendLog(clean, { kind: 'write', actor: opts?.actor, content: `[overwrite ${content.length} chars]` });
+  appendLog(clean, { kind: opts?.kind ?? 'write', actor: opts?.actor, content: `[overwrite ${content.length} chars]` });
   return touchWhiteboard(clean);
 }
 

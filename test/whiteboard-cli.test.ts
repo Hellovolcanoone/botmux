@@ -52,9 +52,9 @@ describe('botmux whiteboard CLI', () => {
     expect(status.status).toBe(0);
     expect(JSON.parse(status.stdout).enabled).toBe(false);
 
-    const append = runCli(['whiteboard', 'append', '--id', 'missing', 'x']);
-    expect(append.status).not.toBe(0);
-    expect(append.stderr).toContain('Whiteboard is disabled');
+    const update = runCli(['whiteboard', 'update', '--id', 'missing', 'x']);
+    expect(update.status).not.toBe(0);
+    expect(update.stderr).toContain('Whiteboard is disabled');
     expect(existsSync(join(dataDir, 'whiteboards'))).toBe(false);
   });
 
@@ -84,7 +84,7 @@ describe('botmux whiteboard CLI', () => {
     expect(JSON.parse(again.stdout).current.id).toBe(currentId);
   });
 
-  it('supports explicit multiple boards and stdin append/post', () => {
+  it('supports explicit multiple boards plus stdin update/post', () => {
     const created = runCli(['whiteboard', 'create', '--id', 'manual_board', '--title', 'Manual', '--lark-app-id', 'app1', '--chat-id', 'chat1', '--working-dir', join(home, 'repo')]);
     expect(created.status).toBe(0);
     const second = runCli(['whiteboard', 'create', '--id', 'manual_board_2', '--title', 'Manual', '--lark-app-id', 'app2', '--chat-id', 'chat1', '--working-dir', join(home, 'other-repo')]);
@@ -92,10 +92,10 @@ describe('botmux whiteboard CLI', () => {
     const otherChat = runCli(['whiteboard', 'create', '--id', 'manual_other_chat', '--title', 'Manual', '--lark-app-id', 'app3', '--chat-id', 'chat-other', '--working-dir', join(home, 'repo')]);
     expect(otherChat.status).toBe(0);
 
-    const append = runCli(['whiteboard', 'append', '--id', 'manual_board'], 'hello from stdin\n');
-    expect(append.status).toBe(0);
+    const update = runCli(['whiteboard', 'update', '--id', 'manual_board'], 'current state from stdin\n');
+    expect(update.status).toBe(0);
     const read = runCli(['whiteboard', 'read', '--id', 'manual_board']);
-    expect(read.stdout).toContain('hello from stdin');
+    expect(read.stdout).toContain('current state from stdin');
 
     const post = runCli(['whiteboard', 'post', '--id', 'manual_board', '--to', 'bot-b'], 'handoff note\n');
     expect(post.status).toBe(0);
@@ -121,7 +121,7 @@ describe('botmux whiteboard CLI', () => {
     expect(sessions.session1.whiteboardId).toBe(id);
   });
 
-  it('rotates log.jsonl by size into fixed 3 archives without losing append/post entries', () => {
+  it('rotates log.jsonl by size into fixed 3 archives without losing post/update entries', () => {
     const env = {
       ...process.env,
       HOME: home,
@@ -144,7 +144,7 @@ describe('botmux whiteboard CLI', () => {
     for (let i = 0; i < 8; i++) {
       const r = i % 2 === 0
         ? run(['whiteboard', 'post', '--id', 'rotate_board'], `post-${i}-` + 'x'.repeat(120))
-        : run(['whiteboard', 'append', '--id', 'rotate_board'], `append-${i}-` + 'x'.repeat(120));
+        : run(['whiteboard', 'update', '--id', 'rotate_board'], `update-${i}-` + 'x'.repeat(120));
       expect(r.status).toBe(0);
     }
     const dir = join(dataDir, 'whiteboards', 'rotate_board');
@@ -155,10 +155,10 @@ describe('botmux whiteboard CLI', () => {
     expect(files).toContain('log.3.jsonl');
     expect(files).not.toContain('log.4.jsonl');
     const current = readFileSync(join(dir, 'log.jsonl'), 'utf-8');
-    expect(current).toContain('append-7');
+    expect(current).toContain('overwrite 129 chars');
     const combined = files.map(f => readFileSync(join(dir, f), 'utf-8')).join('\n');
     expect(combined).toContain('post-6');
-    expect(combined).toContain('append-7');
+    expect(combined).toContain('overwrite 129 chars');
   });
 
   it('serializes concurrent post writes that trigger log rotation', async () => {

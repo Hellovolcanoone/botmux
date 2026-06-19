@@ -265,7 +265,7 @@ describe('buildFollowUpContent', () => {
     });
 
     expect(content).toContain('<whiteboard id="wb_follow">');
-    expect(content).toContain('沉淀摘要');
+    expect(content).toContain('更新状态');
     expect(content).not.toContain('/whiteboards/wb_follow/board.md');
     expect(content).not.toContain('Local project whiteboard is enabled for durable project context');
     expect(content.indexOf('<whiteboard ')).toBeGreaterThan(content.indexOf('</user_message>'));

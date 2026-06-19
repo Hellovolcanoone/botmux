@@ -131,9 +131,9 @@ describe('built-in botmux-whiteboard skill', () => {
     expect(skill).toBeDefined();
     expect(skill!.content).toContain('botmux whiteboard status');
     expect(skill!.content).toContain('默认关闭');
-    expect(skill!.content).toContain('botmux whiteboard append');
+    expect(skill!.content).toContain('botmux whiteboard update');
     expect(skill!.content).toContain('botmux whiteboard post');
-    expect(skill!.content).toContain('write --id <whiteboardId> --yes');
+    expect(skill!.content).toContain('write --yes');
     expect(skill!.content).toContain('不要写');
     expect(skill!.content).toContain('botmux send');
   });
