@@ -57,9 +57,13 @@ function groupedRows(rows: WhiteboardRow[], names: GroupNameMap): Array<{ chatId
     .sort((a, b) => a.label.localeCompare(b.label));
 }
 
+function itemStyle(active: boolean): string {
+  return `display:block;text-decoration:none;color:inherit;border:1px solid ${active ? 'var(--accent)' : 'var(--border)'};border-radius:10px;padding:10px 12px;margin:8px 0 8px 18px;background:${active ? 'color-mix(in srgb, var(--accent) 12%, var(--surface))' : 'var(--surface-2,#fff)'}`;
+}
+
 function boardItem(r: WhiteboardRow, selectedId?: string): string {
   const active = r.id === selectedId;
-  return `<a class="wb-item${active ? ' active' : ''}" href="#/whiteboards/${encodeURIComponent(r.id)}" style="display:block;text-decoration:none;color:inherit;border:1px solid ${active ? 'var(--accent)' : 'var(--border)'};border-radius:10px;padding:10px 12px;margin:8px 0 8px 18px;background:${active ? 'color-mix(in srgb, var(--accent) 12%, var(--surface))' : 'var(--surface-2,#fff)'}">
+  return `<a class="wb-item${active ? ' active' : ''}" data-whiteboard-id="${escapeHtml(r.id)}" href="#/whiteboards/${encodeURIComponent(r.id)}" style="${itemStyle(active)}">
     <div style="display:flex;gap:8px;align-items:center;justify-content:space-between">
       <strong>${escapeHtml(r.title || r.id)}</strong>
       <code>${escapeHtml(r.id)}</code>
@@ -68,10 +72,29 @@ function boardItem(r: WhiteboardRow, selectedId?: string): string {
   </a>`;
 }
 
-function pageHtml(enabled: boolean, rows: WhiteboardRow[], groupNames: GroupNameMap, selected?: SelectedBoard): string {
-  const groups = groupedRows(rows, groupNames);
+function detailHtml(selected: SelectedBoard | undefined, groupNames: GroupNameMap): string {
   const selectedRow = selected?.row;
   const selectedChat = selectedRow?.chatId ? groupLabel(selectedRow.chatId, groupNames) : '未绑定群 / 本地白板';
+  return `<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+      <h3 class="bd-section-title">白板详情</h3>
+      ${selected ? '<button type="button" class="danger" data-delete-whiteboard>删除白板</button>' : ''}
+    </div>
+    ${selected ? `
+      <dl class="wb-meta" style="display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 12px;font-size:13px">
+        <dt>ID</dt><dd><code>${escapeHtml(selected.id)}</code></dd>
+        <dt>名称</dt><dd>${escapeHtml(selectedRow?.title ?? '-')}</dd>
+        <dt>范围</dt><dd>${escapeHtml(selectedRow?.scope ?? '-')}</dd>
+        <dt>所属群</dt><dd>${escapeHtml(selectedChat)}</dd>
+        <dt>来源目录</dt><dd style="word-break:break-all">${escapeHtml(selectedRow?.workingDir ?? '-')}</dd>
+        <dt>最近更新</dt><dd>${escapeHtml(selectedRow?.updatedAt ? rel(selectedRow.updatedAt) : '-')}</dd>
+        <dt>文件路径</dt><dd style="word-break:break-all"><code>${escapeHtml(selectedRow?.path ?? '')}</code></dd>
+      </dl>
+      <h4 style="margin-top:18px">board.md</h4>
+      <pre style="white-space:pre-wrap;max-height:70vh;overflow:auto">${escapeHtml(selected.content)}</pre>` : '<p class="empty">选择左侧白板查看 meta 和 board.md。</p>'}`;
+}
+
+function pageHtml(enabled: boolean, rows: WhiteboardRow[], groupNames: GroupNameMap, selected?: SelectedBoard): string {
+  const groups = groupedRows(rows, groupNames);
   return `<section class="page">
     <div class="page-heading">
       <div>
@@ -93,23 +116,8 @@ function pageHtml(enabled: boolean, rows: WhiteboardRow[], groupNames: GroupName
             ${g.rows.map(r => boardItem(r, selected?.id)).join('')}
           </details>`).join('')}
       </article>
-      <article class="bd-card settings-card">
-        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
-          <h3 class="bd-section-title">白板详情</h3>
-          ${selected ? '<button type="button" class="danger" data-delete-whiteboard>删除白板</button>' : ''}
-        </div>
-        ${selected ? `
-          <dl class="wb-meta" style="display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 12px;font-size:13px">
-            <dt>ID</dt><dd><code>${escapeHtml(selected.id)}</code></dd>
-            <dt>名称</dt><dd>${escapeHtml(selectedRow?.title ?? '-')}</dd>
-            <dt>范围</dt><dd>${escapeHtml(selectedRow?.scope ?? '-')}</dd>
-            <dt>所属群</dt><dd>${escapeHtml(selectedChat)}</dd>
-            <dt>来源目录</dt><dd style="word-break:break-all">${escapeHtml(selectedRow?.workingDir ?? '-')}</dd>
-            <dt>最近更新</dt><dd>${escapeHtml(selectedRow?.updatedAt ? rel(selectedRow.updatedAt) : '-')}</dd>
-            <dt>文件路径</dt><dd style="word-break:break-all"><code>${escapeHtml(selectedRow?.path ?? '')}</code></dd>
-          </dl>
-          <h4 style="margin-top:18px">board.md</h4>
-          <pre style="white-space:pre-wrap;max-height:70vh;overflow:auto">${escapeHtml(selected.content)}</pre>` : '<p class="empty">选择左侧白板查看 meta 和 board.md。</p>'}
+      <article class="bd-card settings-card" id="whiteboard-detail">
+        ${detailHtml(selected, groupNames)}
       </article>
     </div>
   </section>`;
@@ -127,17 +135,20 @@ export async function renderWhiteboardsPage(root: HTMLElement): Promise<void> {
     if (!whiteboardsRes.ok) throw new Error(body?.error ?? `HTTP ${whiteboardsRes.status}`);
     const groupNames = await loadGroupNames(groupsRes);
     const rows: WhiteboardRow[] = Array.isArray(body.whiteboards) ? body.whiteboards : [];
-    let selected: SelectedBoard | undefined;
-    if (selectedId) {
-      const sr = await fetch(`/api/whiteboards/${encodeURIComponent(selectedId)}`);
-      const sb = await sr.json().catch(() => ({}));
-      if (sr.ok) selected = { id: selectedId, content: String(sb.content ?? ''), row: rows.find(r => r.id === selectedId) };
-    }
+    const selected = selectedId ? await loadSelectedBoard(selectedId, rows) : undefined;
     root.innerHTML = pageHtml(body.enabled === true, rows, groupNames, selected);
+    wireBoardSelection(root, rows, groupNames);
     wireDelete(root, selectedId);
   } catch (err: any) {
     root.innerHTML = `<section class="page"><p class="hint-warn">加载白板失败：${escapeHtml(err?.message ?? String(err))}</p></section>`;
   }
+}
+
+async function loadSelectedBoard(id: string, rows: WhiteboardRow[]): Promise<SelectedBoard | undefined> {
+  const sr = await fetch(`/api/whiteboards/${encodeURIComponent(id)}`);
+  const sb = await sr.json().catch(() => ({}));
+  if (!sr.ok) return undefined;
+  return { id, content: String(sb.content ?? ''), row: rows.find(r => r.id === id) };
 }
 
 async function loadGroupNames(res: Response | null): Promise<GroupNameMap> {
@@ -149,6 +160,27 @@ async function loadGroupNames(res: Response | null): Promise<GroupNameMap> {
     if (c.chatId) map.set(String(c.chatId), String(c.name || c.chatId));
   }
   return map;
+}
+
+function wireBoardSelection(root: HTMLElement, rows: WhiteboardRow[], groupNames: GroupNameMap): void {
+  root.querySelectorAll<HTMLAnchorElement>('.wb-item[data-whiteboard-id]').forEach(a => {
+    a.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      const id = a.dataset.whiteboardId;
+      if (!id) return;
+      const selected = await loadSelectedBoard(id, rows);
+      if (!selected) return;
+      for (const item of root.querySelectorAll<HTMLAnchorElement>('.wb-item[data-whiteboard-id]')) {
+        const active = item.dataset.whiteboardId === id;
+        item.classList.toggle('active', active);
+        item.setAttribute('style', itemStyle(active));
+      }
+      const detail = root.querySelector<HTMLElement>('#whiteboard-detail');
+      if (detail) detail.innerHTML = detailHtml(selected, groupNames);
+      window.history.replaceState(null, '', `#/whiteboards/${encodeURIComponent(id)}`);
+      wireDelete(root, id);
+    });
+  });
 }
 
 function wireDelete(root: HTMLElement, selectedId: string): void {
