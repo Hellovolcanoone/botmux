@@ -163,10 +163,10 @@ export function normalizeWhiteboardWorkingDir(workingDir?: string): string | und
 }
 
 export function whiteboardBindingKey(input: WhiteboardBindingInput): string {
-  const app = input.larkAppId?.trim() || '-';
-  const chat = input.chatId?.trim() || '-';
+  const chat = input.chatId?.trim();
+  if (chat) return `chat:${chat}:default`;
   const wd = normalizeWhiteboardWorkingDir(input.workingDir) ?? '-';
-  return `${app}|${chat}|${wd}`;
+  return `local:${wd}`;
 }
 
 function defaultTitle(input: EnsureWhiteboardInput): string {

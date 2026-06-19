@@ -58,17 +58,17 @@ describe('botmux whiteboard CLI', () => {
     expect(existsSync(join(dataDir, 'whiteboards'))).toBe(false);
   });
 
-  it('enables without creating boards, then reuses the same binding', () => {
+  it('enables without creating boards, then reuses one default board per chat across bots and working dirs', () => {
     const enable = runCli(['whiteboard', 'enable']);
     expect(enable.status).toBe(0);
     expect(existsSync(join(dataDir, 'whiteboards', 'index.json'))).toBe(false);
 
-    const first = runCli(['whiteboard', 'current', '--create', '--lark-app-id', 'app1', '--chat-id', 'chat1', '--working-dir', join(home, 'repo')]);
+    const first = runCli(['whiteboard', 'current', '--create', '--lark-app-id', 'app1', '--chat-id', 'chat1', '--working-dir', join(home, 'repo-a')]);
     expect(first.status).toBe(0);
     const id = JSON.parse(first.stdout).current.id;
     expect(id).toMatch(/^wb_/);
 
-    const second = runCli(['whiteboard', 'current', '--create', '--lark-app-id', 'app1', '--chat-id', 'chat1', '--working-dir', join(home, 'repo')]);
+    const second = runCli(['whiteboard', 'current', '--create', '--lark-app-id', 'app2', '--chat-id', 'chat1', '--working-dir', join(home, 'repo-b')]);
     expect(second.status).toBe(0);
     expect(JSON.parse(second.stdout).current.id).toBe(id);
   });
@@ -76,6 +76,10 @@ describe('botmux whiteboard CLI', () => {
   it('supports explicit multiple boards and stdin append/post', () => {
     const created = runCli(['whiteboard', 'create', '--id', 'manual_board', '--title', 'Manual', '--lark-app-id', 'app1', '--chat-id', 'chat1', '--working-dir', join(home, 'repo')]);
     expect(created.status).toBe(0);
+    const second = runCli(['whiteboard', 'create', '--id', 'manual_board_2', '--title', 'Manual', '--lark-app-id', 'app2', '--chat-id', 'chat1', '--working-dir', join(home, 'other-repo')]);
+    expect(second.status).toBe(0);
+    const otherChat = runCli(['whiteboard', 'create', '--id', 'manual_other_chat', '--title', 'Manual', '--lark-app-id', 'app3', '--chat-id', 'chat-other', '--working-dir', join(home, 'repo')]);
+    expect(otherChat.status).toBe(0);
 
     const append = runCli(['whiteboard', 'append', '--id', 'manual_board'], 'hello from stdin\n');
     expect(append.status).toBe(0);

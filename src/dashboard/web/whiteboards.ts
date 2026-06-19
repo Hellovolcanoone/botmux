@@ -13,7 +13,10 @@ interface WhiteboardRow {
   logCount: number;
 }
 
+interface GroupRow { chatId?: string; name?: string }
 interface SelectedBoard { id: string; content: string; row?: WhiteboardRow }
+
+type GroupNameMap = Map<string, string>;
 
 function rel(ts: string): string {
   const t = Date.parse(ts);
@@ -31,11 +34,13 @@ function groupKey(r: WhiteboardRow): string {
   return r.chatId?.trim() || '__local__';
 }
 
-function groupLabel(chatId: string): string {
-  return chatId === '__local__' ? '未绑定群 / 本地白板' : chatId;
+function groupLabel(chatId: string, names: GroupNameMap): string {
+  if (chatId === '__local__') return '未绑定群 / 本地白板';
+  const name = names.get(chatId);
+  return name && name !== chatId ? `${name} (${chatId})` : chatId;
 }
 
-function groupedRows(rows: WhiteboardRow[]): Array<{ chatId: string; label: string; rows: WhiteboardRow[] }> {
+function groupedRows(rows: WhiteboardRow[], names: GroupNameMap): Array<{ chatId: string; label: string; rows: WhiteboardRow[] }> {
   const map = new Map<string, WhiteboardRow[]>();
   for (const r of rows) {
     const key = groupKey(r);
@@ -46,7 +51,7 @@ function groupedRows(rows: WhiteboardRow[]): Array<{ chatId: string; label: stri
   return [...map.entries()]
     .map(([chatId, list]) => ({
       chatId,
-      label: groupLabel(chatId),
+      label: groupLabel(chatId, names),
       rows: list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     }))
     .sort((a, b) => a.label.localeCompare(b.label));
@@ -59,19 +64,20 @@ function boardItem(r: WhiteboardRow, selectedId?: string): string {
       <strong>${escapeHtml(r.title || r.id)}</strong>
       <code>${escapeHtml(r.id)}</code>
     </div>
-    <div style="margin-top:6px;color:var(--muted);font-size:12px">${escapeHtml(r.scope)} · ${escapeHtml(r.workingDir || '-')} · ${escapeHtml(rel(r.updatedAt))} · log ${r.logCount}</div>
+    <div style="margin-top:6px;color:var(--muted);font-size:12px">${escapeHtml(r.scope)} · ${escapeHtml(rel(r.updatedAt))} · log ${r.logCount}</div>
   </a>`;
 }
 
-function pageHtml(enabled: boolean, rows: WhiteboardRow[], selected?: SelectedBoard): string {
-  const groups = groupedRows(rows);
+function pageHtml(enabled: boolean, rows: WhiteboardRow[], groupNames: GroupNameMap, selected?: SelectedBoard): string {
+  const groups = groupedRows(rows, groupNames);
   const selectedRow = selected?.row;
+  const selectedChat = selectedRow?.chatId ? groupLabel(selectedRow.chatId, groupNames) : '未绑定群 / 本地白板';
   return `<section class="page">
     <div class="page-heading">
       <div>
         <p class="eyebrow">Whiteboards</p>
         <h1>本地白板</h1>
-        <p>项目级本地上下文与跨 agent 交接记录。开关关闭时仅只读展示历史白板，不注入 prompt、不允许 agent CLI 读写。</p>
+        <p>按群共享的本地上下文与跨 agent 交接记录。开关关闭时仅只读展示历史白板，不注入 prompt、不允许 agent CLI 读写。</p>
       </div>
       <span class="pill ${enabled ? 'ok' : 'warn'}">${enabled ? 'Enabled' : 'Disabled'}</span>
     </div>
@@ -79,7 +85,7 @@ function pageHtml(enabled: boolean, rows: WhiteboardRow[], selected?: SelectedBo
     <div class="wb-split" style="display:grid;grid-template-columns:minmax(280px,380px) minmax(0,1fr);gap:16px;align-items:start">
       <article class="bd-card settings-card">
         <h3 class="bd-section-title">群组 / 白板</h3>
-        ${groups.length === 0 ? '<p class="empty">暂无白板。打开能力后，首次需要白板时才会创建默认白板。</p>' : groups.map(g => `
+        ${groups.length === 0 ? '<p class="empty">暂无白板。打开能力后，每个群首次需要白板时才会创建默认白板。</p>' : groups.map(g => `
           <details class="wb-group" open>
             <summary style="cursor:pointer;font-weight:700;margin:12px 0 6px;display:flex;justify-content:space-between;gap:8px">
               <span>${escapeHtml(g.label)}</span><small>${g.rows.length}</small>
@@ -95,13 +101,12 @@ function pageHtml(enabled: boolean, rows: WhiteboardRow[], selected?: SelectedBo
         ${selected ? `
           <dl class="wb-meta" style="display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 12px;font-size:13px">
             <dt>ID</dt><dd><code>${escapeHtml(selected.id)}</code></dd>
-            <dt>Title</dt><dd>${escapeHtml(selectedRow?.title ?? '-')}</dd>
-            <dt>Scope</dt><dd>${escapeHtml(selectedRow?.scope ?? '-')}</dd>
-            <dt>Chat</dt><dd>${escapeHtml(selectedRow?.chatId ?? '未绑定群 / 本地白板')}</dd>
-            <dt>App</dt><dd>${escapeHtml(selectedRow?.larkAppId ?? '-')}</dd>
-            <dt>WorkingDir</dt><dd style="word-break:break-all">${escapeHtml(selectedRow?.workingDir ?? '-')}</dd>
-            <dt>Updated</dt><dd>${escapeHtml(selectedRow?.updatedAt ? rel(selectedRow.updatedAt) : '-')}</dd>
-            <dt>Path</dt><dd style="word-break:break-all"><code>${escapeHtml(selectedRow?.path ?? '')}</code></dd>
+            <dt>名称</dt><dd>${escapeHtml(selectedRow?.title ?? '-')}</dd>
+            <dt>范围</dt><dd>${escapeHtml(selectedRow?.scope ?? '-')}</dd>
+            <dt>所属群</dt><dd>${escapeHtml(selectedChat)}</dd>
+            <dt>来源目录</dt><dd style="word-break:break-all">${escapeHtml(selectedRow?.workingDir ?? '-')}</dd>
+            <dt>最近更新</dt><dd>${escapeHtml(selectedRow?.updatedAt ? rel(selectedRow.updatedAt) : '-')}</dd>
+            <dt>文件路径</dt><dd style="word-break:break-all"><code>${escapeHtml(selectedRow?.path ?? '')}</code></dd>
           </dl>
           <h4 style="margin-top:18px">board.md</h4>
           <pre style="white-space:pre-wrap;max-height:70vh;overflow:auto">${escapeHtml(selected.content)}</pre>` : '<p class="empty">选择左侧白板查看 meta 和 board.md。</p>'}
@@ -114,9 +119,13 @@ export async function renderWhiteboardsPage(root: HTMLElement): Promise<void> {
   root.innerHTML = '<p class="empty">Loading whiteboards…</p>';
   const selectedId = decodeURIComponent((location.hash.match(/^#\/whiteboards\/([^/]+)/)?.[1] ?? '').trim());
   try {
-    const r = await fetch('/api/whiteboards');
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(body?.error ?? `HTTP ${r.status}`);
+    const [whiteboardsRes, groupsRes] = await Promise.all([
+      fetch('/api/whiteboards'),
+      fetch('/api/groups').catch(() => null),
+    ]);
+    const body = await whiteboardsRes.json().catch(() => ({}));
+    if (!whiteboardsRes.ok) throw new Error(body?.error ?? `HTTP ${whiteboardsRes.status}`);
+    const groupNames = await loadGroupNames(groupsRes);
     const rows: WhiteboardRow[] = Array.isArray(body.whiteboards) ? body.whiteboards : [];
     let selected: SelectedBoard | undefined;
     if (selectedId) {
@@ -124,11 +133,22 @@ export async function renderWhiteboardsPage(root: HTMLElement): Promise<void> {
       const sb = await sr.json().catch(() => ({}));
       if (sr.ok) selected = { id: selectedId, content: String(sb.content ?? ''), row: rows.find(r => r.id === selectedId) };
     }
-    root.innerHTML = pageHtml(body.enabled === true, rows, selected);
+    root.innerHTML = pageHtml(body.enabled === true, rows, groupNames, selected);
     wireDelete(root, selectedId);
   } catch (err: any) {
     root.innerHTML = `<section class="page"><p class="hint-warn">加载白板失败：${escapeHtml(err?.message ?? String(err))}</p></section>`;
   }
+}
+
+async function loadGroupNames(res: Response | null): Promise<GroupNameMap> {
+  const map = new Map<string, string>();
+  if (!res?.ok) return map;
+  const body = await res.json().catch(() => ({}));
+  const chats: GroupRow[] = Array.isArray(body.chats) ? body.chats : [];
+  for (const c of chats) {
+    if (c.chatId) map.set(String(c.chatId), String(c.name || c.chatId));
+  }
+  return map;
 }
 
 function wireDelete(root: HTMLElement, selectedId: string): void {
