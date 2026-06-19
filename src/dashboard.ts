@@ -39,7 +39,7 @@ import {
 } from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { mergeDashboardConfig, mergeGlobalConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
-import { listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
+import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocale } from './i18n/types.js';
 import { isLocalDevInstall } from './utils/install-info.js';
 import { listTeamReports, readTeamBoard, setTeamBoardEntry } from './services/team-board-store.js';
@@ -915,6 +915,14 @@ const server = createServer(async (req, res) => {
         return jsonRes(res, 200, { enabled: whiteboardEnabled(), id, content: readWhiteboard(id, { allowDisabled: true }) });
       } catch (err: any) {
         return jsonRes(res, 404, { ok: false, error: err?.message ?? 'whiteboard_not_found' });
+      }
+    }
+    if (req.method === 'DELETE' && mWhiteboard) {
+      try {
+        const id = decodeURIComponent(mWhiteboard[1]);
+        return jsonRes(res, 200, deleteWhiteboard(id));
+      } catch (err: any) {
+        return jsonRes(res, 400, { ok: false, error: err?.message ?? 'whiteboard_delete_failed' });
       }
     }
 

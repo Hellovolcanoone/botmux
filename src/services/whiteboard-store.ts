@@ -390,6 +390,43 @@ export function postWhiteboardMessage(id: string, content: string, opts?: { acto
   return touchWhiteboard(clean);
 }
 
+function clearSessionWhiteboardRefs(id: string): number {
+  let cleared = 0;
+  let files: string[] = [];
+  try { files = readdirSync(config.session.dataDir); } catch { return 0; }
+  for (const file of files) {
+    if (!file.startsWith('sessions') || !file.endsWith('.json')) continue;
+    const fp = join(config.session.dataDir, file);
+    let data: Record<string, any>;
+    try { data = JSON.parse(readFileSync(fp, 'utf-8')); } catch { continue; }
+    let dirty = false;
+    for (const session of Object.values(data)) {
+      if (session && typeof session === 'object' && session.whiteboardId === id) {
+        delete session.whiteboardId;
+        dirty = true;
+        cleared++;
+      }
+    }
+    if (dirty) atomicWriteFileSync(fp, JSON.stringify(data, null, 2) + '\n');
+  }
+  return cleared;
+}
+
+export function deleteWhiteboard(id: string): { ok: true; id: string; clearedSessions: number } {
+  const clean = safeId(id);
+  return withIndexLock(() => {
+    const index = readIndex();
+    delete index.boards[clean];
+    for (const [key, boardId] of Object.entries(index.bindings)) {
+      if (boardId === clean) delete index.bindings[key];
+    }
+    rmSync(boardDir(clean), { recursive: true, force: true });
+    const clearedSessions = clearSessionWhiteboardRefs(clean);
+    writeIndex(index);
+    return { ok: true, id: clean, clearedSessions };
+  });
+}
+
 export function whiteboardPath(id: string): { dir: string; board: string; log: string; meta: string } {
   const clean = safeId(id);
   return { dir: boardDir(clean), board: whiteboardBoardPath(clean), log: whiteboardLogPath(clean), meta: metaPath(clean) };

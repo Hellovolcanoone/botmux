@@ -190,4 +190,28 @@ describe('botmux whiteboard CLI', () => {
     // least one late entry must be present in the rotated set.
     expect(combined).toMatch(/concurrent-[0-9]/);
   });
+
+  it('deletes board files, bindings, and stale session whiteboard references', async () => {
+    const created = runCli(['whiteboard', 'create', '--id', 'delete_board', '--title', 'Delete me', '--lark-app-id', 'app1', '--chat-id', 'delete-chat', '--working-dir', join(home, 'delete-repo')]);
+    expect(created.status).toBe(0);
+    const dir = join(dataDir, 'whiteboards', 'delete_board');
+    expect(existsSync(dir)).toBe(true);
+    writeFileSync(join(dataDir, 'sessions-app1.json'), JSON.stringify({
+      s1: { sessionId: 's1', chatId: 'delete-chat', rootMessageId: 'r', title: 's', status: 'active', createdAt: new Date().toISOString(), larkAppId: 'app1', whiteboardId: 'delete_board' },
+    }, null, 2));
+
+    const prevDataDir = process.env.SESSION_DATA_DIR;
+    process.env.SESSION_DATA_DIR = dataDir;
+    const { deleteWhiteboard } = await import('../dist/services/whiteboard-store.js');
+    const result = deleteWhiteboard('delete_board');
+    if (prevDataDir === undefined) delete process.env.SESSION_DATA_DIR;
+    else process.env.SESSION_DATA_DIR = prevDataDir;
+    expect(result).toMatchObject({ ok: true, id: 'delete_board', clearedSessions: 1 });
+    expect(existsSync(dir)).toBe(false);
+    const index = JSON.parse(readFileSync(join(dataDir, 'whiteboards', 'index.json'), 'utf-8'));
+    expect(index.boards.delete_board).toBeUndefined();
+    expect(Object.values(index.bindings)).not.toContain('delete_board');
+    const sessions = JSON.parse(readFileSync(join(dataDir, 'sessions-app1.json'), 'utf-8'));
+    expect(sessions.s1.whiteboardId).toBeUndefined();
+  });
 });
