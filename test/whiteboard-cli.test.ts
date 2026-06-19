@@ -73,6 +73,17 @@ describe('botmux whiteboard CLI', () => {
     expect(JSON.parse(second.stdout).current.id).toBe(id);
   });
 
+  it('does not let explicit create occupy the chat default binding', () => {
+    const explicit = runCli(['whiteboard', 'create', '--id', 'explicit_chat_default_probe', '--title', 'Probe', '--lark-app-id', 'app1', '--chat-id', 'chat-default-probe', '--working-dir', join(home, 'explicit')]);
+    expect(explicit.status).toBe(0);
+    const cur = runCli(['whiteboard', 'current', '--create', '--lark-app-id', 'app2', '--chat-id', 'chat-default-probe', '--working-dir', join(home, 'other')]);
+    expect(cur.status).toBe(0);
+    const currentId = JSON.parse(cur.stdout).current.id;
+    expect(currentId).not.toBe('explicit_chat_default_probe');
+    const again = runCli(['whiteboard', 'current', '--create', '--lark-app-id', 'app3', '--chat-id', 'chat-default-probe', '--working-dir', join(home, 'third')]);
+    expect(JSON.parse(again.stdout).current.id).toBe(currentId);
+  });
+
   it('supports explicit multiple boards and stdin append/post', () => {
     const created = runCli(['whiteboard', 'create', '--id', 'manual_board', '--title', 'Manual', '--lark-app-id', 'app1', '--chat-id', 'chat1', '--working-dir', join(home, 'repo')]);
     expect(created.status).toBe(0);

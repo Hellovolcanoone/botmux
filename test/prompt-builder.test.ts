@@ -141,9 +141,11 @@ describe('buildNewTopicPrompt', () => {
       { whiteboardId: 'wb_test' },
     );
 
-    expect(prompt).toContain('<whiteboard id="wb_test" path="/tmp/test-sessions/whiteboards/wb_test/board.md">');
+    expect(prompt).toContain('<whiteboard id="wb_test">');
     expect(prompt).toContain('需要时读取：`botmux whiteboard read --id wb_test`');
+    expect(prompt).toContain('不要直接读写本地文件');
     expect(prompt).toContain('用户可见结论仍必须 `botmux send`。');
+    expect(prompt).not.toContain('/whiteboards/wb_test/board.md');
     expect(prompt).not.toContain('Do not assume its contents are in context');
     expect(prompt).not.toContain('When you first create or materially update');
     expect(prompt.indexOf('<whiteboard ')).toBeGreaterThan(prompt.indexOf('</user_message>'));
@@ -262,8 +264,9 @@ describe('buildFollowUpContent', () => {
       whiteboardId: 'wb_follow',
     });
 
-    expect(content).toContain('<whiteboard id="wb_follow" path="/tmp/test-sessions/whiteboards/wb_follow/board.md">');
+    expect(content).toContain('<whiteboard id="wb_follow">');
     expect(content).toContain('沉淀摘要');
+    expect(content).not.toContain('/whiteboards/wb_follow/board.md');
     expect(content).not.toContain('Local project whiteboard is enabled for durable project context');
     expect(content.indexOf('<whiteboard ')).toBeGreaterThan(content.indexOf('</user_message>'));
   });

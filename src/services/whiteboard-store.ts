@@ -258,10 +258,6 @@ export function createWhiteboard(input: EnsureWhiteboardInput & { id?: string; s
     writeFileSync(whiteboardLogPath(id), '', { flag: 'a' });
     writeMeta(meta);
     index.boards[id] = meta;
-    if (input.larkAppId || input.chatId || normalizedWorkingDir) {
-      const key = whiteboardBindingKey(input);
-      if (!index.bindings[key]) index.bindings[key] = id;
-    }
     writeIndex(index);
     return meta;
   });

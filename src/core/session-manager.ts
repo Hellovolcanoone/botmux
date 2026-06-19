@@ -30,7 +30,7 @@ import { usageLimitStateKey } from '../utils/cli-usage-limit.js';
 import { t, localeForBot, type Locale } from '../i18n/index.js';
 import { parseWorkingDirList } from '../utils/working-dir.js';
 import { resolveRole } from './role-resolver.js';
-import { ensureDefaultWhiteboard, getWhiteboard, whiteboardBoardPath, whiteboardEnabled } from '../services/whiteboard-store.js';
+import { ensureDefaultWhiteboard, getWhiteboard, whiteboardEnabled } from '../services/whiteboard-store.js';
 
 function sessionCreatedAtMs(session: { createdAt?: string }): number {
   return session.createdAt ? (Date.parse(session.createdAt) || Date.now()) : Date.now();
@@ -264,10 +264,10 @@ function renderWhiteboardBlock(opts?: { whiteboardId?: string }): string {
   const meta = getWhiteboard(opts.whiteboardId);
   if (!meta || meta.archived) return '';
   return [
-    `<whiteboard id="${xmlEscape(meta.id)}" path="${xmlEscape(whiteboardBoardPath(meta.id))}">`,
+    `<whiteboard id="${xmlEscape(meta.id)}">`,
     '本地项目上下文；需要时读取：`botmux whiteboard read --id ' + xmlEscape(meta.id) + '`。',
     '沉淀摘要：`botmux whiteboard append --id ' + xmlEscape(meta.id) + '`；本地交接：`botmux whiteboard post --id ' + xmlEscape(meta.id) + '`。',
-    '不要写密钥/隐私；用户可见结论仍必须 `botmux send`。',
+    '不要直接读写本地文件；不要写密钥/隐私；用户可见结论仍必须 `botmux send`。',
     '</whiteboard>',
   ].join('\n');
 }
