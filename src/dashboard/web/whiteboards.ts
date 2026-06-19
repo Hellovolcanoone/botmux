@@ -58,17 +58,20 @@ function groupedRows(rows: WhiteboardRow[], names: GroupNameMap): Array<{ chatId
 }
 
 function itemStyle(active: boolean): string {
-  return `display:block;text-decoration:none;color:inherit;border:1px solid ${active ? 'var(--accent)' : 'var(--border)'};border-radius:10px;padding:10px 12px;margin:8px 0 8px 18px;background:${active ? 'color-mix(in srgb, var(--accent) 12%, var(--surface))' : 'var(--surface-2,#fff)'}`;
+  return `display:block;text-decoration:none;color:inherit;border:1px solid ${active ? 'rgba(14,165,233,.75)' : 'var(--border)'};border-radius:14px;padding:13px 14px;margin:10px 0 10px 18px;background:${active ? 'linear-gradient(135deg, rgba(14,165,233,.16), rgba(59,130,246,.08))' : 'var(--surface-2,#fff)'};box-shadow:${active ? '0 10px 24px rgba(14,165,233,.13)' : '0 4px 14px rgba(15,23,42,.04)'}`;
 }
 
 function boardItem(r: WhiteboardRow, selectedId?: string): string {
   const active = r.id === selectedId;
   return `<a class="wb-item${active ? ' active' : ''}" data-whiteboard-id="${escapeHtml(r.id)}" href="#/whiteboards/${encodeURIComponent(r.id)}" style="${itemStyle(active)}">
-    <div style="display:flex;gap:8px;align-items:center;justify-content:space-between">
-      <strong>${escapeHtml(r.title || r.id)}</strong>
-      <code>${escapeHtml(r.id)}</code>
+    <div style="display:flex;gap:8px;align-items:flex-start;justify-content:space-between">
+      <div style="min-width:0">
+        <strong style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(r.title || r.id)}</strong>
+        <span style="display:inline-block;margin-top:4px;font-size:11px;color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(r.id)}</span>
+      </div>
+      <span style="font-size:11px;border:1px solid var(--border);border-radius:999px;padding:2px 7px;color:var(--muted);white-space:nowrap">${escapeHtml(r.scope)}</span>
     </div>
-    <div style="margin-top:6px;color:var(--muted);font-size:12px">${escapeHtml(r.scope)} · ${escapeHtml(rel(r.updatedAt))} · log ${r.logCount}</div>
+    <div style="margin-top:9px;display:flex;gap:8px;align-items:center;color:var(--muted);font-size:12px"><span>${escapeHtml(rel(r.updatedAt))}</span><span>·</span><span>log ${r.logCount}</span></div>
   </a>`;
 }
 
@@ -91,25 +94,41 @@ function deleteModalHtml(selected: SelectedBoard): string {
   </div>`;
 }
 
+function metaCard(label: string, value: string): string {
+  return `<div style="border:1px solid var(--border);border-radius:12px;padding:10px 12px;background:var(--surface-2,#fff);min-width:0">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:5px">${escapeHtml(label)}</div>
+    <div style="font-size:13px;word-break:break-all">${escapeHtml(value || '-')}</div>
+  </div>`;
+}
+
 function detailHtml(selected: SelectedBoard | undefined, groupNames: GroupNameMap): string {
   const selectedRow = selected?.row;
   const selectedChat = selectedRow?.chatId ? groupLabel(selectedRow.chatId, groupNames) : '未绑定群 / 本地白板';
-  return `<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
-      <h3 class="bd-section-title">白板详情</h3>
-      ${selected ? '<button type="button" class="danger" data-delete-whiteboard>删除白板</button>' : ''}
+  return selected ? `
+    <div style="display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:16px">
+      <div style="min-width:0">
+        <p class="eyebrow" style="margin:0 0 6px">WHITEBOARD</p>
+        <h2 style="margin:0;font-size:22px;line-height:1.25">${escapeHtml(selectedRow?.title || selected.id)}</h2>
+        <div style="margin-top:8px;color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${escapeHtml(selected.id)}</div>
+      </div>
+      <button type="button" class="danger" data-delete-whiteboard>删除白板</button>
     </div>
-    ${selected ? `
-      <dl class="wb-meta" style="display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 12px;font-size:13px">
-        <dt>ID</dt><dd><code>${escapeHtml(selected.id)}</code></dd>
-        <dt>名称</dt><dd>${escapeHtml(selectedRow?.title ?? '-')}</dd>
-        <dt>范围</dt><dd>${escapeHtml(selectedRow?.scope ?? '-')}</dd>
-        <dt>所属群</dt><dd>${escapeHtml(selectedChat)}</dd>
-        <dt>来源目录</dt><dd style="word-break:break-all">${escapeHtml(selectedRow?.workingDir ?? '-')}</dd>
-        <dt>最近更新</dt><dd>${escapeHtml(selectedRow?.updatedAt ? rel(selectedRow.updatedAt) : '-')}</dd>
-        <dt>文件路径</dt><dd style="word-break:break-all"><code>${escapeHtml(selectedRow?.path ?? '')}</code></dd>
-      </dl>
-      <h4 style="margin-top:18px">board.md</h4>
-      <pre style="white-space:pre-wrap;max-height:70vh;overflow:auto">${escapeHtml(selected.content)}</pre>` : '<p class="empty">选择左侧白板查看 meta 和 board.md。</p>'}`;
+    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:18px">
+      ${metaCard('所属群', selectedChat)}
+      ${metaCard('范围', selectedRow?.scope ?? '-')}
+      ${metaCard('最近更新', selectedRow?.updatedAt ? rel(selectedRow.updatedAt) : '-')}
+      ${metaCard('来源目录', selectedRow?.workingDir ?? '-')}
+    </div>
+    <details style="margin-bottom:18px;color:var(--muted)">
+      <summary style="cursor:pointer">管理信息 / 文件路径</summary>
+      <code style="display:block;margin-top:8px;white-space:pre-wrap;word-break:break-all">${escapeHtml(selectedRow?.path ?? '')}</code>
+    </details>
+    <section style="border:1px solid var(--border);border-radius:14px;background:var(--surface-2,#fff);overflow:hidden">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <strong>当前状态 board.md</strong><span style="color:var(--muted);font-size:12px">read / update</span>
+      </div>
+      <pre style="white-space:pre-wrap;max-height:70vh;overflow:auto;margin:0;padding:16px;line-height:1.65;background:transparent">${escapeHtml(selected.content || '（暂无内容）')}</pre>
+    </section>` : '<p class="empty">选择左侧白板查看 meta 和 board.md。</p>';
 }
 
 function pageHtml(enabled: boolean, rows: WhiteboardRow[], groupNames: GroupNameMap, selected?: SelectedBoard): string {
@@ -124,18 +143,18 @@ function pageHtml(enabled: boolean, rows: WhiteboardRow[], groupNames: GroupName
       <span class="pill ${enabled ? 'ok' : 'warn'}">${enabled ? 'Enabled' : 'Disabled'}</span>
     </div>
     ${enabled ? '' : '<p class="hint-warn">白板能力当前关闭：不会自动创建/绑定白板，也不会注入到 agent prompt。历史白板仅在 dashboard 中只读可见，可在此清理。</p>'}
-    <div class="wb-split" style="display:grid;grid-template-columns:minmax(280px,380px) minmax(0,1fr);gap:16px;align-items:start">
-      <article class="bd-card settings-card">
-        <h3 class="bd-section-title">群组 / 白板</h3>
+    <div class="wb-split" style="display:grid;grid-template-columns:minmax(300px,400px) minmax(0,1fr);gap:18px;align-items:start">
+      <article class="bd-card settings-card" style="padding:18px">
+        <h3 class="bd-section-title" style="margin-bottom:12px">群组 / 白板</h3>
         ${groups.length === 0 ? '<p class="empty">暂无白板。打开能力后，每个群首次需要白板时才会创建默认白板。</p>' : groups.map(g => `
-          <details class="wb-group" open>
-            <summary style="cursor:pointer;font-weight:700;margin:12px 0 6px;display:flex;justify-content:space-between;gap:8px">
-              <span>${escapeHtml(g.label)}</span><small>${g.rows.length}</small>
+          <details class="wb-group" open style="margin-bottom:14px">
+            <summary style="cursor:pointer;font-weight:700;margin:12px 0 8px;display:flex;justify-content:space-between;gap:8px;align-items:center">
+              <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(g.label)}</span><small style="border:1px solid var(--border);border-radius:999px;padding:1px 7px;color:var(--muted)">${g.rows.length}</small>
             </summary>
             ${g.rows.map(r => boardItem(r, selected?.id)).join('')}
           </details>`).join('')}
       </article>
-      <article class="bd-card settings-card" id="whiteboard-detail">
+      <article class="bd-card settings-card" id="whiteboard-detail" style="padding:20px 22px">
         ${detailHtml(selected, groupNames)}
       </article>
     </div>
