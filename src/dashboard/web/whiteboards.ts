@@ -221,6 +221,25 @@ function wireBoardSelection(root: HTMLElement, rows: WhiteboardRow[], groupNames
   });
 }
 
+function removeDeletedBoard(root: HTMLElement, selectedId: string): void {
+  const item = root.querySelector<HTMLElement>(`.wb-item[data-whiteboard-id="${CSS.escape(selectedId)}"]`);
+  const group = item?.closest('details.wb-group') as HTMLDetailsElement | null;
+  item?.remove();
+  if (group) {
+    const remaining = group.querySelectorAll('.wb-item[data-whiteboard-id]').length;
+    const count = group.querySelector('summary small');
+    if (count) count.textContent = String(remaining);
+    if (remaining === 0) group.remove();
+  }
+  const detail = root.querySelector<HTMLElement>('#whiteboard-detail');
+  if (detail) detail.innerHTML = detailHtml(undefined, new Map());
+  const anyLeft = root.querySelector('.wb-item[data-whiteboard-id]');
+  if (!anyLeft) {
+    const list = root.querySelector<HTMLElement>('.wb-split article.bd-card');
+    if (list) list.innerHTML = '<h3 class="bd-section-title" style="margin-bottom:12px">群组 / 白板</h3><p class="empty">暂无白板。打开能力后，每个群首次需要白板时才会创建默认白板。</p>';
+  }
+}
+
 function wireDelete(root: HTMLElement, selectedId: string): void {
   const btn = root.querySelector<HTMLButtonElement>('[data-delete-whiteboard]');
   if (!btn || !selectedId) return;
@@ -248,8 +267,8 @@ async function confirmDelete(root: HTMLElement, selectedId: string, selected: Se
       const body = await r.json().catch(() => ({}));
       if (!r.ok || body.ok === false) throw new Error(body?.error ?? `HTTP ${r.status}`);
       close();
-      location.hash = '#/whiteboards';
-      await renderWhiteboardsPage(root);
+      removeDeletedBoard(root, selectedId);
+      window.history.replaceState(null, '', '#/whiteboards');
     } catch (err: any) {
       close();
       alert(`删除失败：${err?.message ?? String(err)}`);
