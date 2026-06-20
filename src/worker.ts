@@ -4259,6 +4259,9 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       awaitingFirstPrompt = false;
       renderer?.markNewTurn();
       log('First prompt timeout — enabling screen updates and flushing queued messages');
+      if (backend && cliAdapter?.busyPattern && probeBusyPatternIdle(`${cliName()} first-prompt-timeout`, backend)) {
+        return;
+      }
       // For type-ahead adapters (Codex/CoCo/TRAE/Claude) the TUI is booted
       // enough to park input even if the idle detector hasn't fired yet.
       // Directly invoking markPromptReady() would claim the CLI is idle

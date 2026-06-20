@@ -37,6 +37,15 @@ describe('worker pipe initial screen ordering', () => {
     expect(queuedProbeIdx).toBeGreaterThan(queueLogIdx);
   });
 
+  it('rechecks busy-pattern adapters after first prompt timeout', () => {
+    const source = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
+    const timeoutIdx = source.indexOf("log('First prompt timeout — enabling screen updates and flushing queued messages');");
+    const probeIdx = source.indexOf('probeBusyPatternIdle(`${cliName()} first-prompt-timeout`, backend)', timeoutIdx);
+
+    expect(timeoutIdx).toBeGreaterThan(-1);
+    expect(probeIdx).toBeGreaterThan(timeoutIdx);
+  });
+
   it('limits busy-pattern idle probes to the active status region', () => {
     const source = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
     const helperStart = source.indexOf('function busyProbeRegion(content: string): string');
