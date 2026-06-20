@@ -267,6 +267,7 @@ function renderWhiteboardBlock(opts?: { whiteboardId?: string }): string {
     `<whiteboard id="${xmlEscape(meta.id)}">`,
     '本地项目上下文；需要时读取：`botmux whiteboard read --id ' + xmlEscape(meta.id) + '`。',
     '更新状态：`botmux whiteboard update --id ' + xmlEscape(meta.id) + '`。',
+    '更新前先 read 旧内容，融合新信息后整体重写为一份完整的当前状态（默认中文；代码标识/命令/错误信息可保留原文）。',
     '不要直接读写本地文件；不要写密钥/隐私；用户可见结论仍必须 `botmux send`。',
     '</whiteboard>',
   ].join('\n');
@@ -347,17 +348,19 @@ export function buildNewTopicPrompt(
 
   // Put stable, instruction-like context before the user's first turn. This
   // improves salience without moving per-turn attribution (sender/mentions)
-  // into the prompt-cache prefix. The whiteboard block is an optional tool
-  // hint, so keep it after the user's message instead of ahead of the task.
+  // into the prompt-cache prefix. The whiteboard block is per-turn available
+  // context (a tool/usage hint for this round), so it goes before the user's
+  // message — same position as in follow-ups — not after it, where it could be
+  // misread as part of the user's text.
   if (!adapter.injectsSessionContext) {
     if (routingBlock) parts.push(routingBlock);
     if (identityBlock) parts.push(identityBlock);
     parts.push(`<session_id>${xmlEscape(sessionId)}</session_id>`);
   }
   if (roleBlock) parts.push(roleBlock);
+  if (whiteboardBlock) parts.push(whiteboardBlock);
 
   parts.push(userBlock);
-  if (whiteboardBlock) parts.push(whiteboardBlock);
 
   const senderBlock = renderSenderTag(sender);
   if (senderBlock) parts.push(senderBlock);
@@ -397,16 +400,18 @@ export function buildFollowUpContent(
     : false);
 
   // Put stable context before the user's turn. Follow the new-topic order for
-  // shared blocks: session id first, then role. Keep the optional whiteboard
-  // hint and per-turn attribution after <user_message>.
+  // shared blocks: session id first, then role. The whiteboard block is
+  // per-turn available context, so place it right after <botmux_reminder> and
+  // before <user_message> — consistent with new-topic/refork — not after the
+  // user's text. Per-turn attribution (sender/attachments/mentions) stays after.
   if (!skipSessionId) parts.push(`<session_id>${xmlEscape(sessionId)}</session_id>`);
   if (roleBlock) parts.push(roleBlock);
   if (opts?.cliId !== 'mira') {
     parts.push(`<botmux_reminder>${t('ai.followup.reminder', undefined, opts?.locale)}</botmux_reminder>`);
   }
+  if (whiteboardBlock) parts.push(whiteboardBlock);
 
   parts.push(`<user_message>\n${content}\n</user_message>`);
-  if (whiteboardBlock) parts.push(whiteboardBlock);
 
   const senderBlock = renderSenderTag(opts?.sender);
   if (senderBlock) parts.push(senderBlock);

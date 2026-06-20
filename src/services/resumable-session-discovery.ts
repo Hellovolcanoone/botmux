@@ -102,10 +102,14 @@ const BOTMUX_INJECTION_PATTERNS: readonly RegExp[] = [
   // blocks first, then the wrapper. External prompts may discuss these tags
   // mid-text, but they don't start with this structural envelope.
   /^<user_message>[\s\S]*?<\/user_message>/,
-  /^<botmux_routing>[\s\S]*?<\/botmux_routing>\s*(?:<identity>[\s\S]*?<\/identity>\s*)?<session_id>[^<]+<\/session_id>\s*(?:<role\b[\s\S]*?<\/role>\s*)?(?:<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*)?<user_message>[\s\S]*?<\/user_message>/,
-  /^<role\s+context="(?:team|group)"\s+chat_id="[^"]+">[\s\S]*?<\/role>\s*(?:<session_id>[^<]+<\/session_id>\s*)?(?:<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*)?<user_message>[\s\S]*?<\/user_message>/,
-  /^<session_id>[^<]+<\/session_id>\s*(?:<role\b[\s\S]*?<\/role>\s*)?(?:<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*)?<user_message>[\s\S]*?<\/user_message>/,
-  /^<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*<user_message>[\s\S]*?<\/user_message>/,
+  // The optional <whiteboard> block sits between <botmux_reminder> and
+  // <user_message> (new-topic prompts place it before <user_message> too), so
+  // each reminder-bearing envelope makes it optional there to stay structural —
+  // a botmux-generated prompt with <whiteboard> must still drop, not get adopted.
+  /^<botmux_routing>[\s\S]*?<\/botmux_routing>\s*(?:<identity>[\s\S]*?<\/identity>\s*)?<session_id>[^<]+<\/session_id>\s*(?:<role\b[\s\S]*?<\/role>\s*)?(?:<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*)?(?:<whiteboard\b[\s\S]*?<\/whiteboard>\s*)?<user_message>[\s\S]*?<\/user_message>/,
+  /^<role\s+context="(?:team|group)"\s+chat_id="[^"]+">[\s\S]*?<\/role>\s*(?:<session_id>[^<]+<\/session_id>\s*)?(?:<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*)?(?:<whiteboard\b[\s\S]*?<\/whiteboard>\s*)?<user_message>[\s\S]*?<\/user_message>/,
+  /^<session_id>[^<]+<\/session_id>\s*(?:<role\b[\s\S]*?<\/role>\s*)?(?:<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*)?(?:<whiteboard\b[\s\S]*?<\/whiteboard>\s*)?<user_message>[\s\S]*?<\/user_message>/,
+  /^<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*(?:<whiteboard\b[\s\S]*?<\/whiteboard>\s*)?<user_message>[\s\S]*?<\/user_message>/,
   /^用户发送了：\s*\n-{3,}/,
   // Modern envelope: the `</user_message>` close butted up against one of
   // botmux's trailing blocks (claude → <sender>, codex/traex → <session_id>,

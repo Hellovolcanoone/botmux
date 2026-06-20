@@ -102,6 +102,15 @@ describe('botmux whiteboard CLI', () => {
     expect(post.stderr).toContain('Unknown whiteboard command: post');
   });
 
+  it('seeds a new board with the Chinese 当前状态 template', () => {
+    const created = runCli(['whiteboard', 'create', '--id', 'template_board', '--title', '模板', '--lark-app-id', 'app1', '--chat-id', 'chat-tmpl', '--working-dir', join(home, 'tmpl-repo')]);
+    expect(created.status).toBe(0);
+    const read = runCli(['whiteboard', 'read', '--id', 'template_board']);
+    expect(read.stdout).toContain('# 当前状态');
+    expect(read.stdout).toContain('## 项目目标');
+    expect(read.stdout).toContain('## 下一步');
+  });
+
   it('requires --yes for overwrite', () => {
     const denied = runCli(['whiteboard', 'write', '--id', 'manual_board'], 'new body');
     expect(denied.status).not.toBe(0);

@@ -125,7 +125,7 @@ describe('buildNewTopicPrompt', () => {
     expect(prompt).toContain('<user_message>\nfirst message\n\nsecond message\n\nthird message\n</user_message>');
   });
 
-  it('places the short whiteboard hint after user content', () => {
+  it('places the short whiteboard hint before user content', () => {
     const prompt = buildNewTopicPrompt(
       'ship this',
       SESSION_ID,
@@ -148,7 +148,9 @@ describe('buildNewTopicPrompt', () => {
     expect(prompt).not.toContain('/whiteboards/wb_test/board.md');
     expect(prompt).not.toContain('Do not assume its contents are in context');
     expect(prompt).not.toContain('When you first create or materially update');
-    expect(prompt.indexOf('<whiteboard ')).toBeGreaterThan(prompt.indexOf('</user_message>'));
+    // Whiteboard sits before <user_message> (a new topic has no <botmux_reminder>),
+    // matching follow-up / refork ordering.
+    expect(prompt.indexOf('<whiteboard ')).toBeLessThan(prompt.indexOf('<user_message>'));
   });
 
   it('should include mention metadata in <mentions>', () => {
@@ -258,7 +260,7 @@ describe('buildFollowUpContent', () => {
     expect(content.indexOf('<mentions>')).toBeGreaterThan(content.indexOf('</user_message>'));
   });
 
-  it('places the short whiteboard hint after follow-up user content', () => {
+  it('places the short whiteboard hint before follow-up user content', () => {
     const content = buildFollowUpContent('continue', SESSION_ID, {
       cliId: 'codex',
       whiteboardId: 'wb_follow',
@@ -268,7 +270,9 @@ describe('buildFollowUpContent', () => {
     expect(content).toContain('更新状态');
     expect(content).not.toContain('/whiteboards/wb_follow/board.md');
     expect(content).not.toContain('Local project whiteboard is enabled for durable project context');
-    expect(content.indexOf('<whiteboard ')).toBeGreaterThan(content.indexOf('</user_message>'));
+    // Whiteboard sits after <botmux_reminder> and before <user_message>.
+    expect(content.indexOf('<botmux_reminder>')).toBeLessThan(content.indexOf('<whiteboard '));
+    expect(content.indexOf('<whiteboard ')).toBeLessThan(content.indexOf('<user_message>'));
   });
 
   it('should omit <session_id> but keep mentions in adopt mode', () => {
@@ -390,6 +394,15 @@ describe('buildReforkPrompt', () => {
     expect(out).toContain('<user_message>');
     expect(out).not.toContain('<session_id>');
     expect(out).not.toContain('<botmux_reminder>');
+  });
+
+  it('places the whiteboard hint after <botmux_reminder> and before <user_message> on re-fork', () => {
+    const ds = makeDs();
+    (ds.session as any).whiteboardId = 'wb_refork';
+    const out = buildReforkPrompt(ds, '继续', { cliId: 'codex' });
+    expect(out).toContain('<whiteboard id="wb_refork">');
+    expect(out.indexOf('<botmux_reminder>')).toBeLessThan(out.indexOf('<whiteboard '));
+    expect(out.indexOf('<whiteboard ')).toBeLessThan(out.indexOf('<user_message>'));
   });
 
   it('forwards attachments and mentions to the wrapper', () => {

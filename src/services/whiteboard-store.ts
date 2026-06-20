@@ -169,11 +169,37 @@ export function whiteboardBindingKey(input: WhiteboardBindingInput): string {
   return `local:${wd}`;
 }
 
+/** 初始 board.md 模板：固定中文结构，引导 agent 把白板当作「当前项目的全局上下文
+ *  快照」来维护（项目目标 / 组织方式 / 核心方案 / 关键进展 / 下一步），而不是过程
+ *  日志或零散备忘录。与 botmux-whiteboard skill 的结构示例保持一致。 */
+const DEFAULT_WHITEBOARD_TEMPLATE = `# 当前状态
+
+## 项目目标
+
+- ...
+
+## 组织方式
+
+- ...
+
+## 核心方案
+
+- ...
+
+## 关键进展
+
+- ...
+
+## 下一步
+
+- ...
+`;
+
 function defaultTitle(input: EnsureWhiteboardInput): string {
   const wd = normalizeWhiteboardWorkingDir(input.workingDir);
-  if (wd) return `Whiteboard: ${wd.split('/').filter(Boolean).pop() ?? wd}`;
-  if (input.chatId) return `Whiteboard: ${input.chatId.substring(0, 12)}`;
-  return 'Whiteboard';
+  if (wd) return `白板：${wd.split('/').filter(Boolean).pop() ?? wd}`;
+  if (input.chatId) return `白板：${input.chatId.substring(0, 12)}`;
+  return '白板';
 }
 
 function writeMeta(meta: WhiteboardMeta): void {
@@ -224,7 +250,7 @@ export function ensureDefaultWhiteboard(input: EnsureWhiteboardInput): Whiteboar
       updatedAt: now,
     };
     mkdirSync(boardDir(id), { recursive: true });
-    atomicWriteFileSync(whiteboardBoardPath(id), `# ${meta.title}\n\n`);
+    atomicWriteFileSync(whiteboardBoardPath(id), DEFAULT_WHITEBOARD_TEMPLATE);
     writeFileSync(whiteboardLogPath(id), '', { flag: 'a' });
     writeMeta(meta);
     index.boards[id] = meta;
@@ -254,7 +280,7 @@ export function createWhiteboard(input: EnsureWhiteboardInput & { id?: string; s
       updatedAt: now,
     };
     mkdirSync(boardDir(id), { recursive: true });
-    atomicWriteFileSync(whiteboardBoardPath(id), `# ${meta.title}\n\n`);
+    atomicWriteFileSync(whiteboardBoardPath(id), DEFAULT_WHITEBOARD_TEMPLATE);
     writeFileSync(whiteboardLogPath(id), '', { flag: 'a' });
     writeMeta(meta);
     index.boards[id] = meta;

@@ -212,6 +212,47 @@ describe('discoverRolloutSessions (codex / traex)', () => {
     expect(out.map((s) => s.cliSessionId)).toEqual(['sid-ext-reminder-discuss']);
   });
 
+  // Whiteboard now sits between <botmux_reminder> and <user_message>; a
+  // botmux-generated rollout carrying it must still be dropped (structural
+  // match), not adopted as external.
+  it('drops botmux-origin rollouts with whiteboard between reminder and user_message (new-topic shape)', async () => {
+    writeRollout('2026/06/16', 'rollout-bmx-wb-newtopic.jsonl', [
+      { type: 'session_meta', payload: { id: 'sid-bmx-wb-newtopic', cwd: '/root/x' } },
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message: '<botmux_routing>\nuse botmux send\n</botmux_routing>\n\n<identity>\n  <name>Codex Bot</name>\n  <open_id>ou_bot</open_id>\n</identity>\n\n<session_id>sess-wb</session_id>\n\n<role context="team" chat_id="oc_team">\nreviewer\n</role>\n\n<whiteboard id="wb_x">\nread/update via botmux whiteboard\n</whiteboard>\n\n<user_message>\nactual prompt\n</user_message>',
+        },
+      },
+    ]);
+    writeRollout('2026/06/17', 'rollout-ext-wb-newtopic.jsonl', [
+      { type: 'session_meta', payload: { id: 'sid-ext-wb-newtopic', cwd: '/root/y' } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'a prompt typed straight into codex' } },
+    ]);
+    const out = await discoverRolloutSessions(sessionsRoot, 10);
+    expect(out.map((s) => s.cliSessionId)).toEqual(['sid-ext-wb-newtopic']);
+  });
+
+  it('drops botmux-origin rollouts with whiteboard between reminder and user_message (follow-up shape)', async () => {
+    writeRollout('2026/06/18', 'rollout-bmx-wb-followup.jsonl', [
+      { type: 'session_meta', payload: { id: 'sid-bmx-wb-followup', cwd: '/root/x' } },
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message: '<session_id>sess-wb2</session_id>\n\n<role context="team" chat_id="oc_team">\nreviewer\n</role>\n\n<botmux_reminder>reply via botmux send</botmux_reminder>\n\n<whiteboard id="wb_y">\nread/update via botmux whiteboard\n</whiteboard>\n\n<user_message>\nactual prompt\n</user_message>',
+        },
+      },
+    ]);
+    writeRollout('2026/06/19', 'rollout-ext-wb-followup.jsonl', [
+      { type: 'session_meta', payload: { id: 'sid-ext-wb-followup', cwd: '/root/y' } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'a prompt typed straight into codex' } },
+    ]);
+    const out = await discoverRolloutSessions(sessionsRoot, 10);
+    expect(out.map((s) => s.cliSessionId)).toEqual(['sid-ext-wb-followup']);
+  });
+
   // Regression (Codex blocker 2): legacy botmux rollouts may carry a
   // "你已连接到飞书话题，" preamble before "用户发送了：", which an anchored ^ match
   // missed. The envelope-paired-with-"Session ID:" combo catches it regardless.
