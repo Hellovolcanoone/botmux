@@ -1,16 +1,7 @@
+import { safeScrubAndTruncate } from './scrub.js';
 import type { TurnPromptPreview, TurnPromptSource } from './types.js';
 
 const MAX_PROMPT_PREVIEW = 400;
-const DIRECT_SECRET_PATTERNS: RegExp[] = [
-  /\bsk-[A-Za-z0-9_-]{12,}\b/g,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
-  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
-];
-
-const KEY_VALUE_SECRET_PATTERNS: RegExp[] = [
-  /\b([A-Za-z0-9_-]*(?:token|secret|key|password|passwd|pwd)[A-Za-z0-9_-]*)(=|:)([^\s&]+)/gi,
-  /\b(BOTMUX_[A-Z0-9_]*|LARK_APP_SECRET|OPENAI_API_KEY|ANTHROPIC_API_KEY)(=|:)([^\s&]+)/g,
-];
 
 function extractBotmuxUserText(value: string): string {
   const match = value.match(/<user_message>\s*([\s\S]*?)\s*<\/user_message>/);
@@ -106,11 +97,9 @@ export function safePromptPreview(value: string | undefined, max = MAX_PROMPT_PR
   let text = extractedText;
   if (!text) return undefined;
   const source = extractBotmuxPromptSource(raw, extractedText);
-  for (const re of DIRECT_SECRET_PATTERNS) text = text.replace(re, '<redacted>');
-  for (const re of KEY_VALUE_SECRET_PATTERNS) text = text.replace(re, (_m, key, sep) => `${key}${sep}<redacted>`);
-  const truncated = text.length > max;
+  const { text: scrubbed, truncated } = safeScrubAndTruncate(text, max);
   return {
-    text: truncated ? `${text.slice(0, Math.max(0, max - 1))}…` : text,
+    text: scrubbed,
     truncated,
     ...(source ? { source } : {}),
   };

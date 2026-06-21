@@ -1,26 +1,15 @@
 import { safeToolLabel } from './classify.js';
+import { scrubSecrets } from './scrub.js';
 import type { RawInsightSpan, SafeSpan, SafeSpanTag } from './types.js';
-
-const TOKEN_PATTERNS: RegExp[] = [
-  /\b(sk-[A-Za-z0-9_-]{12,})\b/g,
-  /\b(xox[baprs]-[A-Za-z0-9-]{10,})\b/g,
-  /\b((?:AKIA|ASIA)[A-Z0-9]{16})\b/g,
-  /\b([A-Za-z0-9_-]*(?:token|secret|key|password|passwd|pwd)[A-Za-z0-9_-]*)=([^\s&]+)/gi,
-  /\b(BOTMUX_[A-Z0-9_]*|LARK_APP_SECRET|OPENAI_API_KEY|ANTHROPIC_API_KEY)=([^\s&]+)/g,
-  /(https?:\/\/[^\s?]+)\?([^\s]+)/gi,
-];
 
 function scrubAllowedText(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  let out = value.replace(/\s+/g, ' ').trim();
+  const out = value.replace(/\s+/g, ' ').trim();
   if (!out) return undefined;
-  for (const re of TOKEN_PATTERNS) {
-    out = out.replace(re, (_m, a) => {
-      if (typeof a === 'string' && a.startsWith('http')) return `${a}?<redacted>`;
-      return '<redacted>';
-    });
-  }
-  return out.slice(0, 160);
+  // Defense-in-depth only: allowSummary() is fail-closed and never passes raw
+  // text here today, but route through the shared (ReDoS-safe) scrubber so this
+  // copy can't silently regress if the gate ever loosens.
+  return scrubSecrets(out).slice(0, 160);
 }
 
 function allowSummary(value: string | undefined): string | undefined {
