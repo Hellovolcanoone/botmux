@@ -142,7 +142,11 @@ describe('buildNewTopicPrompt', () => {
     );
 
     expect(prompt).toContain('<whiteboard id="wb_test">');
-    expect(prompt).toContain('需要时读取：`botmux whiteboard read --id wb_test`');
+    expect(prompt).toContain('读取：`botmux whiteboard read --id wb_test --json`');
+    // The CAS flow: update carries --expected-updated-at, and a mismatch tells
+    // the agent to re-read. Pin both so the prompt keeps guiding agents to CAS.
+    expect(prompt).toContain('update --id wb_test --expected-updated-at');
+    expect(prompt).toContain('whiteboard_cas_mismatch');
     expect(prompt).toContain('不要直接读写本地文件');
     expect(prompt).toContain('用户可见结论仍必须 `botmux send`。');
     expect(prompt).not.toContain('/whiteboards/wb_test/board.md');

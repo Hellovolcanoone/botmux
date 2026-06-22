@@ -102,6 +102,21 @@ describe('discoverClaudeFamilySessions', () => {
     expect(out.map((s) => s.cliSessionId)).toEqual(['wb-open-ext']);
   });
 
+  // The ^<whiteboard>-opening pattern matches ANY board id (id="[^"]+"), not
+  // just the default `wb_` prefix — a user-created board (`create --id
+  // <custom>`) bound to a Claude-family + role-less session also opens with
+  // <whiteboard id="<custom>"> and must be dropped from /adopt.
+  it('drops botmux-origin Claude sessions opening with a custom-id <whiteboard>', async () => {
+    writeSession('-root-wb', 'wb-custom-1', [
+      { type: 'user', cwd: '/root/wb', message: { role: 'user', content: '<whiteboard id="my-custom-board">\n本地项目上下文\n</whiteboard>\n\n<user_message>\ndo the thing\n</user_message>' } },
+    ]);
+    writeSession('-root-wb', 'wb-custom-ext', [
+      { type: 'user', cwd: '/root/wb', message: { role: 'user', content: 'just a normal prompt I typed' } },
+    ]);
+    const out = await discoverClaudeFamilySessions(dataDir, 10);
+    expect(out.map((s) => s.cliSessionId)).toEqual(['wb-custom-ext']);
+  });
+
   // The <whiteboard>-opening pattern is structural (^-anchored + id="wb_…" +
   // <user_message> adjacency), so an external session that merely DISCUSSES a
   // whiteboard tag in prose (mid-sentence, no envelope) must NOT be mis-flagged.

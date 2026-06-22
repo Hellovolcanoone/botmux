@@ -116,10 +116,13 @@ const BOTMUX_INJECTION_PATTERNS: readonly RegExp[] = [
   // <whiteboard> context block directly. None of the patterns above match a
   // `^<whiteboard>` opening (they only allow <whiteboard> as a middle element
   // after routing/role/session_id/reminder), so such botmux-origin Claude
-  // sessions leaked into the /adopt picker as if external. The `wb_` id prefix
-  // + the trailing <user_message> envelope adjacency is structural — an
-  // external session discussing whiteboards never starts with this shape.
-  /^<whiteboard\s+id="wb_[a-zA-Z0-9]+"\s*>[\s\S]*?<\/whiteboard>\s*<user_message>[\s\S]*?<\/user_message>/,
+  // sessions leaked into the /adopt picker as if external. The trailing
+  // <user_message> envelope adjacency is structural — an external session
+  // discussing whiteboards never starts with this shape. id matches any value
+  // (not just the default `wb_` prefix) so a user-created board bound to a
+  // Claude-family + role-less session (`create --id <custom>`) is also dropped,
+  // consistent with the three `<whiteboard\b` patterns above.
+  /^<whiteboard\s+id="[^"]+"\s*>[\s\S]*?<\/whiteboard>\s*<user_message>[\s\S]*?<\/user_message>/,
   /^用户发送了：\s*\n-{3,}/,
   // Modern envelope: the `</user_message>` close butted up against one of
   // botmux's trailing blocks (claude → <sender>, codex/traex → <session_id>,
