@@ -400,6 +400,7 @@ import { bindOncall } from '../src/services/oncall-store.js';
 import { existsSync, statSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { codexHome } from '../src/services/codex-paths.js';
 import { scanMultipleProjects } from '../src/services/project-scanner.js';
 import { repoPickerScanOptions } from '../src/global-config.js';
 import { createRepoWorktree } from '../src/services/git-worktree.js';
@@ -533,9 +534,9 @@ describe('DAEMON_COMMANDS set', () => {
   });
 
   it('should have the correct size', () => {
-    // 25 = 21 original + /land (sandbox-landing) + /term (operable-terminal slash)
-    //      + /subscribe-lark-doc (Feishu doc comment entry) + /skills.
-    expect(DAEMON_COMMANDS.size).toBe(25);
+    // 26 = 21 original + /land (sandbox-landing) + /term (operable-terminal slash)
+    //      + /subscribe-lark-doc (Feishu doc comment entry) + /skills + /insight.
+    expect(DAEMON_COMMANDS.size).toBe(26);
   });
 
   it('contains the /list-slash-command lister and its /slash alias', () => {
@@ -561,7 +562,7 @@ describe('/list-slash-command discovery', () => {
 
     expect(discoverSlashCommandsForAdapter).toHaveBeenCalledWith(
       '/home/testuser/projects',
-      expect.objectContaining({ id: 'codex', skillsDir: '~/.codex/skills' }),
+      expect.objectContaining({ id: 'codex', skillsDir: join(codexHome(), 'skills') }),
     );
     expect(buildSlashListCard).toHaveBeenCalledWith(
       expect.objectContaining({

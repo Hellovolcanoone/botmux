@@ -185,6 +185,14 @@ export const messages: Record<string, string> = {
 
   // ─── Command responses ───────────────────────────────────────────────────
   'cmd.no_active_session': 'No active session in this topic.',
+  'cmd.insight.operator_only': '⚠️ Only authorized users (allowedUsers) can use /insight.',
+  'cmd.insight.unsupported': 'ℹ️ Insight analysis is not available for this CLI (currently Claude Code / Codex only).',
+  'cmd.insight.no_transcript': 'ℹ️ No transcript found for this session yet — try again after a few turns.',
+  'cmd.insight.parse_error': '⚠️ Failed to parse this session\'s transcript.',
+  'cmd.insight.no_spans': 'ℹ️ No analyzable tool spans in this session yet.',
+  'cmd.insight.header': '📊 Insight for this session',
+  'cmd.insight.metrics_line': 'Metrics: spans {total} · failed {failed} · slow {slow} · read/write {rw} · compactions {compactions}',
+  'cmd.insight.suggestions_label': 'Suggestions',
   'cmd.card.operator_only': '⚠️ Only authorized users (allowedUsers) can use /card.',
   'cmd.term.operator_only': '⚠️ Only authorized users (allowedUsers) can use /term to get the operable terminal link.',
   'cmd.term.no_session': 'No active session in this topic — /term needs a running session.',

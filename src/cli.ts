@@ -286,6 +286,19 @@ function ecosystemConfig(): string {
     autorestart: true,
     max_restarts: 10,
     restart_delay: 3000,
+    // A graceful daemon shutdown exits 0 (SIGTERM/SIGINT → drain → process.exit(0)).
+    // Tell pm2 that exit 0 is intentional so it does NOT autorestart the daemon
+    // while `botmux restart` is tearing the fleet down — otherwise pm2 revives
+    // each daemon (after restart_delay) the instant our parallel SIGTERM drains
+    // it, and re-deleting those revivals one-by-one re-serializes the teardown
+    // (~13s of churn for 31 bots). Crashes (non-zero exit / killed by signal)
+    // are NOT in this list, so genuine crash-autorestart is preserved.
+    stop_exit_codes: [0],
+    // pm2's default kill_timeout (1.6s) is SHORTER than the daemon's own
+    // SHUTDOWN_GRACE_MS (3s), so any daemon pm2 has to signal directly gets
+    // SIGKILL'd mid-drain → orphaned (ppid=1) workers. Give pm2 headroom past
+    // the daemon's graceful-drain budget so it never force-kills mid-shutdown.
+    kill_timeout: 3500,
     log_date_format: 'YYYY-MM-DD HH:mm:ss',
     merge_logs: true,
     node_args: [
@@ -319,6 +332,10 @@ function ecosystemConfig(): string {
     autorestart: true,
     max_restarts: 10,
     restart_delay: 3000,
+    // Same rationale as the bot daemons: don't let pm2 revive on graceful exit-0
+    // during a fleet teardown, and don't SIGKILL mid-shutdown. (See baseApp.)
+    stop_exit_codes: [0],
+    kill_timeout: 3500,
     error_file: join(LOG_DIR, 'dashboard-error.log'),
     out_file: join(LOG_DIR, 'dashboard-out.log'),
     merge_logs: true,
@@ -1223,25 +1240,73 @@ function cleanupStaleDaemonDescriptors(): void {
   }
 }
 
+/** Block the current thread for `ms`. Safe here: the restart CLI is a one-shot
+ *  process, so stalling its event loop during the shutdown poll is harmless. */
+function sleepSyncMs(ms: number): void {
+  if (ms <= 0) return;
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* SAB unavailable → no-op */ }
+}
+
 /** Delete all pm2 processes matching botmux / botmux-* under the given PM2_HOME. */
 function deleteAllBotmuxProcesses(home: string = PM2_HOME): void {
+  let entries: Array<{ name: string; pid: number; online: boolean }>;
   try {
-    const output = pm2Capture(['jlist'], home);
-    const apps = JSON.parse(output) as any[];
-    for (const app of apps) {
-      if (app.name === PM2_NAME || app.name.startsWith(`${PM2_NAME}-`)) {
-        try {
-          runPm2(['delete', app.name], false, home, 10_000);
-        } catch (e) {
-          // Don't swallow silently — a failed delete here used to leave the
-          // restart half-done with no trace. Surface it (the auto-restart
-          // driver captures stderr to ~/.botmux/logs/maintenance-restart.log).
-          console.error(`[restart] pm2 delete ${app.name} failed: ${e instanceof Error ? e.message : e}`);
-        }
-      }
-    }
+    const apps = JSON.parse(pm2Capture(['jlist'], home)) as any[];
+    entries = (Array.isArray(apps) ? apps : [])
+      .filter(a => a && (a.name === PM2_NAME || String(a.name).startsWith(`${PM2_NAME}-`)))
+      .map(a => ({ name: String(a.name), pid: Number(a.pid) || 0, online: a?.pm2_env?.status === 'online' }));
   } catch (e) {
     console.error(`[restart] pm2 jlist failed (pm2 not running or no apps?): ${e instanceof Error ? e.message : e}`);
+    return;
+  }
+  if (entries.length === 0) return;
+  const names = entries.map(e => e.name);
+
+  // Parallel graceful shutdown. pm2's own delete stops apps one-at-a-time
+  // (async eachLimit, concurrency 1) and each botmux daemon's drain eats pm2's
+  // full kill_timeout (~1.6s) → ~N×1.6s serial (~38s for 31 bots). Instead we
+  // SIGTERM every online daemon AT ONCE so their graceful drains overlap (the
+  // daemon's SIGTERM handler detaches workers within SHUTDOWN_GRACE_MS), wait
+  // once for them all to exit, then let pm2 delete reap the now-dead entries
+  // instantly. Orphan-safe: each daemon runs its FULL graceful drain and we wait
+  // for real exit before pm2 touches it — avoiding the mid-drain SIGKILL the old
+  // path forced (pm2 kill_timeout 1.6s < daemon SHUTDOWN_GRACE_MS 3s).
+  const pids = entries.filter(e => e.online && e.pid > 0).map(e => e.pid);
+  for (const pid of pids) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+  }
+  // Poll until every signalled daemon has exited (bounded). SHUTDOWN_GRACE_MS is
+  // 3s; give headroom. Exits early the moment the last one dies.
+  const deadline = Date.now() + 5_000;
+  let alive = pids.slice();
+  while (alive.length > 0 && Date.now() < deadline) {
+    sleepSyncMs(50);
+    alive = alive.filter(pid => { try { process.kill(pid, 0); return true; } catch { return false; } });
+  }
+
+  // Reap pm2 entries. Processes are already dead → each delete is instant, and
+  // ONE batched `pm2 delete name1 name2 …` collapses N pm2 CLI cold-boots
+  // (~315ms each) into one. A revived (autorestart, gated by restart_delay)
+  // instance is still removed by name.
+  const batchTimeout = Math.max(15_000, names.length * 2_500);
+  try {
+    runPm2(['delete', ...names], false, home, batchTimeout);
+    return;
+  } catch (e) {
+    // pm2's batched delete (async eachLimit) aborts on the first failed name,
+    // so a mid-batch failure can leave stragglers. Fall back to the resilient
+    // per-name loop that try/catches each name independently.
+    console.error(`[restart] batched pm2 delete failed, falling back to per-name: ${e instanceof Error ? e.message : e}`);
+  }
+  for (const name of names) {
+    try {
+      runPm2(['delete', name], false, home, 10_000);
+    } catch (e) {
+      // Don't swallow silently — a failed delete here used to leave the
+      // restart half-done with no trace. Surface it (the auto-restart
+      // driver captures stderr to ~/.botmux/logs/maintenance-restart.log).
+      console.error(`[restart] pm2 delete ${name} failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
 }
 

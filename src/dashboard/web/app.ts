@@ -14,6 +14,7 @@ import { renderWorkflowsPage } from './workflows.js';
 import { renderWorkflowCatalogPage } from './workflow-catalog.js';
 import { renderOfficePage } from './office.js';
 import { renderWhiteboardsPage } from './whiteboards.js';
+import { renderInsightsPage } from './insights.js';
 import { wireBotOnboardingButton } from './bot-onboarding.js';
 import { attentionReason, attentionWaitSince, botDisplayName, escapeHtml, loadNameMaps, relTime, t, ui } from './ui.js';
 import { initThemeMenu, paintThemeMenu } from './theme-menu.js';
@@ -33,7 +34,7 @@ let publicReadOnly = false;
 
 // Management pages are token-gated end-to-end (no public GET) — a read-only
 // visitor must not reach them. `data-route` values from index.html's nav.
-const MANAGE_ROUTES = ['roles', 'role-profiles', 'bot-defaults', 'skills', 'team', 'connectors'];
+const MANAGE_ROUTES = ['roles', 'role-profiles', 'bot-defaults', 'skills', 'team', 'connectors', 'insights', 'whiteboards'];
 
 // ── Auth-expiry overlay ──────────────────────────────────────────────────────
 // Shown only when the dashboard token was rotated WHILE public read-only is off
@@ -199,6 +200,25 @@ function applyAuthVisibility(): void {
   if (addBot) addBot.style.display = isAuthed ? '' : 'none';
 }
 
+// Show a small dot on the Settings nav when a newer botmux version is published,
+// so an available update is visible without opening the page. Authed-only (the
+// status endpoint is token-gated; the result is server-cached so this is cheap).
+// Best-effort and silent on failure.
+async function checkUpdateBadge(): Promise<void> {
+  if (!isAuthed) return;
+  try {
+    const r = await fetch('/api/update/status');
+    if (!r.ok) return;
+    const j = await r.json();
+    const a = document.querySelector<HTMLAnchorElement>('.sidebar-nav a[data-route="settings"]');
+    if (!a) return;
+    const behind = j.behind === true;
+    a.classList.toggle('nav-has-update', behind);
+    if (behind) a.title = t('update.navBadgeTitle', { version: `v${j.latest}` });
+    else a.removeAttribute('title');
+  } catch { /* best-effort */ }
+}
+
 function renderAuthRequiredPage(host: HTMLElement): void {
   host.innerHTML =
     '<section class="auth-required" style="max-width:520px;margin:64px auto;text-align:center;' +
@@ -267,6 +287,7 @@ function route() {
   else if (hash.startsWith('#/whiteboards')) void renderWhiteboardsPage(root);
   else if (hash.startsWith('#/sessions')) renderSessionsPage(root);
   else if (hash.startsWith('#/office')) pageDispose = renderOfficePage(root) ?? null;
+  else if (hash.startsWith('#/insights')) pageDispose = renderInsightsPage(root);
   else void renderOverviewPage(root);
 
   highlightNav(hash);
@@ -363,6 +384,7 @@ void (async () => {
   // hidden and route guards are active for read-only visitors from frame one.
   await loadAuthState();
   applyAuthVisibility();
+  void checkUpdateBadge();
   initOwnerAvatar();
   try {
     await bootstrap();

@@ -20,6 +20,8 @@ import * as grantPrefsStore from '../services/grant-prefs-store.js';
 import { findConfigField, applyConfigField, coerceConfigValue } from '../services/bot-config-store.js';
 import { config } from '../config.js';
 import { computeSandboxDiff, applySandboxDiff } from '../services/sandbox-land.js';
+import { buildSafeInsightConversation, buildSafeInsightOverview, buildSafeInsightReport, buildSafeInsightTurnDetail } from '../services/insight/report.js';
+import type { InsightConversationRole, InsightDetail, InsightSeverity, SafeSpanTag } from '../services/insight/types.js';
 import { readRawConfig, findEntryIndex, requireConfigPath } from '../services/config-store.js';
 import { setDefaultLocale, localeForBot, t } from '../i18n/index.js';
 import { isLocale, type Locale } from '../i18n/types.js';
@@ -269,6 +271,104 @@ ipcRoute('GET', '/api/sessions/:sessionId/history', async (req, res, params) => 
   } catch (err: any) {
     jsonRes(res, 502, { ok: false, error: String(err?.message ?? err) });
   }
+});
+
+// 会话 insight：只读解析本会话的 transcript，产出动作 span / 失败聚合 / 规则建议
+// （SafeInsightReport）。底层 services/insight 已做 fail-closed 脱敏投影——raw 命令
+// 与输出永不进结构。detail=summary 只返聚合+建议（/insight 卡片、抽屉概览用）；
+// detail=spans 才带脱敏 span（详情 tab 用）。owner-only 由 dashboard 外层 authed-only
+// 路由 + /insight 命令层把关，IPC 自身 loopback-trusted。
+ipcRoute('GET', '/api/sessions/:sessionId/insight', (req, res, params) => {
+  const session = findSessionRecord(params.sessionId);
+  if (!session) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
+  const url = new URL(req.url ?? '/', 'http://localhost');
+  if (url.searchParams.get('detail') === 'conversation') {
+    const offset = parseInt(url.searchParams.get('offset') ?? '0', 10) || 0;
+    const limit = parseInt(url.searchParams.get('limit') ?? '50', 10) || 50;
+    const role = url.searchParams.get('role') as InsightConversationRole | null;
+    const severity = url.searchParams.get('severity') as InsightSeverity | null;
+    const tag = url.searchParams.get('tag') as SafeSpanTag | null;
+    const turnIndexes = url.searchParams.getAll('turnIndexes')
+      .flatMap(v => v.split(','))
+      .map(v => parseInt(v, 10))
+      .filter(Number.isFinite);
+    const conversation = buildSafeInsightConversation({
+      cliId: session.cliId ?? 'unknown',
+      sessionId: session.sessionId,
+      cliSessionId: session.cliSessionId,
+      cwd: session.workingDir,
+    }, {
+      offset,
+      limit,
+      q: url.searchParams.get('q') ?? undefined,
+      role: role && ['user', 'a2a_agent', 'system', 'agent'].includes(role) ? role : undefined,
+      severity: severity && ['bad', 'warn', 'info'].includes(severity) ? severity : undefined,
+      tag: tag && ['failure', 'slow', 'retry', 'read_write_imbalance', 'diagnostic', 'normal'].includes(tag) ? tag : undefined,
+      turnIndexes: turnIndexes.length ? turnIndexes : undefined,
+    });
+    return jsonRes(res, 200, { ok: true, conversation });
+  }
+  const detail: InsightDetail = url.searchParams.get('detail') === 'spans' ? 'spans' : 'summary';
+  try {
+    const report = buildSafeInsightReport({
+      cliId: session.cliId ?? 'unknown',
+      sessionId: session.sessionId,
+      cliSessionId: session.cliSessionId,
+      cwd: session.workingDir,
+    }, { detail });
+    jsonRes(res, 200, { ok: true, report });
+  } catch (err: any) {
+    jsonRes(res, 500, { ok: false, error: String(err?.message ?? err) });
+  }
+});
+
+ipcRoute('GET', '/api/sessions/:sessionId/insight/turn/:turnIndex', (req, res, params) => {
+  const session = findSessionRecord(params.sessionId);
+  if (!session) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
+  const url = new URL(req.url ?? '/', 'http://localhost');
+  const offset = parseInt(url.searchParams.get('offset') ?? '0', 10) || 0;
+  const limit = parseInt(url.searchParams.get('limit') ?? '4000', 10) || 4000;
+  try {
+    const turn = buildSafeInsightTurnDetail({
+      cliId: session.cliId ?? 'unknown',
+      sessionId: session.sessionId,
+      cliSessionId: session.cliSessionId,
+      cwd: session.workingDir,
+    }, parseInt(params.turnIndex, 10) || 0, { offset, limit });
+    jsonRes(res, 200, { ok: true, turn });
+  } catch (err: any) {
+    jsonRes(res, 500, { ok: false, error: String(err?.message ?? err) });
+  }
+});
+
+// 跨会话 insight 总览：仍然只读、按需、owner-only（外层 dashboard route
+// 不在 public-read 白名单）。只聚合本 daemon registry 里的 botmux 会话；
+// 不扫整机 transcript，不返回 raw span/input/output。
+ipcRoute('GET', '/api/insights/summary', async (req, res) => {
+  const url = new URL(req.url ?? '/', 'http://localhost');
+  const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '200', 10) || 200, 1), 500);
+  const active = listActiveSessions().map(composeRowFromActive);
+  const activeIds = new Set(active.map(r => r.sessionId));
+  const closed = sessionStore.listSessions()
+    .filter(s => s.status === 'closed' && !activeIds.has(s.sessionId))
+    .map(composeRowFromClosed);
+  const rows = [...active, ...closed];
+  const overview = await buildSafeInsightOverview(rows.map(row => {
+    const session = findSessionRecord(row.sessionId);
+    return {
+      cliId: row.cliId,
+      sessionId: row.sessionId,
+      cliSessionId: session?.cliSessionId,
+      cwd: row.workingDir,
+      workingDir: row.workingDir,
+      title: row.title,
+      botName: row.botName,
+      larkAppId: row.larkAppId,
+      status: row.status,
+      lastMessageAt: row.lastMessageAt,
+    };
+  }), { limit });
+  jsonRes(res, 200, { ok: true, overview });
 });
 
 // 部署 owner 的资料（名字 + 头像）——dashboard 左上角和历史弹窗展示「我」。
@@ -978,6 +1078,14 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     const sc = getBot(cachedLarkAppId).config.startupCommands;
     if (Array.isArray(sc) && sc.length) startupCommands = sc.join('\n');
   } catch { /* none */ }
+  // Per-bot env → pretty JSON for the dashboard textarea. The dashboard is
+  // owner-authenticated, so showing the real values here is acceptable (same
+  // as editing bots.json directly); the chat-facing /config get masks them.
+  let env = '';
+  try {
+    const e = getBot(cachedLarkAppId).config.env;
+    if (e && typeof e === 'object' && Object.keys(e).length) env = JSON.stringify(e, null, 2);
+  } catch { /* none */ }
   jsonRes(res, 200, {
     larkAppId: cachedLarkAppId,
     botName: getBotName(),
@@ -999,6 +1107,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     p2pMode,
     maxLiveWorkers,
     startupCommands,
+    env,
     skills: getBot(cachedLarkAppId).config.skills ?? null,
   });
 });
@@ -1128,6 +1237,33 @@ ipcRoute('PUT', '/api/bot-startup-commands', async (req, res) => {
   const r = await applyConfigField(cachedLarkAppId, spec, value);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, startupCommands: (value ?? []).join('\n') });
+});
+
+// Per-bot 环境变量 env。Body `{ env: string }`（原始 JSON 文本，如
+// `{"ANTHROPIC_BASE_URL":"…","ANTHROPIC_AUTH_TOKEN":"…"}` 让本 bot 走 GLM/第三方
+// 服务商）：空白 → 清除；否则按 json kind 解析 + sanitizePerBotEnv 过滤后落盘。
+// 走 applyConfigField（与 /botconfig 同一写盘 + 内存热更新路径），next-session 生效
+// （下个会话起注入到 CLI 进程）。回包返回脱敏后的 pretty JSON 供 textarea 回填。
+ipcRoute('PUT', '/api/bot-env', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  let body: { env?: unknown };
+  try { body = await readJsonBody<{ env?: unknown }>(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+
+  const spec = findConfigField('env');
+  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
+  const raw = typeof body.env === 'string' ? body.env : '';
+  let value: Record<string, string> | null;
+  if (!raw.trim()) {
+    value = null;  // 清除
+  } else {
+    const coerced = coerceConfigValue(spec, raw);
+    if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
+    value = coerced.value as Record<string, string>;
+  }
+  const r = await applyConfigField(cachedLarkAppId, spec, value);
+  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
+  jsonRes(res, 200, { ok: true, env: value ? JSON.stringify(value, null, 2) : '' });
 });
 
 // Per-bot 最大同时活跃会话数 maxLiveWorkers。Body `{ maxLiveWorkers: number | null }`:

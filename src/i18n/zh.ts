@@ -188,6 +188,14 @@ export const messages: Record<string, string> = {
 
   // ─── Command responses ───────────────────────────────────────────────────
   'cmd.no_active_session': '当前话题没有活跃的会话。',
+  'cmd.insight.operator_only': '⚠️ 仅授权用户（allowedUsers）可以使用 /insight。',
+  'cmd.insight.unsupported': 'ℹ️ 该 CLI 暂不支持 insight 分析（目前仅 Claude Code / Codex）。',
+  'cmd.insight.no_transcript': 'ℹ️ 还没找到本会话的 transcript，跑几轮后再试。',
+  'cmd.insight.parse_error': '⚠️ 解析本会话 transcript 失败。',
+  'cmd.insight.no_spans': 'ℹ️ 本会话还没有可分析的工具 span。',
+  'cmd.insight.header': '📊 本会话 insight',
+  'cmd.insight.metrics_line': '指标：span {total} · 失败 {failed} · 慢 {slow} · 读改比 {rw} · 压缩 {compactions}',
+  'cmd.insight.suggestions_label': '建议',
   'cmd.card.operator_only': '⚠️ 仅授权用户（allowedUsers）可以使用 /card。',
   'cmd.term.operator_only': '⚠️ 仅授权用户（allowedUsers）可以用 /term 获取可操作终端链接。',
   'cmd.term.no_session': '当前话题没有活跃会话，/term 需要一个跑着的会话。',

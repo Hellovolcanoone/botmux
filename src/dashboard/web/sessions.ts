@@ -1354,6 +1354,59 @@ export function renderSessionsPage(root: HTMLElement) {
     }
   }
 
+  // ── Insight (owner-only): render a SafeInsightReport into the drawer. All
+  //    free text (suggestions, span input/output summaries) is escapeHtml'd —
+  //    the report is already fail-closed redacted upstream, this is defense in
+  //    depth against transcript content reaching innerHTML. ──────────────────
+  function insightDur(ms?: number): string {
+    if (ms === undefined) return '—';
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+  }
+  function renderInsightReport(rep: any): string {
+    if (!rep || (rep.status !== 'ok')) {
+      const msg = rep?.error?.message ? escapeHtml(String(rep.error.message)) : escapeHtml(String(rep?.status ?? 'error'));
+      return `<p>${t('sessions.insightUnavailable')}: ${msg}</p>`;
+    }
+    const a = rep.agg ?? {};
+    if (!a.totalSpans) return `<p>${t('sessions.insightEmpty')}</p>`;
+    const mut = 'color:var(--muted,#8f959e)';
+    const parts: string[] = [];
+    const metaBits: string[] = [];
+    if (rep.meta?.asOf) metaBits.push(escapeHtml(t('sessions.insightAsOf', { asOf: String(rep.meta.asOf) })));
+    if (rep.meta?.partial) metaBits.push(escapeHtml(t('sessions.insightPartial')));
+    if (metaBits.length) parts.push(`<p style="font-size:12px;${mut}">${metaBits.join(' · ')}</p>`);
+    parts.push(`<p>${escapeHtml(t('sessions.insightMetrics', {
+      total: String(a.totalSpans ?? 0),
+      failed: String(a.failedSpans ?? 0),
+      slow: String(a.slowSpans ?? 0),
+      rw: (a.readWriteRatio === null || a.readWriteRatio === undefined) ? '—' : String(a.readWriteRatio),
+      compactions: String(a.compactions ?? 0),
+    }))}</p>`);
+    if (Array.isArray(rep.suggestions) && rep.suggestions.length) {
+      const icon = (sev: string) => (sev === 'bad' ? '🔴' : sev === 'warn' ? '🟡' : 'ℹ️');
+      const lis = rep.suggestions.map((sg: any) =>
+        `<li>${icon(sg.severity)} <b>${escapeHtml(String(sg.title ?? ''))}</b> — ${escapeHtml(String(sg.action ?? ''))}`
+        + (Array.isArray(sg.evidence) && sg.evidence.length ? `<br><small style="${mut}">${escapeHtml(sg.evidence.join('；'))}</small>` : '')
+        + `</li>`).join('');
+      parts.push(`<details open><summary>${t('sessions.insightSuggestions')}</summary><ul style="padding-left:18px;margin:6px 0">${lis}</ul></details>`);
+    }
+    if (Array.isArray(rep.spans) && rep.spans.length) {
+      const sIcon = (st: string) => (st === 'error' ? '🔴' : st === 'running' ? '⏳' : '✅');
+      const rows = [...rep.spans].sort((x: any, y: any) => (x.relStartMs ?? 0) - (y.relStartMs ?? 0)).map((sp: any) => {
+        const io = [sp.inputSummary, sp.outputSummary].filter(Boolean).map((x: string) => escapeHtml(String(x))).join(' → ');
+        const cls = sp.status === 'error' ? ' style="color:var(--danger,#d33)"' : '';
+        return `<tr${cls}><td>${sIcon(sp.status)}</td><td><code>${escapeHtml(String(sp.tool ?? ''))}</code></td><td>${escapeHtml(String(sp.phase ?? ''))}</td><td>${insightDur(sp.durationMs)}</td><td>#${escapeHtml(String(sp.turnIndex ?? 0))}</td><td>${io}</td></tr>`;
+      }).join('');
+      const cap = rep.meta?.capped
+        ? `<p style="font-size:12px;${mut}">${escapeHtml(t('sessions.insightCapped', { shown: String(rep.meta.spansReturned ?? rep.spans.length), total: String(rep.meta.spansTotal ?? rep.spans.length) }))}</p>`
+        : '';
+      parts.push(`<details><summary>${t('sessions.insightSpans')} (${rep.spans.length})</summary>${cap}<div style="max-height:320px;overflow:auto"><table style="width:100%;font-size:12px"><tbody>${rows}</tbody></table></div></details>`);
+    }
+    return parts.join('');
+  }
+
   function openDrawer(s: any): void {
     const closed = s.status === 'closed';
     const terminal = terminalHref(s);
@@ -1376,8 +1429,10 @@ export function renderSessionsPage(root: HTMLElement) {
         ${closed ? `<button id="resume-btn" type="button" class="primary">${t('sessions.resume')}</button>` : ''}
         ${!closed ? `<button id="close-btn" type="button" class="contrast">${t('sessions.close')}</button>` : ''}
         <button id="land-btn" type="button">${t('sessions.land')}</button>
+        ${ui.authed ? `<button id="insight-btn" type="button">${t('sessions.insight')}</button>` : ''}
       </div>
       <div id="land-area"></div>
+      <div id="insight-area"></div>
       <form method="dialog"><button>${t('sessions.dismiss')}</button></form>
     </article>`;
 
@@ -1472,6 +1527,29 @@ export function renderSessionsPage(root: HTMLElement) {
           landArea.innerHTML = `<p>${t('sessions.landUnavailable')}: ${escapeHtml(String(e))}</p>`;
           landBtn.disabled = false;
         }
+      };
+    }
+
+    // Insight (owner-only — button only rendered when ui.authed). Fetches the
+    // SafeInsightReport with span detail and renders agg + suggestions + spans.
+    const insightBtn = drawer.querySelector<HTMLButtonElement>('#insight-btn');
+    const insightArea = drawer.querySelector<HTMLDivElement>('#insight-area');
+    if (insightBtn && insightArea) {
+      insightBtn.onclick = async () => {
+        insightBtn.disabled = true;
+        insightArea.innerHTML = `<p>${t('sessions.insightLoading')}</p>`;
+        try {
+          const r = await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/insight?detail=spans`);
+          const d = await r.json().catch(() => ({}));
+          if (!d.ok || !d.report) {
+            insightArea.innerHTML = `<p>${t('sessions.insightUnavailable')}: ${escapeHtml(String(d.error ?? r.status))}</p>`;
+          } else {
+            insightArea.innerHTML = renderInsightReport(d.report);
+          }
+        } catch (e) {
+          insightArea.innerHTML = `<p>${t('sessions.insightUnavailable')}: ${escapeHtml(String(e))}</p>`;
+        }
+        insightBtn.disabled = false;
       };
     }
 

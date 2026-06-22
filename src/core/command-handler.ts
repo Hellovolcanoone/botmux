@@ -47,6 +47,8 @@ import { ttadkConfigModelChoices } from '../setup/cli-selection.js';
 import { publishAttentionPatch, announcePendingRepoSession } from './session-activity.js';
 import { setCardMode } from '../services/card-mode-store.js';
 import { canOperate } from '../im/lark/event-dispatcher.js';
+import { buildSafeInsightReport } from '../services/insight/report.js';
+import type { SafeInsightReport } from '../services/insight/types.js';
 import { invalidWorkingDirs } from '../utils/working-dir.js';
 import { writeRoleFile, deleteRoleFile, resolveRole, resolveRoleFile, resolveTeamRoleFile, writeTeamRoleFile, deleteTeamRoleFile } from './role-resolver.js';
 import { getBotCapability, setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
@@ -1053,6 +1055,34 @@ export async function handleTermLinkCommand(
   // channel === 'ephemeral': the visible-to-you card IS the response; no extra msg.
 }
 
+/** Format a SafeInsightReport into a compact owner-facing summary for the
+ *  `/insight` command. Spans are never rendered here — the dashboard Insight tab
+ *  owns span detail; the chat card stays a one-glance summary (aggregate + the
+ *  severity-sorted rule suggestions, top first). */
+function formatInsightCard(report: SafeInsightReport, loc: Locale): string {
+  if (report.status === 'unsupported_cli') return t('cmd.insight.unsupported', undefined, loc);
+  if (report.status === 'transcript_missing') return t('cmd.insight.no_transcript', undefined, loc);
+  if (report.status !== 'ok') return t('cmd.insight.parse_error', undefined, loc);
+  const a = report.agg;
+  if (a.totalSpans === 0) return t('cmd.insight.no_spans', undefined, loc);
+  const icon = (s: string) => (s === 'bad' ? '🔴' : s === 'warn' ? '🟡' : 'ℹ️');
+  const header = t('cmd.insight.header', undefined, loc);
+  const lines: string[] = [report.meta.asOf ? `${header} · ${report.meta.asOf}` : header];
+  lines.push(t('cmd.insight.metrics_line', {
+    total: String(a.totalSpans),
+    failed: String(a.failedSpans),
+    slow: String(a.slowSpans),
+    rw: a.readWriteRatio === null ? '—' : String(a.readWriteRatio),
+    compactions: String(a.compactions),
+  }, loc));
+  lines.push('', `${t('cmd.insight.suggestions_label', undefined, loc)}:`);
+  for (const s of report.suggestions) {
+    lines.push(`${icon(s.severity)} ${s.title} — ${s.action}`);
+    if (s.evidence.length) lines.push(`   · ${s.evidence.join('；')}`);
+  }
+  return lines.join('\n');
+}
+
 export async function handleCommand(
   cmd: string,
   rootId: string,
@@ -1098,6 +1128,29 @@ export async function handleCommand(
         } else {
           await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
         }
+        break;
+      }
+
+      case '/insight': {
+        if (!ds) {
+          await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
+          break;
+        }
+        // owner-only：与 /card /term 同一 operator 门（开放模式下 owner 通过；
+        // 仅对话授权的 grantee 不算 operator）。无权限直接不回内容。
+        if (!canOperate(larkAppId!, ds.chatId, message.senderId)) {
+          await sessionReply(rootId, t('cmd.insight.operator_only', undefined, loc));
+          break;
+        }
+        // 卡片只取 summary（聚合 + 规则建议）；span 明细留给 dashboard Insight tab。
+        // buildSafeInsightReport 同步、只读、自带 fail-closed 脱敏，raw 永不进结构。
+        const report = buildSafeInsightReport({
+          cliId: ds.session.cliId ?? 'unknown',
+          sessionId: ds.session.sessionId,
+          cliSessionId: ds.session.cliSessionId,
+          cwd: ds.session.workingDir,
+        }, { detail: 'summary' });
+        await sessionReply(rootId, formatInsightCard(report, loc));
         break;
       }
 

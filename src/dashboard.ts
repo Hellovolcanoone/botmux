@@ -41,12 +41,20 @@ import { invalidWorkingDirs } from './utils/working-dir.js';
 import { mergeDashboardConfig, mergeGlobalConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
 import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocale } from './i18n/types.js';
-import { isLocalDevInstall } from './utils/install-info.js';
+import { isLocalDevInstall, botmuxVersion } from './utils/install-info.js';
+import { checkNode, detectBotmuxInstalls, resolveCurrentVersion } from './utils/install-diagnostics.js';
+import { fetchLatestVersion, fetchReleasesSince, isNewerVersion, type ChangelogResult } from './core/update-check.js';
+import { GITHUB_REPO } from './core/restart-report.js';
+import { spawnDetachedRestart, npmGlobalUpdateLockTarget } from './core/maintenance.js';
+import { writeRestartIntent } from './services/restart-intent-store.js';
+import { withFileLock } from './utils/file-lock.js';
+import { spawn } from 'node:child_process';
 import { listTeamReports, readTeamBoard, setTeamBoardEntry } from './services/team-board-store.js';
 import type { CliId } from './adapters/cli/types.js';
 import type { ConnectorDefinition } from './services/connector-store.js';
 import { hd2dAssetPath, hd2dStatus, startHd2dDownload } from './dashboard/hd2d-assets.js';
 import {
+  installLocalSkillLinks,
   readSkillRegistry,
   removeInstalledSkill,
   updateInstalledSkillAsync,
@@ -54,13 +62,19 @@ import {
 import { redactGitUrlCredentials } from './core/skills/sources.js';
 import { loadBotConfigs } from './bot-registry.js';
 import type { BotSkillPolicy, SkillPackage } from './core/skills/types.js';
+import { discoverNativeCliSkillGroups } from './core/skills/discovery.js';
 import { analyzeSkillReferences, type SkillReferenceBot, type SkillReferenceSummary } from './core/skills/references.js';
-import { installDashboardSkill, parseDashboardSkillInstallRequest } from './dashboard/skill-install-request.js';
+import { installDashboardSkill, parseDashboardSkillInstallRequest, parseInstallLocalLinksSources, MAX_LOCAL_LINK_SOURCES } from './dashboard/skill-install-request.js';
 import { botDefaultsPayload, botSummaryPayload } from './dashboard/bot-payload.js';
 import { isValidRoleProfileId } from './services/role-profile-store.js';
+import { mergeSafeInsightOverviews } from './services/insight/report.js';
+import type { SafeInsightOverview } from './services/insight/types.js';
 
 const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
+/** Per-daemon budget for the cross-daemon insight overview fan-out — bounds
+ *  aggregate latency when one daemon's insight parse is slow or hung. */
+const INSIGHT_FANOUT_TIMEOUT_MS = 10_000;
 const BOTS_JSON_PATH = join(homedir(), '.botmux', 'bots.json');
 const REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemons');
 // The dashboard probes upward if its configured port is busy (e.g. a second
@@ -164,6 +178,68 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return raw ? JSON.parse(raw) : {};
 }
 
+/** Fast in-process guard against double-clicks within this dashboard process.
+ *  Cross-process serialization against the maintenance auto-update (a different
+ *  process) is handled separately by the shared file lock in the run route. */
+let updateInFlight = false;
+
+// Cache the upstream version/changelog lookups so the nav-badge check + the
+// Settings card don't hammer the npm registry / GitHub on every page load.
+// GitHub's unauthenticated API is only 60 req/h per IP, so caching the changelog
+// also keeps us from exhausting it. Failures cache briefly so they self-heal.
+const LATEST_TTL_MS = 30 * 60_000;
+const CHANGELOG_TTL_MS = 15 * 60_000;
+const FAILURE_TTL_MS = 60_000;
+let latestVersionCache: { value: string | null; at: number } | null = null;
+let changelogCache: { key: string; value: ChangelogResult; at: number } | null = null;
+
+async function cachedLatestVersion(now = Date.now()): Promise<string | null> {
+  const ttl = latestVersionCache?.value ? LATEST_TTL_MS : FAILURE_TTL_MS;
+  if (latestVersionCache && now - latestVersionCache.at < ttl) return latestVersionCache.value;
+  const value = await fetchLatestVersion();
+  latestVersionCache = { value, at: now };
+  return value;
+}
+
+async function cachedChangelog(current: string, now = Date.now()): Promise<ChangelogResult> {
+  const ttl = changelogCache?.value.ok ? CHANGELOG_TTL_MS : FAILURE_TTL_MS;
+  if (changelogCache && changelogCache.key === current && now - changelogCache.at < ttl) return changelogCache.value;
+  const value = await fetchReleasesSince(current);
+  changelogCache = { key: current, value, at: now };
+  return value;
+}
+
+/**
+ * Run `npm install -g botmux@latest` for the manual-update flow WITHOUT blocking
+ * the event loop (async spawn, not execSync — the dashboard must keep serving
+ * during the ~10-30s install). Resolves on exit 0; rejects with the tail of
+ * stdout/stderr on a non-zero exit, spawn error, or 3-minute timeout. Args are
+ * a fixed literal — no shell interpolation of untrusted input.
+ */
+function runNpmInstallLatest(): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn('npm', ['install', '-g', 'botmux@latest'], {
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32', // resolve npm.cmd on Windows
+    });
+    let tail = '';
+    const capture = (d: Buffer): void => { tail = (tail + d.toString()).slice(-2000); };
+    child.stdout?.on('data', capture);
+    child.stderr?.on('data', capture);
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('npm install timed out after 180s'));
+    }, 180_000);
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`npm exited ${code}: ${tail.trim().slice(-500)}`));
+    });
+  });
+}
+
 /**
  * Attach to one daemon: hydrate its sessions/schedules into the aggregator,
  * THEN open the SSE subscription. Order matters — hydrating after subscribe
@@ -263,7 +339,7 @@ function serveFileAbs(res: ServerResponse, fp: string): boolean {
   return true;
 }
 
-function serveStatic(_req: IncomingMessage, res: ServerResponse, pathname: string): boolean {
+function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: string): boolean {
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const fp = resolve(WEB_DIR, rel);
   const webRoot = resolve(WEB_DIR);
@@ -273,7 +349,23 @@ function serveStatic(_req: IncomingMessage, res: ServerResponse, pathname: strin
   try {
     const st = statSync(fp);
     if (!st.isFile()) return false;
-    res.writeHead(200, { 'content-type': MIME[extname(fp)] ?? 'application/octet-stream' });
+    // Bundle filenames are fixed (app.js/style.css), so without revalidation
+    // browsers heuristic-cache them and serve a stale build after a deploy
+    // (new JS + old CSS → broken layout). `no-cache` + an mtime/size ETag makes
+    // the browser revalidate every load: 304 when unchanged (cheap), fresh 200
+    // when the build changed. No manual hard-refresh needed after deploy.
+    const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+    const headers: Record<string, string> = {
+      'content-type': MIME[extname(fp)] ?? 'application/octet-stream',
+      'cache-control': 'no-cache',
+      etag,
+    };
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers);
+      res.end();
+      return true;
+    }
+    res.writeHead(200, headers);
     res.end(readFileSync(fp));
     return true;
   } catch {
@@ -555,12 +647,31 @@ function sanitizeSkillForDashboard(skill: SkillPackage): SkillPackage {
   };
 }
 
+function dashboardSkillCliIds(): CliId[] {
+  const ids = new Set<CliId>();
+  try {
+    for (const cliId of configuredCliIds().values()) ids.add(cliId as CliId);
+  } catch {
+    // Fall back to daemon descriptors below when persistent config is unavailable.
+  }
+  for (const bot of registry.list()) {
+    if (bot.cliId) ids.add(bot.cliId as CliId);
+  }
+  return [...ids];
+}
+
 function dashboardSkillsPayload(): Record<string, unknown> {
   const globalSkills = readGlobalConfig().skills ?? {};
+  const nativeSkillGroups = discoverNativeCliSkillGroups(dashboardSkillCliIds())
+    .map(group => ({
+      ...group,
+      skills: group.skills.map(sanitizeSkillForDashboard),
+    }));
   return {
     skills: Object.values(readSkillRegistry().skills)
       .sort((a, b) => a.name.localeCompare(b.name))
       .map(sanitizeSkillForDashboard),
+    nativeSkillGroups,
     trustProjectSkills: globalSkills.trustProjectSkills ?? 'off',
     delivery: globalSkills.delivery ?? 'auto',
   };
@@ -749,6 +860,27 @@ const server = createServer(async (req, res) => {
       });
       return jsonRes(res, 200, { sessions });
     }
+    if (req.method === 'GET' && url.pathname === '/api/insights/summary') {
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '200', 10) || 200, 1), 500);
+      // Per-daemon timeout + isolate failures: an upstream insight parse can be
+      // heavy, so a slow/hung daemon must not stall the aggregated summary. A
+      // timed-out / errored chunk drops to null and is filtered out below.
+      const chunks = await Promise.all(registry.list().map(async d => {
+        try {
+          const upstream = await proxyToDaemon(d.larkAppId, `/api/insights/summary?limit=${limit}`, {
+            method: 'GET',
+            signal: AbortSignal.timeout(INSIGHT_FANOUT_TIMEOUT_MS),
+          });
+          if (!upstream.ok) return null;
+          const body = await upstream.json().catch(() => null) as { overview?: SafeInsightOverview } | null;
+          return body?.overview ?? null;
+        } catch {
+          return null;
+        }
+      }));
+      const overview = mergeSafeInsightOverviews(chunks.filter((x): x is SafeInsightOverview => !!x), { limit });
+      return jsonRes(res, 200, { ok: true, overview });
+    }
     if (req.method === 'GET' && url.pathname === '/api/schedules') {
       // Public-read carve-out: the row carries CONTENT (prompt = business
       // instructions) and a bound `workingDir` (repo/customer path) — strip
@@ -837,6 +969,89 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, { ok: true, settings: resolveDashboardSettings() });
     }
 
+    // ─── Version & manual update ─────────────────────────────────────────────
+    // `npm install -g` and a host restart are privileged: none of these paths
+    // are on PUBLIC_READ_PATHS, so decideDashboardAuth already 401s an
+    // unauthenticated caller (in both normal and public-read mode). The explicit
+    // `authed` guards on the two mutations are defense-in-depth for host actions.
+    if (req.method === 'GET' && url.pathname === '/api/update/status') {
+      const current = resolveCurrentVersion();
+      // Compare against the npm `latest` dist-tag (always stable; the update
+      // button installs `@latest`). isNewerVersion uses semver precedence, so a
+      // canary running AHEAD of the latest stable (e.g. 2.87.0-canary.0 vs
+      // 2.86.0) is NOT flagged behind — exactly the canary case we want.
+      const latest = await cachedLatestVersion();
+      return jsonRes(res, 200, {
+        current,
+        latest,
+        behind: !!latest && isNewerVersion(latest, current),
+        localDevInstall: isLocalDevInstall(),
+        node: checkNode(),
+        installs: detectBotmuxInstalls(),
+      });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/update/changelog') {
+      const current = resolveCurrentVersion();
+      const result = await cachedChangelog(current);
+      return jsonRes(res, 200, {
+        current,
+        ok: result.ok,
+        rateLimited: result.rateLimited === true,
+        releases: result.releases,
+        releasesUrl: `https://github.com/${GITHUB_REPO}/releases`,
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/update/run') {
+      if (!authed) return jsonRes(res, 401, { ok: false, error: 'unauthorized' });
+      if (isLocalDevInstall()) return jsonRes(res, 400, { ok: false, error: 'local_dev_no_update' });
+      const node = checkNode();
+      if (!node.ok) return jsonRes(res, 400, { ok: false, error: 'node_too_old', node });
+      if (updateInFlight) return jsonRes(res, 409, { ok: false, error: 'update_in_flight' });
+      updateInFlight = true;
+      const oldVersion = botmuxVersion();
+      // Acquire the shared cross-process lock so a scheduled maintenance
+      // auto-update (running in the bot-0 daemon) can't `npm install -g` at the
+      // same time. `acquired` distinguishes "lock held by maintenance" (409)
+      // from "npm itself failed" (500). Short wait: don't block the request on a
+      // full in-progress install — report busy fast.
+      let acquired = false;
+      try {
+        await withFileLock(npmGlobalUpdateLockTarget(), async () => {
+          acquired = true;
+          await runNpmInstallLatest();
+        }, { maxWaitMs: 2_000 });
+      } catch (e) {
+        if (!acquired) return jsonRes(res, 409, { ok: false, error: 'update_in_flight' });
+        return jsonRes(res, 500, { ok: false, error: 'npm_failed', detail: e instanceof Error ? e.message : String(e) });
+      } finally {
+        updateInFlight = false;
+      }
+      const newVersion = botmuxVersion();
+      return jsonRes(res, 200, { ok: true, oldVersion, newVersion, changed: newVersion !== oldVersion });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/update/restart') {
+      if (!authed) return jsonRes(res, 401, { ok: false, error: 'unauthorized' });
+      let body: Record<string, unknown> = {};
+      try {
+        const parsed = await readJsonBody(req);
+        if (parsed && typeof parsed === 'object') body = parsed as Record<string, unknown>;
+      } catch { /* empty / bad body → plain restart */ }
+      const upd = body.update && typeof body.update === 'object' ? body.update as Record<string, unknown> : null;
+      // After a manual update, leave an `update` breadcrumb so the fresh daemon
+      // DMs the owner the changelog (reuses the restart-report pipeline). A plain
+      // restart leaves none here; cmdRestart writes a `manual` breadcrumb itself.
+      if (upd && typeof upd.oldVersion === 'string' && typeof upd.newVersion === 'string' && upd.oldVersion !== upd.newVersion) {
+        try {
+          writeRestartIntent({ kind: 'update', oldVersion: upd.oldVersion, newVersion: upd.newVersion, at: new Date().toISOString() });
+        } catch { /* breadcrumb is best-effort */ }
+      }
+      spawnDetachedRestart('dashboard');
+      return jsonRes(res, 200, { ok: true });
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/skills') {
       return jsonRes(res, 200, dashboardSkillsPayload());
     }
@@ -883,6 +1098,27 @@ const server = createServer(async (req, res) => {
         const installRequest = parseDashboardSkillInstallRequest(body);
         const job = startSkillJob('install', () => installDashboardSkill(installRequest));
         return jsonRes(res, 202, { ok: true, job: publicSkillJob(job) });
+      } catch (err: any) {
+        return jsonRes(res, 400, { ok: false, error: redactGitUrlCredentials(err?.message ?? String(err)) });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/skills/install-local-links') {
+      let parsed: unknown;
+      try {
+        parsed = await readJsonBody(req);
+      } catch {
+        return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+      }
+      const sources = parseInstallLocalLinksSources(parsed);
+      if (sources.length === 0) return jsonRes(res, 400, { ok: false, error: 'sources_required' });
+      if (sources.length > MAX_LOCAL_LINK_SOURCES) return jsonRes(res, 400, { ok: false, error: 'too_many_sources' });
+      try {
+        const skills = installLocalSkillLinks(sources);
+        // Frontend re-fetches /api/skills (refresh()) after success, so we keep
+        // the response lean — no need to spread a full dashboardSkillsPayload()
+        // (which would re-run the native-skill discovery scan a second time).
+        return jsonRes(res, 200, { ok: true, installed: skills.map(sanitizeSkillForDashboard) });
       } catch (err: any) {
         return jsonRes(res, 400, { ok: false, error: redactGitUrlCredentials(err?.message ?? String(err)) });
       }
@@ -1115,6 +1351,30 @@ const server = createServer(async (req, res) => {
       const owner = aggregator.ownerOf(sid);
       if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_session' });
       const upstream = await proxyToDaemon(owner, `/api/sessions/${sid}/history${url.search ?? ''}`, { method: 'GET' });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // 会话 insight（只读 trace 分析：动作 span / 失败聚合 / 规则建议）。
+    // owner-only：不在公开读白名单 → decideDashboardAuth 已对只读访客 401，
+    // 公开/联邦访客看不到 tab 也拿不到 span。代理到 owner daemon 的同名 IPC。
+    if (req.method === 'GET' && (m = url.pathname.match(/^\/api\/sessions\/([^/]+)\/insight$/))) {
+      const sid = decodeURIComponent(m[1]);
+      const owner = aggregator.ownerOf(sid);
+      if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_session' });
+      const upstream = await proxyToDaemon(owner, `/api/sessions/${sid}/insight${url.search ?? ''}`, { method: 'GET' });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    if (req.method === 'GET' && (m = url.pathname.match(/^\/api\/sessions\/([^/]+)\/insight\/turn\/([^/]+)$/))) {
+      const sid = decodeURIComponent(m[1]);
+      const turnIndex = decodeURIComponent(m[2]);
+      const owner = aggregator.ownerOf(sid);
+      if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_session' });
+      const upstream = await proxyToDaemon(owner, `/api/sessions/${sid}/insight/turn/${turnIndex}${url.search ?? ''}`, { method: 'GET' });
       res.writeHead(upstream.status, { 'content-type': 'application/json' });
       res.end(await upstream.text());
       return;
@@ -1661,6 +1921,24 @@ const server = createServer(async (req, res) => {
       for await (const c of req) chunks.push(c as Buffer);
       const raw = Buffer.concat(chunks).toString('utf8') || '{}';
       const upstream = await proxyToDaemon(appId, `/api/bot-startup-commands`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: raw,
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // PUT /api/bots/:appId/env — proxy to that bot's daemon. Body
+    // `{ env: string }` (raw JSON text; '' = clear).
+    let mBotEnv: RegExpMatchArray | null;
+    if (req.method === 'PUT' && (mBotEnv = url.pathname.match(/^\/api\/bots\/([^/]+)\/env$/))) {
+      const appId = decodeURIComponent(mBotEnv[1]);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+      const upstream = await proxyToDaemon(appId, `/api/bot-env`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: raw,
