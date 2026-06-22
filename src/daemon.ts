@@ -2688,6 +2688,7 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       logger.info(`[auto-start:入群] ${chatId.substring(0, 12)} 无默认目录，弹 repo 选择卡（${projects.length} 个项目）`);
     } else {
       ds.pendingRepo = false;
+      ensureSessionWhiteboard(ds);
       const prompt = await buildPrompt();
       rememberLastCliInput(ds, promptBody, prompt);
       await noteTurnReceived(ds, anchor, promptBody);
@@ -3320,7 +3321,12 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     // because worker=null at that point.
     const dsBotCfgForFork = getBot(ds.larkAppId).config;
     const selfBot = getBot(ds.larkAppId);
-    ensureSessionWhiteboard(ds);
+    // Adopted (bridge) sessions are the user's external CLI — don't attach a
+    // botmux whiteboard on re-fork. The live-worker branch above skips ensure
+    // for bridge sessions (isBridge); the re-fork path must match, else a
+    // bridge session whose worker died would gain a whiteboard binding (and a
+    // <whiteboard> block in its refork prompt) that its live turns never had.
+    if (!ds.adoptedFrom) ensureSessionWhiteboard(ds);
     const wrappedPrompt = buildReforkPrompt(ds, promptContent, {
       attachments,
       mentions: parsed.mentions,
@@ -3413,7 +3419,9 @@ async function handleDocComment(ctx: DocCommentContext): Promise<void> {
     ds.streamCardPending = true;
     ds.currentImageKey = undefined;
     persistStreamCardState(ds);
-    ensureSessionWhiteboard(ds);
+    // Skip whiteboard ensure for adopted (bridge) sessions on re-fork — mirrors
+    // the live-worker branch above (if (!isBridge) ensure…).
+    if (!ds.adoptedFrom) ensureSessionWhiteboard(ds);
     const wrappedPrompt = buildReforkPrompt(ds, promptContent, {
       cliId: dsBotCfg.cliId,
       cliPathOverride: dsBotCfg.cliPathOverride,

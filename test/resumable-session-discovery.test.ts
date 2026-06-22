@@ -84,6 +84,35 @@ describe('discoverClaudeFamilySessions', () => {
     expect(out.map((s) => s.cliSessionId).sort()).toEqual(['ext-discuss-1', 'ext-discuss-2']);
   });
 
+  // Regression (whiteboard /adopt leak): Claude-family CLIs with
+  // injectsSessionContext=true get routing/identity/session_id via system
+  // prompt, so when no team/group role is configured the botmux prompt STARTS
+  // with the <whiteboard> block directly. No ^-anchored pattern matched that
+  // opening (they only allowed <whiteboard> as a middle element), so such
+  // botmux-origin Claude sessions leaked into /adopt as if external.
+  it('drops botmux-origin Claude sessions whose prompt opens with <whiteboard>', async () => {
+    writeSession('-root-wb', 'wb-open-1', [
+      { type: 'user', cwd: '/root/wb', message: { role: 'user', content: '<whiteboard id="wb_abc123def45678">\n本地项目上下文；需要时读取：`botmux whiteboard read --id wb_abc123def45678`。\n更新状态：`botmux whiteboard update --id wb_abc123def45678`。\n</whiteboard>\n\n<user_message>\n@Claude do the thing\n</user_message>' } },
+    ]);
+    // A standalone session in the same project survives.
+    writeSession('-root-wb', 'wb-open-ext', [
+      { type: 'user', cwd: '/root/wb', message: { role: 'user', content: 'just a normal prompt I typed' } },
+    ]);
+    const out = await discoverClaudeFamilySessions(dataDir, 10);
+    expect(out.map((s) => s.cliSessionId)).toEqual(['wb-open-ext']);
+  });
+
+  // The <whiteboard>-opening pattern is structural (^-anchored + id="wb_…" +
+  // <user_message> adjacency), so an external session that merely DISCUSSES a
+  // whiteboard tag in prose (mid-sentence, no envelope) must NOT be mis-flagged.
+  it('keeps external Claude sessions that only mention <whiteboard> in prose', async () => {
+    writeSession('-root-wb', 'wb-prose-1', [
+      { type: 'user', cwd: '/root/wb', message: { role: 'user', content: 'I am documenting the <whiteboard id="wb_x"> block that botmux injects; how should I describe it?' } },
+    ]);
+    const out = await discoverClaudeFamilySessions(dataDir, 10);
+    expect(out.map((s) => s.cliSessionId)).toEqual(['wb-prose-1']);
+  });
+
   it('drops empty / command-only sessions (no real user prompt)', async () => {
     writeSession('-root-proj', 'ffff6666-0000-0000-0000-000000000006', [
       { type: 'user', cwd: '/root/proj', message: { role: 'user', content: '<local-command-caveat>...</local-command-caveat>' } },

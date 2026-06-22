@@ -110,6 +110,16 @@ const BOTMUX_INJECTION_PATTERNS: readonly RegExp[] = [
   /^<role\s+context="(?:team|group)"\s+chat_id="[^"]+">[\s\S]*?<\/role>\s*(?:<session_id>[^<]+<\/session_id>\s*)?(?:<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*)?(?:<whiteboard\b[\s\S]*?<\/whiteboard>\s*)?<user_message>[\s\S]*?<\/user_message>/,
   /^<session_id>[^<]+<\/session_id>\s*(?:<role\b[\s\S]*?<\/role>\s*)?(?:<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*)?(?:<whiteboard\b[\s\S]*?<\/whiteboard>\s*)?<user_message>[\s\S]*?<\/user_message>/,
   /^<botmux_reminder>[\s\S]*?<\/botmux_reminder>\s*(?:<whiteboard\b[\s\S]*?<\/whiteboard>\s*)?<user_message>[\s\S]*?<\/user_message>/,
+  // Claude-family CLIs (injectsSessionContext=true) get routing/identity/
+  // session_id via system prompt, so those blocks are NOT in the user turn —
+  // when no team/group role is configured either, the prompt STARTS with the
+  // <whiteboard> context block directly. None of the patterns above match a
+  // `^<whiteboard>` opening (they only allow <whiteboard> as a middle element
+  // after routing/role/session_id/reminder), so such botmux-origin Claude
+  // sessions leaked into the /adopt picker as if external. The `wb_` id prefix
+  // + the trailing <user_message> envelope adjacency is structural — an
+  // external session discussing whiteboards never starts with this shape.
+  /^<whiteboard\s+id="wb_[a-zA-Z0-9]+"\s*>[\s\S]*?<\/whiteboard>\s*<user_message>[\s\S]*?<\/user_message>/,
   /^用户发送了：\s*\n-{3,}/,
   // Modern envelope: the `</user_message>` close butted up against one of
   // botmux's trailing blocks (claude → <sender>, codex/traex → <session_id>,

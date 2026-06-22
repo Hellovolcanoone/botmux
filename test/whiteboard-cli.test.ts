@@ -234,4 +234,54 @@ describe('botmux whiteboard CLI', () => {
     const sessions = JSON.parse(readFileSync(join(dataDir, 'sessions-app1.json'), 'utf-8'));
     expect(sessions.s1.whiteboardId).toBeUndefined();
   });
+
+  // Regression (Major 3 / Traex review): the read→merge→update flow used to be
+  // blind last-writer-wins — two agents merging off the SAME stale snapshot
+  // would silently clobber each other. writeWhiteboard gained a per-board lock
+  // + an optional expectedUpdatedAt CAS primitive; this test wires the CAS
+  // through the CLI (--expected-updated-at) and proves a stale-version write
+  // is refused (exit 2, whiteboard_cas_mismatch) WITHOUT clobbering the winner,
+  // while a fresh-version write succeeds.
+  it('read --json exposes updatedAt, and update --expected-updated-at refuses stale overwrites (CAS)', () => {
+    expect(runCli(['whiteboard', 'create', '--id', 'cas_board', '--title', 'CAS', '--lark-app-id', 'app1', '--chat-id', 'cas-chat', '--working-dir', join(home, 'cas-repo')]).status).toBe(0);
+
+    // read --json returns the version tag an agent needs to CAS on update.
+    const base = runCli(['whiteboard', 'read', '--id', 'cas_board', '--json']);
+    expect(base.status).toBe(0);
+    const parsed = JSON.parse(base.stdout);
+    expect(parsed.id).toBe('cas_board');
+    expect(typeof parsed.updatedAt).toBe('string');
+    expect(parsed.content).toContain('# 当前状态');
+    const v1 = parsed.updatedAt;
+
+    // First writer CASes on v1 → succeeds and returns a newer updatedAt.
+    const w1 = runCli(['whiteboard', 'update', '--id', 'cas_board', '--expected-updated-at', v1], 'agent-a merge\n');
+    expect(w1.status).toBe(0);
+    const v2 = JSON.parse(w1.stdout).board.updatedAt;
+    expect(v2).not.toBe(v1);
+
+    // Second writer still holding the STALE base v1 → must be refused, not clobber.
+    const w2 = runCli(['whiteboard', 'update', '--id', 'cas_board', '--expected-updated-at', v1], 'agent-b merge\n');
+    expect(w2.status).toBe(2);
+    expect(w2.stderr).toContain('CAS mismatch');
+    expect(w2.stderr).toContain('--json');
+    const after = runCli(['whiteboard', 'read', '--id', 'cas_board']).stdout;
+    expect(after).toContain('agent-a merge');
+    expect(after).not.toContain('agent-b merge');
+
+    // After the conflict, re-reading surfaces a fresh updatedAt; CAS on it wins.
+    const v3 = JSON.parse(runCli(['whiteboard', 'read', '--id', 'cas_board', '--json']).stdout).updatedAt;
+    const w3 = runCli(['whiteboard', 'update', '--id', 'cas_board', '--expected-updated-at', v3], 'agent-b re-merged\n');
+    expect(w3.status).toBe(0);
+    expect(runCli(['whiteboard', 'read', '--id', 'cas_board']).stdout).toContain('agent-b re-merged');
+  });
+
+  // Back-compat: omitting --expected-updated-at keeps the legacy direct-overwrite
+  // behavior (no CAS), so existing callers/skills that don't pass a version still work.
+  it('update without --expected-updated-at overwrites directly (no CAS, back-compat)', () => {
+    expect(runCli(['whiteboard', 'create', '--id', 'nocas_board', '--title', 'NoCAS', '--lark-app-id', 'app1', '--chat-id', 'nocas-chat', '--working-dir', join(home, 'nocas-repo')]).status).toBe(0);
+    expect(runCli(['whiteboard', 'update', '--id', 'nocas_board'], 'first\n').status).toBe(0);
+    expect(runCli(['whiteboard', 'update', '--id', 'nocas_board'], 'second\n').status).toBe(0);
+    expect(runCli(['whiteboard', 'read', '--id', 'nocas_board']).stdout).toContain('second');
+  });
 });

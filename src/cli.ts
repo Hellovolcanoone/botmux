@@ -2638,7 +2638,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        voice disable   关闭语音功能（移除配置）
   whiteboard status|enable|disable
                        本地项目白板（默认关闭；enable 只打开能力，不创建白板）
-       current --create / list / read / update / post / write --yes
+       current --create / list / read / update / write --yes
 
 定时任务（可在 CLI 会话内自动推断 chat）:
   schedule list                        列出所有任务
@@ -2789,6 +2789,11 @@ function positionals(args: string[], booleanFlags: string[] = []): string[] {
 }
 
 function readStdinUtf8(): string {
+  // On a TTY, readFileSync(0) blocks waiting for terminal EOF (Ctrl+D) with no
+  // prompt — `whiteboard update` with no text and no pipe looked frozen. Treat
+  // a TTY as "no stdin input" so the caller's empty-content guard surfaces a
+  // real error instead of an indefinite hang.
+  if (process.stdin.isTTY) return '';
   try { return readFileSync(0, 'utf-8'); } catch { return ''; }
 }
 
@@ -2812,11 +2817,48 @@ function requireWhiteboardEnabled(): void {
   process.exit(2);
 }
 
+// Boolean flags valid on `read`/`update`/`write` that must NOT be parsed as
+// value-taking. Without this hint, `positionals()` treats e.g. a bare `--yes`
+// as a value flag and swallows the *following* positional arg as its "value" —
+// the content ends up empty and the board is silently blanked (a shared
+// current-state snapshot lost with no history). `--create` belongs to
+// `current`, `--yes` to `write`, `--json` to `read`; all harmless to declare
+// together so content parsing never mis-eats a flag's neighbor.
+const WHITEBOARD_BOOLEAN_FLAGS = ['--create', '--yes', '--json'];
+
 function whiteboardContentFromArgs(args: string[], booleanFlags: string[] = []): string {
   const file = argValue(args, '--content-file', '--file');
   if (file) return readFileSync(file, 'utf-8');
   const pos = positionals(args, booleanFlags);
   return pos.length > 0 ? pos.join(' ') : readStdinUtf8();
+}
+
+/** Translate store-level whiteboard write errors into friendly CLI exits. The
+ *  store throws stable machine codes (whiteboard_cas_mismatch /
+ *  whiteboard_empty_content / whiteboard_not_found); map each to a clear,
+ *  actionable message so an agent or human reading stderr knows what to do
+ *  next instead of seeing a bare code. Always exits. */
+function handleWhiteboardWriteError(e: unknown, id: string): never {
+  const msg = (e as Error)?.message ?? String(e);
+  if (msg === 'whiteboard_cas_mismatch') {
+    console.error(
+      `Whiteboard was modified since you last read it (CAS mismatch). Re-run ` +
+      `\`botmux whiteboard read --id ${id} --json\` to get the latest content ` +
+      `+ updatedAt, re-merge your changes against it, then update again with ` +
+      `--expected-updated-at <new updatedAt>.`,
+    );
+    process.exit(2);
+  }
+  if (msg === 'whiteboard_empty_content') {
+    console.error('Refusing to write empty whiteboard content. Pass text as args, pipe stdin, or use --content-file <path>. (The board is a shared current-state snapshot and cannot be blanked.)');
+    process.exit(2);
+  }
+  if (msg === 'whiteboard_not_found') {
+    console.error(`Whiteboard not found: ${id}`);
+    process.exit(1);
+  }
+  console.error(`Whiteboard write failed: ${msg}`);
+  process.exit(1);
 }
 
 async function cmdWhiteboard(sub: string, rest: string[]): Promise<void> {
@@ -2831,10 +2873,14 @@ Commands:
   list                         List local whiteboards (read-only, even when disabled)
   current [--create]           Show current default board; --create ensures it when enabled
   create [--id ID] [--title T] Create a board for current/bound context
-  read [--id ID]               Read board.md (requires enabled)
+  read [--id ID] [--json]      Read board.md (requires enabled). --json emits
+                               { id, updatedAt, content } so a caller can CAS on update
   path [--id ID]               Print board/meta/log paths
-  update [--id ID] [text...]   Replace board.md current state (or stdin / --content-file)
-  write --yes [--id ID] ...    Force-overwrite board.md; --yes required
+  update [--id ID] [text...]   Replace board.md current state (or stdin / --content-file).
+                               --expected-updated-at <ts> refuses the write if the board
+                               changed since that version (CAS); exit 2 with a re-read hint
+  write --yes [--id ID] ...    Force-overwrite board.md; --yes required. Also honors
+                               --expected-updated-at when supplied
 
 Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
     return;
@@ -2892,6 +2938,14 @@ Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
     return;
   }
 
+  // Anything reaching here must be one of the file-operating subcommands; the
+  // earlier branches (help/status/enable/disable/list/current/create) already
+  // returned. Reject unknown actions BEFORE computing an id — otherwise a typo
+  // like `post` fell through to the misleading "No whiteboard id" error.
+  if (!['read', 'path', 'update', 'write'].includes(action)) {
+    console.error(`Unknown whiteboard command: ${action}`);
+    process.exit(1);
+  }
   if (['read', 'update', 'write'].includes(action)) requireWhiteboardEnabled();
 
   const explicitId = argValue(rest, '--id');
@@ -2906,7 +2960,19 @@ Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
 
   if (action === 'read') {
     requireWhiteboardEnabled();
-    process.stdout.write(readWhiteboard(id));
+    // Default: stream raw board.md to stdout (back-compat for agents/skills
+    // that treat stdout as the board content). `--json` returns
+    // { id, updatedAt, content } so an agent can capture the version it read
+    // and pass it back as --expected-updated-at on update — the compare-and-set
+    // that turns the read→merge→update flow from blind last-writer-wins into a
+    // conflict-detecting update.
+    if (argFlag(rest, '--json')) {
+      const meta = getWhiteboard(id);
+      if (!meta) { console.error(`Whiteboard not found: ${id}`); process.exit(1); }
+      console.log(JSON.stringify({ id: meta.id, updatedAt: meta.updatedAt, content: readWhiteboard(id) }));
+    } else {
+      process.stdout.write(readWhiteboard(id));
+    }
     return;
   }
   if (action === 'path') {
@@ -2917,10 +2983,23 @@ Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
   }
   if (action === 'update') {
     requireWhiteboardEnabled();
-    const content = whiteboardContentFromArgs(rest);
+    const content = whiteboardContentFromArgs(rest, WHITEBOARD_BOOLEAN_FLAGS);
+    if (!content.trim()) {
+      console.error('Refusing to write empty whiteboard content. Pass text as args, pipe stdin, or use --content-file <path>. (The board is a shared current-state snapshot and cannot be blanked.)');
+      process.exit(2);
+    }
+    // Optional CAS: the agent passes the updatedAt it observed at read time.
+    // If the board changed in between, the store refuses with
+    // whiteboard_cas_mismatch → friendly exit 2 so the agent re-reads/merges
+    // instead of silently clobbering the other writer's update.
+    const expectedUpdatedAt = argValue(rest, '--expected-updated-at');
     const { writeWhiteboard } = await import('./services/whiteboard-store.js');
-    const meta = writeWhiteboard(id, content, { actor: ctx.sessionId, kind: 'update' });
-    console.log(JSON.stringify({ ok: true, board: meta }, null, 2));
+    try {
+      const meta = writeWhiteboard(id, content, { actor: ctx.sessionId, kind: 'update', expectedUpdatedAt });
+      console.log(JSON.stringify({ ok: true, board: meta }, null, 2));
+    } catch (e) {
+      handleWhiteboardWriteError(e, id);
+    }
     return;
   }
   if (action === 'write') {
@@ -2929,10 +3008,22 @@ Context flags: --session-id, --lark-app-id, --chat-id, --working-dir/--repo`);
       console.error('Refusing to overwrite whiteboard without --yes. Prefer `botmux whiteboard update` for current-state updates.');
       process.exit(2);
     }
-    const content = whiteboardContentFromArgs(rest, ['--yes']);
+    const content = whiteboardContentFromArgs(rest, WHITEBOARD_BOOLEAN_FLAGS);
+    if (!content.trim()) {
+      console.error('Refusing to write empty whiteboard content. Pass text as args, pipe stdin, or use --content-file <path>. (The board is a shared current-state snapshot and cannot be blanked.)');
+      process.exit(2);
+    }
+    // `write --yes` is the human force-overwrite escape hatch, but if a CAS
+    // version is supplied we still honor it — a conscious writer that knows
+    // the base version should still get a conflict signal rather than clobber.
+    const expectedUpdatedAt = argValue(rest, '--expected-updated-at');
     const { writeWhiteboard } = await import('./services/whiteboard-store.js');
-    const meta = writeWhiteboard(id, content, { actor: ctx.sessionId });
-    console.log(JSON.stringify({ ok: true, board: meta }, null, 2));
+    try {
+      const meta = writeWhiteboard(id, content, { actor: ctx.sessionId, expectedUpdatedAt });
+      console.log(JSON.stringify({ ok: true, board: meta }, null, 2));
+    } catch (e) {
+      handleWhiteboardWriteError(e, id);
+    }
     return;
   }
 

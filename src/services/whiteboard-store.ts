@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { readGlobalConfig } from '../global-config.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
+import { withFileLockSync } from '../utils/file-lock.js';
 
 export type WhiteboardScope = 'chat' | 'project' | 'custom';
 
@@ -117,32 +118,36 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function withDirLock<T>(lockDir: string, timeoutMs: number, errorMessage: string, fn: () => T): T {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      mkdirSync(lockDir);
-      break;
-    } catch {
-      if (Date.now() > deadline) throw new Error(errorMessage);
-      sleepSync(25);
-    }
-  }
-  try {
-    return fn();
-  } finally {
-    try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
-}
+// Locks reuse the cross-process file-lock primitive (utils/file-lock.ts): it
+// writes the holder PID + acquire time and stale-breaks a lock whose holder
+// PID is dead (atomic rename — exactly one waiter wins). This is the recovery
+// the previous mkdir-based `withDirLock` lacked: a daemon killed by OOM/SIGKILL
+// mid-section used to leave a `.index.lock` dir behind that blocked every
+// subsequent caller for the full timeout. Each lock targets a real file path
+// so the `.lock` sibling sits beside it (index.json.lock / board.md.lock /
+// log.jsonl.lock) and is cleaned up in the holder's `finally`.
+const INDEX_LOCK_TIMEOUT_MS = 5_000;
+const BOARD_LOCK_TIMEOUT_MS = 10_000;
+const LOG_LOCK_TIMEOUT_MS = 5_000;
 
 function withIndexLock<T>(fn: () => T): T {
   ensureRoot();
-  return withDirLock(join(whiteboardsRoot(), '.index.lock'), 5_000, 'whiteboard index lock timeout', fn);
+  return withFileLockSync(indexPath(), fn, { maxWaitMs: INDEX_LOCK_TIMEOUT_MS });
 }
 
 function withLogLock<T>(id: string, fn: () => T): T {
   mkdirSync(boardDir(id), { recursive: true });
-  return withDirLock(join(boardDir(id), '.log.lock'), 5_000, 'whiteboard log lock timeout', fn);
+  return withFileLockSync(whiteboardLogPath(id), fn, { maxWaitMs: LOG_LOCK_TIMEOUT_MS });
+}
+
+// Per-board content lock serializes the read-modify-write of board.md so two
+// agents updating the same shared board can't blind-overwrite each other (the
+// board is a single current-state snapshot shared across the whole chat). The
+// log already had a lock; the board content did not — last writer won silently
+// and the loser's update vanished with no error and no history.
+function withBoardLock<T>(id: string, fn: () => T): T {
+  mkdirSync(boardDir(id), { recursive: true });
+  return withFileLockSync(whiteboardBoardPath(id), fn, { maxWaitMs: BOARD_LOCK_TIMEOUT_MS });
 }
 
 function safeId(id: string): string {
@@ -345,7 +350,15 @@ function readLogLines(id: string): string[] {
   } catch {
     return [];
   }
-  const order = (name: string) => name === 'log.jsonl' ? 4 : Number(name.match(/^log\.(\d)\.jsonl$/)?.[1] ?? 0);
+  // Read oldest → newest: log.3 (oldest archive) … log.1 (newest archive) …
+  // log.jsonl (current). The previous order fn mapped log.1→1, log.2→2, log.3→3
+  // which read the *newest* archive first and the *oldest* last — the rotated
+  // history came out in reverse chronological order. Invert the archive index.
+  const order = (name: string) => {
+    if (name === 'log.jsonl') return LOG_ARCHIVE_COUNT + 1;
+    const n = Number(name.match(/^log\.(\d)\.jsonl$/)?.[1] ?? 0);
+    return LOG_ARCHIVE_COUNT - n + 1;
+  };
   return files
     .sort((a, b) => order(a) - order(b))
     .flatMap(file => {
@@ -372,16 +385,30 @@ function rotateWhiteboardLogIfNeeded(id: string, incomingBytes = 0): void {
   renameSync(fp, join(dir, 'log.1.jsonl'));
 }
 
-export function writeWhiteboard(id: string, content: string, opts?: { actor?: string; kind?: string }): WhiteboardMeta {
+export function writeWhiteboard(id: string, content: string, opts?: { actor?: string; kind?: string; expectedUpdatedAt?: string }): WhiteboardMeta {
   if (!whiteboardEnabled()) throw new Error('whiteboard_disabled');
   const clean = safeId(id);
-  if (!getWhiteboard(clean)) throw new Error('whiteboard_not_found');
+  // Reject empty/whitespace-only content at the store boundary so no caller
+  // (CLI flag misuse, future dashboard writes) can silently blank a shared
+  // board. The board is the chat-wide current-state snapshot — wiping it to
+  // "" loses everyone's context with no history trail.
+  if (!content.trim()) throw new Error('whiteboard_empty_content');
   mkdirSync(boardDir(clean), { recursive: true });
-  const tmp = `${whiteboardBoardPath(clean)}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(tmp, content.endsWith('\n') ? content : content + '\n', 'utf-8');
-  renameSync(tmp, whiteboardBoardPath(clean));
-  appendLog(clean, { kind: opts?.kind ?? 'write', actor: opts?.actor, content: `[overwrite ${content.length} chars]` });
-  return touchWhiteboard(clean);
+  return withBoardLock(clean, () => {
+    const existing = getWhiteboard(clean);
+    if (!existing) throw new Error('whiteboard_not_found');
+    // Optional compare-and-set: if the caller read the board at updatedAt X
+    // and it has since changed, refuse the blind overwrite so the caller can
+    // re-read and merge. Wired as a store primitive; CLI opts in later.
+    if (opts?.expectedUpdatedAt && existing.updatedAt !== opts.expectedUpdatedAt) {
+      throw new Error('whiteboard_cas_mismatch');
+    }
+    const tmp = `${whiteboardBoardPath(clean)}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmp, content.endsWith('\n') ? content : content + '\n', 'utf-8');
+    renameSync(tmp, whiteboardBoardPath(clean));
+    appendLog(clean, { kind: opts?.kind ?? 'write', actor: opts?.actor, content: `[overwrite ${content.length} chars]` });
+    return touchWhiteboard(clean);
+  });
 }
 
 export function appendLog(id: string, entry: { kind: string; actor?: string; to?: string; content?: string }): void {
@@ -423,9 +450,16 @@ export function deleteWhiteboard(id: string): { ok: true; id: string; clearedSes
     for (const [key, boardId] of Object.entries(index.bindings)) {
       if (boardId === clean) delete index.bindings[key];
     }
-    rmSync(boardDir(clean), { recursive: true, force: true });
-    const clearedSessions = clearSessionWhiteboardRefs(clean);
+    // Persist the index removal BEFORE touching files on disk. The old order
+    // (rmSync → clearSessionWhiteboardRefs → writeIndex) left a window where a
+    // crash between rmSync and writeIndex kept the on-disk index referencing a
+    // board whose dir was already gone — a "ghost" board that
+    // ensureDefaultWhiteboard would resurrect from the stale binding, pointing
+    // sessions at a missing board.md. Index-first means a crash can at worst
+    // leave an orphaned dir with no index entry (harmless), never a ghost.
     writeIndex(index);
+    const clearedSessions = clearSessionWhiteboardRefs(clean);
+    rmSync(boardDir(clean), { recursive: true, force: true });
     return { ok: true, id: clean, clearedSessions };
   });
 }

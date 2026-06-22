@@ -1109,10 +1109,13 @@ botmux whiteboard list
 当用户/其他 agent 让你“看白板”、或你需要恢复项目状态时：
 
 \`\`\`bash
-botmux whiteboard read --id <whiteboardId>
+botmux whiteboard read --id <whiteboardId>          # 输出 board.md 纯内容
+botmux whiteboard read --id <whiteboardId> --json   # 输出 { id, updatedAt, content }
 \`\`\`
 
 不要假设白板正文已经在上下文里；prompt 只会给 id 和 CLI 命令说明。
+
+\`--json\` 同时返回内容与该版本的 \`updatedAt\`——更新时用它做并发冲突检测（见下）。
 
 ## 写入原则
 
@@ -1128,6 +1131,26 @@ botmux whiteboard read --id <whiteboardId>
 不要写：密钥、token、个人隐私、未授权外部信息、大段无用日志、单轮过程流水。
 
 每次 update 都先 read 旧白板，融合新信息后整体重写为一份完整的当前状态，而不是只追加本轮局部信息——白板永远是「当前快照」，不是累加日志。默认用中文撰写，除非用户明确要求其他语言；代码标识、命令、错误信息可保留原文。
+
+### 并发冲突检测（CAS）
+
+白板是整个群共享的单一快照，多个 agent 可能同时读写。为避免后写静默覆盖先写、丢掉其它 agent 的更新，更新时回传 read 到的版本号做 compare-and-set：
+
+\`\`\`bash
+# 1) 读取当前内容 + 版本号
+botmux whiteboard read --id <whiteboardId> --json
+# → { "id": "wb_...", "updatedAt": "2026-06-22T01:23:45.000Z", "content": "# 当前状态\\n..." }
+
+# 2) 融合后整体重写，用 --expected-updated-at 回传刚才读到的 updatedAt
+botmux whiteboard update --id <whiteboardId> --expected-updated-at 2026-06-22T01:23:45.000Z <<'EOF'
+# 当前状态
+...
+EOF
+\`\`\`
+
+- 若期间没有其它 agent 改过白板，写入成功，返回新的 board（含新 updatedAt）。
+- 若报 \`whiteboard_cas_mismatch\`（exit 2），说明有人改过——重新 \`read --json\` 拿最新内容与 updatedAt，再次融合重写，不要直接覆盖。
+- 不传 \`--expected-updated-at\` 时退化为直接覆盖（向后兼容），但推荐每次 update 都带上以获得冲突保护。
 
 更新当前状态用 update（覆盖 board.md，保持它是最新全局状态）。建议沿用以下固定结构：
 
