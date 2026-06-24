@@ -29,7 +29,7 @@ import { cliAuthBind, loadDashboardSecret, signCliAuth } from '../dashboard/auth
  *    self-heal `.dashboard-port`.
  */
 
-export type DashboardEndpoint = '/__cli/rotate' | '/__cli/current';
+export type DashboardEndpoint = '/__cli/rotate' | '/__cli/current' | '/__cli/reload-binding';
 
 export type DashboardFailReason =
   | 'no-secret'
@@ -125,6 +125,8 @@ export async function requestDashboardAt(opts: {
   if (!res.ok) {
     return { ok: false, reason: 'http-error', detail: `${res.status} ${await res.text().catch(() => '')}` };
   }
+  // reload-binding 不返回 url，200 即成功（仅用于「捅一下 daemon 重连」）
+  if (path === '/__cli/reload-binding') return { ok: true, url: '' };
   const body = await res.json().catch(() => ({})) as { url?: string };
   if (!body.url) return { ok: false, reason: 'http-error', detail: 'malformed response (no url)' };
   return { ok: true, url: body.url };

@@ -990,6 +990,21 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, { url: dashboardUrlFor(activeToken) });
     }
 
+    // CLI 通知绑定变化（HMAC + loopback）——`botmux bind` 写完绑定后捅一下，立即重连平台，
+    // 无需重启 daemon，也不依赖 fs.watch。
+    if (req.method === 'POST' && url.pathname === '/__cli/reload-binding') {
+      const gate = verifyCliRequest(req, url.pathname);
+      if (!gate.ok) return jsonRes(res, gate.status, gate.body);
+      try {
+        platformTunnel?.stop();
+      } catch {
+        /* ignore */
+      }
+      platformTunnel = null;
+      startPlatformTunnelIfBound();
+      return jsonRes(res, 200, { ok: true });
+    }
+
     const presentedToken = authedToken(req, url);
     const dashboardSettings = resolveDashboardSettings();
     const decision = decideDashboardAuth({
@@ -2372,7 +2387,6 @@ listenWithProbe({
   }
   logger.info(`[dashboard] listening on ${config.dashboard.host}:${port}`);
   startPlatformTunnelIfBound();
-  watchPlatformBinding(); // bind 后无需重启 daemon，自动连接平台
 }).catch((err) => {
   logger.error(`[dashboard] could not bind near ${config.dashboard.host}:${config.dashboard.port} after probing — set BOTMUX_DASHBOARD_PORT to a free port. ${(err as Error).message}`);
   process.exit(1);
@@ -2391,8 +2405,6 @@ federationSync.unref();
 
 // 中心化平台隧道（已绑定才启动；每台机器一个，跑在 dashboard 进程里）
 let platformTunnel: { stop(): void } | null = null;
-// 当前隧道对应的绑定身份（platformUrl|machineId|machineToken）；用于判断 bind 变化是否需要重连
-let platformBindingKey: string | null = null;
 function readBotmuxVersion(): string {
   try {
     const pkg = JSON.parse(readFileSync(join(dirname(__dirname), 'package.json'), 'utf8'));
@@ -2431,10 +2443,7 @@ function readPlatformBotsInfo(): PlatformBotInfo[] {
 function startPlatformTunnelIfBound(): void {
   try {
     const binding = readPlatformBinding();
-    if (!binding) {
-      platformBindingKey = null;
-      return;
-    }
+    if (!binding) return;
     const version = readBotmuxVersion();
     platformTunnel = startPlatformTunnelClient({
       binding,
@@ -2444,39 +2453,10 @@ function startPlatformTunnelIfBound(): void {
       getBots: () => readPlatformBotsInfo(),
       log: (msg, extra) => logger.info(`[platform-tunnel] ${msg}${extra ? ' ' + JSON.stringify(extra) : ''}`),
     });
-    platformBindingKey = `${binding.platformUrl}|${binding.machineId}|${binding.machineToken}`;
     logger.info(`[platform-tunnel] 绑定到 ${binding.platformUrl}，启动隧道`);
   } catch (e) {
     logger.warn(`[platform-tunnel] 启动失败: ${(e as Error).message}`);
   }
-}
-
-/**
- * 监听绑定文件变化：`botmux bind` 写入后无需重启 daemon，自动连接平台。
- * 只在绑定「身份」(platformUrl/machineId/machineToken) 变化时重连——团队成员变化也会改写该文件
- * （tunnel-client 自己写的），那种不重连，避免反复重启。
- */
-function watchPlatformBinding(): void {
-  // 每 3s 轮询绑定文件——`botmux bind` 写入后自动连接，无需重启 daemon。
-  // 用轮询而非 fs.watch：绑定走原子写（临时文件 + rename），fs.watch 对 rename 在不同
-  // 文件系统上不可靠（实测某些机器收不到事件），轮询在任何环境都稳。
-  setInterval(() => {
-    try {
-      const b = readPlatformBinding();
-      const key = b ? `${b.platformUrl}|${b.machineId}|${b.machineToken}` : null;
-      if (key === platformBindingKey) return; // 绑定身份没变（团队成员变化不在此 key 内）→ 不重连
-      logger.info('[platform-tunnel] 检测到绑定变化，重连平台');
-      try {
-        platformTunnel?.stop();
-      } catch {
-        /* ignore */
-      }
-      platformTunnel = null;
-      startPlatformTunnelIfBound();
-    } catch {
-      /* ignore */
-    }
-  }, 3000).unref();
 }
 
 // Graceful shutdown
