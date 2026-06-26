@@ -481,7 +481,7 @@ export const messages: Record<string, string> = {
   'help.config_get': '/botconfig get  - 查看本机器人当前运营配置',
   'help.config_set': '/botconfig set <字段> <值>  - 改 model/cli/lang/开关等；/botconfig help 看全部字段',
   'help.skills': '/skills ...    - 查看/管理本 bot 的技能策略（attach/detach 需 owner）',
-  'help.reply_mode': '/reply-mode [status|chat|topic|new-topic] - 查看/切换普通群或私聊的回复/会话模式',
+  'help.reply_mode': '/reply-mode [status|chat|chat-topic|topic|new-topic] - 查看/切换普通群或私聊的回复/会话模式',
   'help.heading_group': '🆕 一键新建会话群：',
   'help.group': '/group <群名>  (别名 /g)  - 自动建群、邀请你进群（整群=一个 CLI 会话）',
   'help.list_slash': '/list-slash-command  (别名 /slash)  - 列出当前可用的 slash 命令（固定放行 / CLI 默认 / 自定义配置 / 自动发现）',

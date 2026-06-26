@@ -478,7 +478,7 @@ export const messages: Record<string, string> = {
   'help.config_get': '/botconfig get  - Show this bot\'s current operational config',
   'help.config_set': '/botconfig set <field> <value>  - Change model/cli/lang/toggles; /botconfig help for all fields',
   'help.skills': '/skills ...    - View/manage this bot\'s skill policy (attach/detach require owner)',
-  'help.reply_mode': '/reply-mode [status|chat|topic|new-topic] - Show/change regular-group or DM reply/session mode',
+  'help.reply_mode': '/reply-mode [status|chat|chat-topic|topic|new-topic] - Show/change regular-group or DM reply/session mode',
   'help.heading_group': '🆕 One-shot session group:',
   'help.group': '/group <name>  (alias /g)  - Auto-create a group and invite you (the whole group = one CLI session)',
   'help.list_slash': '/list-slash-command  (alias /slash)  - List the slash commands available now (fixed allowlist / CLI defaults / custom config / auto-discovered)',
